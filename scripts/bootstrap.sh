@@ -143,12 +143,32 @@ def pw(n=18):
     a = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return "".join(secrets.choice(a) for _ in range(n))
 
+def admin_pw():
+    # The initial admin password must PASS the platform's own password policy
+    # (iam.ValidatePassword): 12+ chars, mixing cases/digits/symbols, and NOT
+    # built on a common word. That last rule is the trap — the blocklist includes
+    # "guardrail", so the obvious "GuardRail-..." prefix is rejected by the very
+    # policy this project ships, and the API fatally refuses to bootstrap the
+    # admin. So: a random 20-char password, no product name, with one guaranteed
+    # character of each class. Symbols are limited to a set that is safe both in a
+    # .env value and under compose interpolation (no $, backtick, quotes).
+    rng = secrets.SystemRandom()
+    lower = "abcdefghijkmnpqrstuvwxyz"   # no 'l' — avoids l/1 confusion when typed
+    upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"   # no 'I' or 'O'
+    digit = "23456789"                   # no 0/1
+    sym   = "-_!.=+"
+    pool  = lower + upper + digit
+    chars = [rng.choice(lower), rng.choice(upper), rng.choice(digit), rng.choice(sym)]
+    chars += [rng.choice(pool) for _ in range(16)]
+    rng.shuffle(chars)
+    return "".join(chars)
+
 vals = {
     "GUARDRAIL_JWT_SIGNING_KEY": s(),
     "GUARDRAIL_MASTER_KEY": s(),
     "POSTGRES_PASSWORD": pw(),
     "GUARDRAIL_DB_APP_PASSWORD": pw(),
-    "GUARDRAIL_ADMIN_PASSWORD": "GuardRail-" + pw(12) + "!",
+    "GUARDRAIL_ADMIN_PASSWORD": admin_pw(),
 }
 src = open(".env").read()
 for k, v in vals.items():
