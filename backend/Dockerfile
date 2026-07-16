@@ -7,17 +7,18 @@
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 
-# Cache dependencies first for faster incremental builds.
-COPY go.mod go.sum* ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
-
+# The build is fully OFFLINE: dependencies are vendored (backend/vendor), and
+# `go build -mod=vendor` uses them instead of fetching from the module proxy. This
+# is not just a speedup — it is what lets the image build behind a TLS-intercepting
+# corporate proxy, where `go mod download` fails with "x509: certificate signed by
+# unknown authority" trying to reach storage.googleapis.com. Refresh the vendor
+# tree with `go mod vendor` (or `make vendor`) whenever go.mod changes.
 COPY . .
 ARG VERSION=dev
 # CGO disabled -> fully static binary; trimpath + ldflags shrink the image and
 # strip local paths. Build the API entrypoint.
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build \
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -mod=vendor \
     -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/guardrail ./cmd/guardrail
 

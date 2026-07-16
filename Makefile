@@ -24,6 +24,11 @@ help: ## Show this help
 tidy: ## Resolve Go module dependencies (writes go.sum)
 	cd $(BACKEND_DIR) && go mod tidy
 
+.PHONY: vendor
+vendor: ## Refresh backend/vendor (committed; lets the image build offline / behind a proxy)
+	cd $(BACKEND_DIR) && go mod tidy && go mod vendor
+	@echo "vendor refreshed — commit backend/vendor along with go.mod/go.sum"
+
 .PHONY: build
 build: ## Build the API binary
 	cd $(BACKEND_DIR) && CGO_ENABLED=0 go build -trimpath \
