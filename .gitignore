@@ -33,7 +33,9 @@ backend/coverage.html
 *.test
 *.out
 *.prof
-vendor/
+# NOTE: backend/vendor/ is deliberately committed (not ignored). It makes the
+# Docker image build fully offline — required behind a TLS-intercepting proxy
+# where `go mod download` fails cert verification. Refresh it with `make vendor`.
 
 # ---- Node / frontend --------------------------------------------------------
 node_modules/
