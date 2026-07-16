@@ -307,6 +307,32 @@ done
 step "Applying database migrations"
 migrate_out=$(docker compose run --rm migrate 2>&1) || {
     printf '%s\n' "$migrate_out" >&2
+    # The most common failure here is not a bad migration — it is a password
+    # mismatch against a data volume from an earlier run. Postgres only applies
+    # POSTGRES_PASSWORD (and creates the app role) when it FIRST initialises its
+    # data directory; after that, changing the password in .env has no effect on
+    # the stored role, so migrate authenticates with the wrong one. Name it, and
+    # give the exact fix, rather than leaving the operator to guess.
+    if printf '%s\n' "$migrate_out" | grep -qi "password authentication failed"; then
+        die "migrations failed: the database rejected the password.
+
+    This almost always means the 'pgdata' volume was created by an earlier run
+    with a different password than the current .env. Postgres sets the password
+    only when it first initialises the volume.
+
+    On a fresh deploy with no data to keep:
+        ${B}docker compose down -v && make install${N}
+      (down -v wipes pgdata — and redis and recordings; do not use it once you
+       have sessions/recordings you care about)
+
+    To keep existing data instead, set the roles to match .env:
+        docker compose up -d postgres
+        docker compose exec postgres psql -U ${POSTGRES_USER:-guardrail} -d postgres \\
+          -c \"ALTER USER ${POSTGRES_USER:-guardrail} PASSWORD '<POSTGRES_PASSWORD from .env>';\"
+        docker compose exec postgres psql -U ${POSTGRES_USER:-guardrail} -d postgres \\
+          -c \"ALTER USER guardrail_app PASSWORD '<GUARDRAIL_DB_APP_PASSWORD from .env>';\"
+        make install"
+    fi
     die "migrations failed. If it says 'Dirty database', a previous run died half-way:
     inspect it, fix the schema, then clear the flag before retrying."
 }
