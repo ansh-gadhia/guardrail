@@ -1,0 +1,5 @@
+BEGIN;
+
+ALTER TABLE devices DROP COLUMN IF EXISTS allow_unmanaged;
+
+COMMIT;

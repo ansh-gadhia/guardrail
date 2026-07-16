@@ -1,0 +1,12 @@
+# Offline image: ships a binary pre-built on the host (used when the build
+# environment has no network to run `go mod download`). Functionally identical
+# runtime to the multi-stage Dockerfile — distroless nonroot, static binary.
+# Build the binary first:
+#   CGO_ENABLED=0 GOOS=linux go build -trimpath \
+#     -ldflags "-s -w -X main.version=$(cat ../VERSION)" -o guardrail-static ./cmd/guardrail
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+WORKDIR /
+COPY guardrail-static /guardrail
+USER nonroot:nonroot
+EXPOSE 8080 9090
+ENTRYPOINT ["/guardrail"]

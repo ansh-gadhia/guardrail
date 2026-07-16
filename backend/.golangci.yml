@@ -1,0 +1,57 @@
+# golangci-lint configuration. The depguard rules encode the Clean Architecture
+# import boundaries so violations fail CI rather than being caught in review.
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - gosec
+    - revive
+    - bodyclose
+    - noctx
+    - depguard
+    - misspell
+    - gocritic
+
+linters-settings:
+  depguard:
+    rules:
+      domain:
+        # domain must not import delivery, infra, or heavy frameworks.
+        files:
+          - "**/internal/domain/**"
+        deny:
+          - pkg: "github.com/gin-gonic/gin"
+            desc: "domain must not depend on the HTTP framework"
+          - pkg: "github.com/jackc/pgx/v5"
+            desc: "domain must not depend on the database driver"
+          - pkg: "github.com/guardrail/guardrail/internal/infra"
+            desc: "domain must not depend on infrastructure"
+          - pkg: "github.com/guardrail/guardrail/internal/api"
+            desc: "domain must not depend on the delivery layer"
+      app:
+        # application layer may import domain, not delivery/infra concretions.
+        files:
+          - "**/internal/app/**"
+        deny:
+          - pkg: "github.com/gin-gonic/gin"
+            desc: "use cases must not depend on the HTTP framework"
+          - pkg: "github.com/guardrail/guardrail/internal/api"
+            desc: "use cases must not depend on the delivery layer"
+
+  gosec:
+    excludes:
+      - G104  # handled by errcheck
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - bodyclose

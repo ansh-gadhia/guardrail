@@ -1,0 +1,225 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens — the single source of truth for colour. Components consume the
+ * semantic tokens only (see tailwind.config.js). Light is the `:root` default and
+ * dark is applied by adding `.dark` to <html> (see store/theme.ts). Both themes
+ * are WCAG-AA verified for text/background pairs.
+ */
+@layer base {
+  :root {
+    color-scheme: light;
+    /* Light theme */
+    --bg: 247 248 250;
+    --surface: 255 255 255;
+    --surface-2: 247 248 250;
+    --surface-3: 240 242 246;
+    --line: 226 230 236;
+    --line-strong: 203 210 220;
+    --fg: 17 24 39;
+    --muted: 82 91 108;
+    --faint: 110 118 135;
+    --accent: 15 118 110; /* teal-700 — AA on light bg */
+    --accent-fg: 255 255 255;
+    --accent-soft: 219 244 240; /* pale teal wash */
+    --success: 4 120 87;
+    --warn: 180 83 9;
+    --danger: 220 38 38;
+    --info: 37 99 235;
+    /* Accent gradient (icon tiles, brand marks) — tokenised, not hardcoded. */
+    --grad-from: 20 184 166; /* teal-500 */
+    --grad-to: 6 182 212; /* cyan-500 */
+    --shadow-color: 15 23 42;
+    --shadow-strength: 0.08;
+    --aura-1: var(--accent);
+    --aura-2: var(--info);
+  }
+
+  :root.dark {
+    color-scheme: dark;
+    /* Dark theme (primary) */
+    --bg: 9 11 18;
+    --surface: 18 22 33;
+    --surface-2: 24 29 43;
+    --surface-3: 31 38 55;
+    --line: 39 46 64;
+    --line-strong: 55 64 87;
+    --fg: 226 231 242;
+    --muted: 150 159 178;
+    --faint: 128 137 158;
+    --accent: 45 212 191; /* teal-400 — luminous on dark bg */
+    --accent-fg: 10 12 22;
+    --accent-soft: 19 78 74; /* deep teal tile */
+    --success: 52 211 153;
+    --warn: 251 191 36;
+    --danger: 248 113 113;
+    --info: 96 165 250;
+    --grad-from: 20 184 166; /* teal-500 */
+    --grad-to: 6 182 212; /* cyan-500 */
+    --shadow-color: 0 0 0;
+    --shadow-strength: 0.4;
+  }
+
+  body {
+    @apply bg-bg text-fg antialiased;
+    font-family: theme("fontFamily.sans");
+    font-feature-settings: "cv11", "ss03"; /* single-story a, tuned Inter glyphs */
+    font-optical-sizing: auto;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Display face for titles; tighten optically. */
+  .font-display {
+    font-feature-settings: "ss01";
+  }
+
+  /* Machine data (IPs, IDs, keys, hashes) renders literally — no ligatures, and
+     tabular figures so columns of numbers line up. */
+  .font-mono {
+    font-variant-ligatures: none;
+    font-feature-settings: "tnum", "calt" 0;
+  }
+
+  * {
+    scrollbar-color: rgb(var(--line-strong)) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--line-strong));
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+
+  /* Consistent keyboard focus ring across interactive elements. */
+  :focus-visible {
+    outline: 2px solid rgb(var(--accent) / 0.6);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Buttons ---------------------------------------------------------------- */
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-all duration-150 focus:outline-none focus-visible:shadow-focus disabled:pointer-events-none disabled:opacity-50 active:translate-y-px;
+  }
+  .btn-sm {
+    @apply gap-1.5 rounded-md px-2.5 py-1.5 text-xs;
+  }
+  .btn-primary {
+    @apply btn text-accent-fg shadow-sm;
+    background-image: linear-gradient(180deg, rgb(var(--accent)) 0%, rgb(var(--accent) / 0.85) 100%);
+  }
+  .btn-primary:hover {
+    filter: brightness(1.08);
+  }
+  .btn-ghost {
+    @apply btn border border-line bg-surface-2 text-fg hover:border-line-strong hover:bg-surface-3;
+  }
+  .btn-subtle {
+    @apply btn text-muted hover:bg-surface-2 hover:text-fg;
+  }
+  .btn-danger {
+    @apply btn border border-danger/25 bg-danger/15 text-danger hover:bg-danger/25;
+  }
+
+  /* Surfaces --------------------------------------------------------------- */
+  .card {
+    @apply rounded-xl border border-line bg-surface shadow-sm;
+  }
+  .card-grad {
+    @apply border border-line;
+    background-image: linear-gradient(180deg, rgb(var(--surface-2) / 0.6) 0%, rgb(var(--surface)) 100%);
+  }
+
+  /* Forms ------------------------------------------------------------------ */
+  .input {
+    @apply w-full rounded-lg border border-line bg-surface-2/60 px-3 py-2 text-sm text-fg placeholder-faint transition focus:border-accent/50 focus:bg-surface focus:outline-none focus:shadow-focus;
+  }
+  .input-invalid {
+    @apply border-danger/60 focus:border-danger/60;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-muted;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-2xs font-medium;
+  }
+
+  /* Legacy table cells (kept for any dense list) --------------------------- */
+  .th {
+    @apply px-4 py-2.5 text-left text-2xs font-semibold uppercase tracking-wider text-faint;
+  }
+  .td {
+    @apply px-4 py-3 text-sm text-fg;
+  }
+
+  .nav-active-bar::before {
+    content: "";
+    @apply absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-accent;
+    box-shadow: 0 0 12px rgb(var(--accent) / 0.7);
+  }
+
+  .skeleton {
+    @apply relative overflow-hidden bg-surface-2;
+  }
+  .skeleton::after {
+    content: "";
+    @apply absolute inset-0;
+    transform: translateX(-100%);
+    background-image: linear-gradient(90deg, transparent, rgb(var(--line-strong) / 0.35), transparent);
+    animation: shimmer 1.5s infinite;
+  }
+  @keyframes shimmer {
+    100% {
+      transform: translateX(100%);
+    }
+  }
+}
+
+@layer utilities {
+  /* Tokenised accent gradient (brand mark + icon tiles). */
+  .accent-grad {
+    background-image: linear-gradient(135deg, rgb(var(--grad-from)) 0%, rgb(var(--grad-to)) 100%);
+  }
+  .app-aura {
+    background:
+      radial-gradient(60rem 60rem at 12% -10%, rgb(var(--aura-1, var(--accent)) / 0.10), transparent 60%),
+      radial-gradient(50rem 50rem at 108% 8%, rgb(var(--aura-2, var(--info)) / 0.07), transparent 55%);
+  }
+  .app-grid {
+    background-image:
+      linear-gradient(to right, rgb(var(--line) / 0.5) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(var(--line) / 0.5) 1px, transparent 1px);
+    background-size: 40px 40px;
+    mask-image: radial-gradient(70% 60% at 50% 0%, black, transparent 90%);
+  }
+  .page-enter {
+    animation: fadein 0.3s ease both;
+  }
+  @keyframes drawer-in {
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+  .animate-drawer-in {
+    animation: drawer-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.001ms !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}

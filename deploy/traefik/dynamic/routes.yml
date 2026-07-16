@@ -1,0 +1,47 @@
+# Traefik dynamic config: how requests reach the API and the console.
+#
+# These routes are declared statically instead of discovered from container
+# labels, for two reasons:
+#
+#  1. Security. The Docker provider needs /var/run/docker.sock mounted into
+#     Traefik, and access to that socket is equivalent to root on the host. An
+#     edge proxy is the most exposed thing in the stack and the last place to put
+#     it. The topology here is two fixed services, so discovery buys nothing.
+#  2. It works. Traefik's Docker client pins API version 1.24, which Docker
+#     Engine 25+ rejects outright — the provider then finds no containers and
+#     every request 404s.
+#
+# Hostnames are Docker Compose service names, resolved on the internal network.
+# The ports are the containers' own, not anything published on the host.
+http:
+  routers:
+    # The API owns /api and /proxy (brokered device sessions), plus the health
+    # probes, which must answer from the API rather than the static console.
+    api:
+      rule: "PathPrefix(`/api`) || PathPrefix(`/proxy`) || Path(`/healthz`) || Path(`/readyz`)"
+      priority: 10
+      entryPoints: [websecure]
+      service: api
+      tls: {}
+
+    # Everything else is the console. Lowest priority: it is the fallback.
+    web:
+      rule: "PathPrefix(`/`)"
+      priority: 1
+      entryPoints: [websecure]
+      service: web
+      tls: {}
+
+  services:
+    api:
+      loadBalancer:
+        servers:
+          - url: "http://api:8080"
+        # Brokered sessions stream (screencast frames, long-lived responses), so
+        # Traefik must not buffer or cut them short.
+        passHostHeader: true
+    web:
+      loadBalancer:
+        servers:
+          - url: "http://web:80"
+        passHostHeader: true

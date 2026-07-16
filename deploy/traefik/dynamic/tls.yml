@@ -1,0 +1,22 @@
+# Traefik dynamic config: the TLS material for the console.
+#
+# These paths are optional. If deploy/tls/cert.pem is absent, Traefik falls back
+# to its own generated self-signed certificate, so HTTPS still comes up on a
+# fresh server — the browser just warns until a real certificate is dropped in.
+#
+# To use your own certificate, overwrite deploy/tls/cert.pem and key.pem and
+# restart traefik. To regenerate the bundled self-signed one for a new address:
+#
+#   openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+#     -subj "/CN=GuardRail/O=GuardRail" \
+#     -addext "subjectAltName=IP:<server-lan-ip>,IP:127.0.0.1,DNS:localhost" \
+#     -keyout deploy/tls/key.pem -out deploy/tls/cert.pem
+#
+# The SAN must list the address operators actually type, or the browser rejects
+# the certificate no matter how it was signed.
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/traefik/certs/cert.pem
+        keyFile: /etc/traefik/certs/key.pem
