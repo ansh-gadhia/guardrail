@@ -1,0 +1,660 @@
+openapi: 3.0.3
+info:
+  title: GuardRail API
+  description: >-
+    GuardRail — Privileged Access Management for browser-based access to web
+    management interfaces. All endpoints are under `/api/v1`. Errors use RFC 9457
+    `application/problem+json`. Authentication is a Bearer access token (JWT);
+    the refresh token is delivered as an HttpOnly cookie.
+  version: 1.0.0
+  license:
+    name: Proprietary
+servers:
+  - url: /api/v1
+tags:
+  - name: Auth
+  - name: MFA
+  - name: Federation
+  - name: Users & Orgs
+  - name: Devices
+  - name: Vault
+  - name: Access
+  - name: Approvals
+  - name: Analytics
+  - name: Notifications
+  - name: Ops
+
+security:
+  - bearerAuth: []
+
+paths:
+  /version:
+    get:
+      tags: [Ops]
+      summary: Build version
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string, example: GuardRail }
+                  version: { type: string, example: 1.0.0 }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate with email + password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+                organization: { type: string, description: optional org slug to disambiguate }
+      responses:
+        "200":
+          description: Tokens, or an MFA challenge when a second factor is enrolled.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/TokenResponse"
+                  - $ref: "#/components/schemas/MFAChallenge"
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+
+  /auth/mfa/verify:
+    post:
+      tags: [Auth, MFA]
+      summary: Complete an MFA challenge (TOTP or recovery code)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfa_token, code]
+              properties:
+                mfa_token: { type: string }
+                code: { type: string }
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401": { $ref: "#/components/responses/Problem" }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate the refresh token (from HttpOnly cookie)
+      security: []
+      responses:
+        "200":
+          description: New access token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401": { $ref: "#/components/responses/Problem" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current refresh-token family
+      security: []
+      responses:
+        "204": { description: No Content }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current principal
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Principal" }
+
+  /auth/providers:
+    get:
+      tags: [Federation]
+      summary: Enabled login methods
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  local: { type: boolean }
+                  ldap: { type: boolean }
+                  oidc: { type: boolean }
+
+  /auth/ldap/login:
+    post:
+      tags: [Federation]
+      summary: Directory (LDAP/AD) bind login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+
+  /auth/oidc/start:
+    get:
+      tags: [Federation]
+      summary: Begin OIDC (Authorization Code + PKCE) — redirects to the IdP
+      security: []
+      responses:
+        "302": { description: Redirect to the identity provider }
+        "404": { $ref: "#/components/responses/Problem" }
+
+  /auth/oidc/callback:
+    get:
+      tags: [Federation]
+      summary: OIDC redirect callback — exchanges the code and issues tokens
+      security: []
+      parameters:
+        - { in: query, name: code, schema: { type: string } }
+        - { in: query, name: state, schema: { type: string } }
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+
+  /mfa:
+    get:
+      tags: [MFA]
+      summary: MFA status for the caller
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean }
+                  confirmed: { type: boolean }
+                  recovery_codes_left: { type: integer }
+    delete:
+      tags: [MFA]
+      summary: Disable the second factor
+      responses:
+        "204": { description: No Content }
+  /mfa/totp/enroll:
+    post:
+      tags: [MFA]
+      summary: Begin TOTP enrollment
+      responses:
+        "200":
+          description: Secret + provisioning URI (shown once)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string }
+                  provisioning_uri: { type: string }
+  /mfa/totp/confirm:
+    post:
+      tags: [MFA]
+      summary: Confirm TOTP enrollment and receive recovery codes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [code], properties: { code: { type: string } } }
+      responses:
+        "200":
+          description: Recovery codes (shown once)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recovery_codes: { type: array, items: { type: string } }
+  /mfa/recovery-codes:
+    post:
+      tags: [MFA]
+      summary: Regenerate recovery codes
+      responses:
+        "200":
+          description: New recovery codes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recovery_codes: { type: array, items: { type: string } }
+
+  /devices:
+    get:
+      tags: [Devices]
+      summary: List devices
+      parameters:
+        - { in: query, name: vendor, schema: { type: string } }
+        - { in: query, name: tag, schema: { type: string } }
+        - { in: query, name: q, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Device" } }
+    post:
+      tags: [Devices]
+      summary: Register a device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+  /devices/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Devices]
+      summary: Get a device
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "404": { $ref: "#/components/responses/Problem" }
+    patch:
+      tags: [Devices]
+      summary: Update a device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceInput" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+    delete:
+      tags: [Devices]
+      summary: Soft-delete a device
+      responses:
+        "204": { description: No Content }
+  /devices/{id}/connect:
+    post:
+      tags: [Access]
+      summary: Start (or request) a brokered session to a device
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Session established (proxy ready)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectResult" }
+        "202":
+          description: Approval required — a request was created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: pending_approval }
+                  session_id: { type: string, format: uuid }
+
+  /sessions:
+    get:
+      tags: [Access]
+      summary: List sessions
+      parameters:
+        - { in: query, name: status, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Session" } }
+  /sessions/active:
+    get:
+      tags: [Access]
+      summary: List active sessions
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Session" } }
+  /sessions/{id}/start:
+    post:
+      tags: [Access]
+      summary: Establish the proxy for an approved session
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectResult" }
+  /sessions/{id}/terminate:
+    post:
+      tags: [Access]
+      summary: Force-terminate a session
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: No Content }
+
+  /approvals:
+    get:
+      tags: [Approvals]
+      summary: List approval requests
+      parameters:
+        - { in: query, name: status, schema: { type: string, enum: [pending, approved, denied, expired] } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Approval" } }
+  /approvals/{id}/approve:
+    post:
+      tags: [Approvals]
+      summary: Approve a request
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Approved }
+  /approvals/{id}/deny:
+    post:
+      tags: [Approvals]
+      summary: Deny a request
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Denied }
+
+  /credentials:
+    post:
+      tags: [Vault]
+      summary: Create a credential (secret is write-only, never returned)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, type, secret]
+              properties:
+                name: { type: string }
+                type: { type: string, enum: [password, api_key, token] }
+                username: { type: string }
+                injection: { type: string, enum: [form, basic, header, none] }
+                secret: { type: string, writeOnly: true }
+      responses:
+        "201": { description: Created }
+
+  /dashboard/summary:
+    get:
+      tags: [Analytics]
+      summary: Dashboard aggregates
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardSummary" }
+  /search:
+    get:
+      tags: [Analytics]
+      summary: Global search across users, devices, sessions
+      parameters:
+        - { in: query, name: q, required: true, schema: { type: string, minLength: 2 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResults" }
+  /audit:
+    get:
+      tags: [Analytics]
+      summary: Query the audit log (requires log:read)
+      parameters:
+        - { in: query, name: action, schema: { type: string } }
+        - { in: query, name: actor, schema: { type: string } }
+        - { in: query, name: result, schema: { type: string, enum: [success, failure, denied] } }
+        - { in: query, name: from, schema: { type: string, format: date-time } }
+        - { in: query, name: to, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/AuditRow" } }
+  /reports:
+    post:
+      tags: [Analytics]
+      summary: Generate a CSV report (requires report:read)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, enum: [audit, access] }
+                format: { type: string, enum: [csv], default: csv }
+                from: { type: string }
+                to: { type: string }
+      responses:
+        "200":
+          description: CSV attachment
+          content:
+            text/csv: { schema: { type: string, format: binary } }
+
+  /notification-channels:
+    get:
+      tags: [Notifications]
+      summary: List notification channels
+      responses:
+        "200": { description: OK }
+    post:
+      tags: [Notifications]
+      summary: Create a notification channel (webhook/slack/email)
+      responses:
+        "201": { description: Created }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    Problem:
+      description: RFC 9457 problem detail
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+  schemas:
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+    Principal:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        email: { type: string }
+        username: { type: string }
+        is_super_admin: { type: boolean }
+        roles: { type: array, items: { type: string } }
+        permissions: { type: array, items: { type: string } }
+    TokenResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_at: { type: string, format: date-time }
+        principal: { $ref: "#/components/schemas/Principal" }
+    MFAChallenge:
+      type: object
+      properties:
+        mfa_required: { type: boolean, example: true }
+        mfa_token: { type: string }
+    DeviceInput:
+      type: object
+      required: [name, host]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        vendor: { type: string }
+        device_type: { type: string }
+        host: { type: string }
+        port: { type: integer }
+        scheme: { type: string, enum: [http, https] }
+        verify_tls: { type: boolean }
+        custom_headers: { type: object, additionalProperties: { type: string } }
+        tags: { type: array, items: { type: string } }
+        requires_approval: { type: boolean }
+    Device:
+      allOf:
+        - $ref: "#/components/schemas/DeviceInput"
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string }
+            url: { type: string }
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        protocol: { type: string }
+        status: { type: string, enum: [pending, approved, active, ended, denied, expired] }
+        created_at: { type: string, format: date-time }
+        granted_until: { type: string, format: date-time }
+    ConnectResult:
+      type: object
+      properties:
+        session_id: { type: string, format: uuid }
+        status: { type: string }
+        proxy_url: { type: string }
+        granted_until: { type: string, format: date-time }
+    Approval:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        requested_by: { type: string, format: uuid }
+        status: { type: string }
+        mode: { type: string, enum: [one_time, window] }
+        valid_minutes: { type: integer }
+        reason: { type: string }
+        expires_at: { type: string, format: date-time }
+    DashboardSummary:
+      type: object
+      properties:
+        devices: { type: integer }
+        active_sessions: { type: integer }
+        users: { type: integer }
+        failed_logins_24h: { type: integer }
+        top_devices:
+          type: array
+          items:
+            type: object
+            properties:
+              device_id: { type: string }
+              name: { type: string }
+              sessions: { type: integer }
+        recent_activity:
+          type: array
+          items:
+            type: object
+            properties:
+              ts: { type: string, format: date-time }
+              actor: { type: string }
+              action: { type: string }
+              result: { type: string }
+    AuditRow:
+      type: object
+      properties:
+        ts: { type: string, format: date-time }
+        actor: { type: string }
+        action: { type: string }
+        category: { type: string }
+        target_type: { type: string }
+        target_id: { type: string }
+        ip: { type: string }
+        result: { type: string }
+    SearchResults:
+      type: object
+      properties:
+        users: { type: array, items: { $ref: "#/components/schemas/Hit" } }
+        devices: { type: array, items: { $ref: "#/components/schemas/Hit" } }
+        sessions: { type: array, items: { $ref: "#/components/schemas/Hit" } }
+    Hit:
+      type: object
+      properties:
+        id: { type: string }
+        label: { type: string }

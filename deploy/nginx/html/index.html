@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GuardRail — Privileged Access Management</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background:#0f172a; color:#e2e8f0; }
+  a { color:#818cf8; }
+  .brand { display:flex; align-items:center; gap:.6rem; }
+  .logo { width:32px; height:32px; border-radius:8px; background:#4f46e5; color:#fff; font-weight:700;
+          display:grid; place-items:center; }
+  .btn { border:0; border-radius:6px; padding:.5rem .8rem; font-size:.85rem; font-weight:600; cursor:pointer;
+         display:inline-flex; align-items:center; gap:.4rem; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  .btn-primary { background:#4f46e5; color:#fff; } .btn-primary:hover:not(:disabled){ background:#4338ca; }
+  .btn-ghost { background:#1e293b; color:#e2e8f0; } .btn-ghost:hover{ background:#334155; }
+  .btn-danger { background:#dc2626; color:#fff; } .btn-danger:hover:not(:disabled){ background:#b91c1c; }
+  input, select { width:100%; background:#0b1220; border:1px solid #334155; border-radius:6px;
+                  padding:.5rem .6rem; color:#e2e8f0; font-size:.9rem; }
+  input:focus, select:focus { outline:none; border-color:#6366f1; }
+  label { display:block; font-size:.8rem; color:#cbd5e1; margin:.4rem 0 .2rem; }
+  .card { background:#111a2e; border:1px solid #1e293b; border-radius:12px; padding:1.25rem; }
+  .badge { display:inline-block; border-radius:999px; padding:.1rem .5rem; font-size:.72rem; font-weight:600; }
+  .b-green{background:rgba(16,185,129,.15);color:#6ee7b7} .b-amber{background:rgba(245,158,11,.15);color:#fcd34d}
+  .b-red{background:rgba(239,68,68,.15);color:#fca5a5} .b-slate{background:rgba(100,116,139,.25);color:#cbd5e1}
+  table { width:100%; border-collapse:collapse; } th,td{ text-align:left; padding:.55rem .75rem; font-size:.85rem; }
+  th { color:#94a3b8; font-size:.72rem; text-transform:uppercase; letter-spacing:.04em; }
+  tbody tr { border-top:1px solid #1e293b; }
+  .muted { color:#64748b; font-size:.8rem; }
+  .grid { display:grid; gap:1rem; }
+  .err { background:rgba(239,68,68,.12); border:1px solid rgba(239,68,68,.35); color:#fca5a5;
+         padding:.6rem .8rem; border-radius:8px; font-size:.85rem; }
+  .ok { background:rgba(16,185,129,.12); border:1px solid rgba(16,185,129,.35); color:#6ee7b7;
+        padding:.6rem .8rem; border-radius:8px; font-size:.85rem; }
+  /* layout */
+  #login { min-height:100vh; display:grid; place-items:center; padding:1rem; }
+  #app { display:none; grid-template-columns:230px 1fr; min-height:100vh; }
+  aside { background:#0b1220; border-right:1px solid #1e293b; display:flex; flex-direction:column; }
+  nav a { display:flex; gap:.6rem; padding:.55rem .8rem; margin:.1rem .5rem; border-radius:8px;
+          color:#cbd5e1; text-decoration:none; font-size:.9rem; font-weight:500; cursor:pointer; }
+  nav a.active { background:rgba(79,70,229,.2); color:#c7d2fe; } nav a:hover{ background:#111a2e; }
+  header { display:flex; justify-content:space-between; align-items:center; padding:.8rem 1.5rem;
+           border-bottom:1px solid #1e293b; }
+  main { padding:1.5rem; overflow:auto; }
+  h1 { font-size:1.4rem; margin:0 0 .2rem; } h2{ font-size:.95rem; margin:0 0 .8rem; color:#cbd5e1; }
+  .foot { margin-top:auto; padding:.9rem 1.2rem; border-top:1px solid #1e293b; font-size:.72rem; color:#64748b;
+          display:flex; justify-content:space-between; }
+  .foot code { background:#1e293b; padding:.1rem .35rem; border-radius:4px; color:#94a3b8; }
+  .stat { font-size:2rem; font-weight:700; margin-top:.3rem; }
+</style>
+</head>
+<body>
+<!-- LOGIN -->
+<div id="login">
+  <div style="width:340px">
+    <div class="brand" style="justify-content:center;margin-bottom:1.5rem">
+      <div class="logo">G</div>
+      <div><div style="font-size:1.2rem;font-weight:600">GuardRail</div>
+      <div class="muted">Privileged Access Management</div></div>
+    </div>
+    <div class="card">
+      <div id="loginErr"></div>
+      <div id="pwForm">
+        <label>Email</label><input id="email" type="email" autocomplete="username" value="admin@guardrail.local">
+        <label>Password</label><input id="password" type="password" autocomplete="current-password">
+        <div style="height:.8rem"></div>
+        <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Sign in</button>
+        <div id="ssoWrap"></div>
+      </div>
+      <div id="mfaForm" style="display:none">
+        <p class="muted">Enter the 6-digit code from your authenticator, or a recovery code.</p>
+        <input id="mfaCode" placeholder="123456" style="text-align:center;letter-spacing:.3em;font-size:1.1rem">
+        <div style="height:.8rem"></div>
+        <button class="btn btn-primary" style="width:100%" onclick="doMFA()">Verify</button>
+        <div style="height:.5rem"></div>
+        <button class="btn btn-ghost" style="width:100%" onclick="backToPw()">Back</button>
+      </div>
+    </div>
+    <div class="muted" style="text-align:center;margin-top:1rem">GuardRail <span id="loginVer">…</span></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app">
+  <aside>
+    <div style="padding:1.1rem 1.2rem"><div class="brand"><div class="logo">G</div>
+      <span style="font-weight:600;font-size:1.05rem">GuardRail</span></div></div>
+    <nav id="nav"></nav>
+    <div class="foot"><span>GuardRail</span><code id="ver">v…</code></div>
+  </aside>
+  <div style="display:flex;flex-direction:column;min-width:0">
+    <header>
+      <input id="search" placeholder="Search users, devices, sessions…" style="max-width:340px"
+             oninput="doSearch(this.value)">
+      <div style="display:flex;align-items:center;gap:.8rem">
+        <div style="text-align:right"><div id="who" style="font-size:.85rem;font-weight:600"></div>
+        <div class="muted" id="whoRoles"></div></div>
+        <button class="btn btn-ghost" onclick="logout()">Sign out</button>
+      </div>
+    </header>
+    <main id="view"></main>
+  </div>
+</div>
+
+<script>
+const API = "/api/v1";
+let TOKEN = null, PRINCIPAL = null, MFATOKEN = null, searchBox = null;
+
+async function api(path, opts={}) {
+  const h = Object.assign({ "Content-Type":"application/json" }, opts.headers||{});
+  if (TOKEN) h["Authorization"] = "Bearer " + TOKEN;
+  const r = await fetch(API + path, Object.assign({ credentials:"include" }, opts, { headers:h }));
+  if (r.status === 204) return null;
+  const ct = r.headers.get("content-type")||"";
+  const body = ct.includes("json") ? await r.json() : await r.text();
+  if (!r.ok) throw new Error((body && body.detail) || (body && body.title) || ("HTTP "+r.status));
+  return body;
+}
+function has(p){ return PRINCIPAL && (PRINCIPAL.is_super_admin || (PRINCIPAL.permissions||[]).includes(p)); }
+function badge(s){ const m={active:"b-green",approved:"b-green",success:"b-green",pending:"b-amber",
+  ended:"b-slate",expired:"b-slate",disabled:"b-slate",denied:"b-red",failure:"b-red"};
+  return `<span class="badge ${m[(s||"").toLowerCase()]||"b-slate"}">${s}</span>`; }
+function esc(s){ return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+// ---- Auth ----
+async function loadVersion(){ try{ const v=await api("/version");
+  document.getElementById("loginVer").textContent="v"+v.version;
+  document.getElementById("ver").textContent="v"+v.version; }catch(e){} }
+async function loadProviders(){ try{ const p=await api("/auth/providers");
+  if(p.oidc) document.getElementById("ssoWrap").innerHTML =
+    '<div style="height:.5rem"></div><a class="btn btn-ghost" style="width:100%;justify-content:center;text-decoration:none" href="/api/v1/auth/oidc/start">Continue with SSO</a>'; }catch(e){} }
+function loginErr(m){ document.getElementById("loginErr").innerHTML = m?`<div class="err">${esc(m)}</div><div style="height:.6rem"></div>`:""; }
+
+async function doLogin(){
+  loginErr("");
+  try {
+    const d = await api("/auth/login", { method:"POST", body: JSON.stringify({
+      email: val("email"), password: val("password") }) });
+    if (d.mfa_required){ MFATOKEN = d.mfa_token; show("mfaForm"); document.getElementById("mfaCode").focus(); return; }
+    onAuthed(d);
+  } catch(e){ loginErr(e.message); }
+}
+async function doMFA(){
+  loginErr("");
+  try { const d = await api("/auth/mfa/verify", { method:"POST",
+    body: JSON.stringify({ mfa_token: MFATOKEN, code: val("mfaCode").trim() }) }); onAuthed(d); }
+  catch(e){ loginErr(e.message); }
+}
+function backToPw(){ MFATOKEN=null; show("pwForm"); loginErr(""); }
+function show(id){ document.getElementById("pwForm").style.display = id==="pwForm"?"block":"none";
+  document.getElementById("mfaForm").style.display = id==="mfaForm"?"block":"none"; }
+
+function onAuthed(d){ TOKEN=d.access_token; PRINCIPAL=d.principal; renderApp(); }
+async function boot(){ try{ const d=await api("/auth/refresh",{method:"POST"}); onAuthed(d); }catch(e){} }
+async function logout(){ try{ await api("/auth/logout",{method:"POST"}); }catch(e){}
+  TOKEN=null; PRINCIPAL=null; document.getElementById("app").style.display="none";
+  document.getElementById("login").style.display="grid"; show("pwForm"); }
+
+function val(id){ return document.getElementById(id).value; }
+
+// ---- App shell ----
+const PAGES = [
+  { id:"dashboard",   label:"Dashboard",   fn:pageDashboard },
+  { id:"devices",     label:"Devices",     fn:pageDevices },
+  { id:"credentials", label:"Credentials", fn:pageCredentials, perm:"credential:read" },
+  { id:"sessions",    label:"Sessions",    fn:pageSessions },
+  { id:"approvals",   label:"Approvals",   fn:pageApprovals },
+  { id:"audit",       label:"Audit Log",   fn:pageAudit },
+  { id:"access",      label:"Access Mgmt", fn:pageAccess, perm:"user:read" },
+  { id:"security",    label:"Security",    fn:pageSecurity },
+];
+function visiblePages(){ return PAGES.filter(p=>!p.perm || has(p.perm)); }
+let CURRENT = "dashboard";
+function renderApp(){
+  document.getElementById("login").style.display="none";
+  document.getElementById("app").style.display="grid";
+  document.getElementById("who").textContent = PRINCIPAL.email;
+  document.getElementById("whoRoles").textContent = PRINCIPAL.is_super_admin ? "Super Admin" : (PRINCIPAL.roles||[]).join(", ")||"No roles";
+  document.getElementById("nav").innerHTML = visiblePages().map(p=>
+    `<a data-id="${p.id}" class="${p.id===CURRENT?'active':''}" onclick="go('${p.id}')">${p.label}</a>`).join("");
+  if(!visiblePages().find(p=>p.id===CURRENT)) CURRENT="dashboard";
+  go(CURRENT);
+}
+function go(id){ CURRENT=id; document.querySelectorAll("#nav a").forEach(a=>a.classList.toggle("active",a.getAttribute("data-id")===id));
+  const p = PAGES.find(p=>p.id===id); const v=document.getElementById("view"); v.innerHTML="<p class='muted'>Loading…</p>"; p.fn(v); }
+
+function head(title, sub, actions){ return `<div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:1.2rem">
+  <div><h1>${title}</h1>${sub?`<div class="muted">${sub}</div>`:""}</div><div>${actions||""}</div></div>`; }
+
+// ---- Dashboard ----
+async function pageDashboard(v){
+  try{ const d=await api("/dashboard/summary");
+    v.innerHTML = head("Dashboard","Access posture at a glance") +
+    `<div class="grid" style="grid-template-columns:repeat(4,1fr)">
+      ${stat("Devices",d.devices)}${stat("Active sessions",d.active_sessions)}
+      ${stat("Users",d.users)}${stat("Failed logins (24h)",d.failed_logins_24h)}</div>
+     <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:1rem">
+      <div class="card"><h2>Top devices by sessions</h2>${
+        (d.top_devices||[]).length? d.top_devices.map(x=>`<div style="display:flex;justify-content:space-between;padding:.25rem 0"><span>${esc(x.name)}</span><span class="badge b-slate">${x.sessions}</span></div>`).join("") : '<p class="muted">No sessions yet</p>'}</div>
+      <div class="card"><h2>Recent activity</h2>${
+        (d.recent_activity||[]).map(a=>`<div style="display:flex;justify-content:space-between;padding:.25rem 0;font-size:.85rem"><span><code style="color:#94a3b8">${esc(a.action)}</code> · ${esc(a.actor||"system")}</span>${badge(a.result)}</div>`).join("")}</div>
+     </div>`;
+  }catch(e){ v.innerHTML=head("Dashboard")+`<div class="err">${esc(e.message)}</div>`; }
+}
+function stat(l,val){ return `<div class="card"><div class="muted">${l}</div><div class="stat">${val}</div></div>`; }
+
+// ---- Devices ----
+let DEVICES = [];
+async function pageDevices(v){
+  try{ const d=await api("/devices"); DEVICES=d.data||[];
+    const canW=has("device:write");
+    const rows=DEVICES.map(x=>`<tr><td><b>${esc(x.name)}</b><div class="muted">${esc(x.device_type||"device")}</div></td>
+      <td class="muted" style="font-family:monospace">${esc(x.url)}</td><td>${esc(x.vendor||"—")}</td>
+      <td>${badge(x.status)} ${x.requires_approval?'<span class="badge b-amber">approval</span>':''}</td>
+      <td style="text-align:right;white-space:nowrap">
+        ${has("device:connect")?`<button class="btn btn-primary" onclick="connect('${x.id}')" ${x.status!=="active"?"disabled":""}>Connect</button>`:""}
+        ${has("credential:write")?`<button class="btn btn-ghost" onclick="bindPrompt('${x.id}','${esc(x.name)}')" title="Bind a credential">🔑</button>`:""}
+        ${canW?`<button class="btn btn-danger" onclick="delDevice('${x.id}','${esc(x.name)}')" title="Delete">🗑</button>`:""}
+      </td></tr>`).join("");
+    v.innerHTML = head("Devices","Web management interfaces you can access",
+        canW?`<button class="btn btn-primary" onclick="toggleForm('devForm')">+ Add device</button>`:"") +
+      `<div id="devNotice"></div><div id="devForm" style="display:none"></div>
+       <div class="card" style="padding:0"><table><thead><tr><th>Name</th><th>Endpoint</th><th>Vendor</th><th>Status</th><th></th></tr></thead>
+       <tbody>${rows||'<tr><td colspan=5 class="muted" style="padding:1.5rem">No devices yet</td></tr>'}</tbody></table></div>`;
+    document.getElementById("devForm").innerHTML = deviceForm();
+  }catch(e){ v.innerHTML=head("Devices")+`<div class="err">${esc(e.message)}</div>`; }
+}
+function deviceForm(){ return `<div class="card" style="margin-bottom:1rem"><h2>New device</h2>
+  <div class="grid" style="grid-template-columns:1fr 1fr 1fr">
+    <div><label>Name</label><input id="dName" placeholder="Edge-FW"></div>
+    <div><label>Host / IP</label><input id="dHost" placeholder="10.0.0.10"></div>
+    <div><label>Port</label><input id="dPort" type="number" value="443"></div>
+    <div><label>Scheme</label><select id="dScheme"><option>https</option><option>http</option></select></div>
+    <div><label>Vendor</label><input id="dVendor" placeholder="Fortinet"></div>
+    <div><label>Type</label><input id="dType" placeholder="firewall"></div>
+    <div><label>Requires approval</label><select id="dAppr"><option value="false">No</option><option value="true">Yes</option></select></div>
+    <div><label>Verify TLS</label><select id="dTls"><option value="true">Yes</option><option value="false">No</option></select></div>
+  </div><div style="margin-top:.8rem"><button class="btn btn-primary" onclick="createDevice()">Create</button>
+  <button class="btn btn-ghost" onclick="toggleForm('devForm')">Cancel</button></div></div>`; }
+function toggleForm(id){ const e=document.getElementById(id); e.style.display = e.style.display==="none"?"block":"none"; }
+async function createDevice(){
+  try{ await api("/devices",{method:"POST",body:JSON.stringify({
+    name:val("dName"), host:val("dHost"), port:parseInt(val("dPort")||"443",10),
+    scheme:val("dScheme"), vendor:val("dVendor"), device_type:val("dType"),
+    verify_tls: val("dTls")==="true", requires_approval: val("dAppr")==="true" })});
+    go("devices"); }catch(e){ alert(e.message); }
+}
+async function delDevice(id,name){ if(!confirm("Delete device \""+name+"\"?")) return;
+  try{ await api("/devices/"+id,{method:"DELETE"}); go("devices"); }catch(e){ alert(e.message); } }
+async function connect(id){
+  const n=document.getElementById("devNotice");
+  try{ const r=await api("/devices/"+id+"/connect",{method:"POST"});
+    if(r && r.status==="pending_approval"){ n.innerHTML='<div class="ok">Access requires approval — a request was submitted. See Approvals.</div>'; }
+    else if(r && r.proxy_url){ n.innerHTML='<div class="ok">Session established. Opening proxy…</div>'; window.open(r.proxy_url,"_blank"); setTimeout(()=>go("sessions"),600); }
+    else { go("sessions"); }
+  }catch(e){ n.innerHTML=`<div class="err">${esc(e.message)} ${/no credential/i.test(e.message)?'— bind a credential to this device first (the 🔑 button, or the Credentials page).':''}</div>`; }
+}
+// Quick bind: pick an existing credential for this device.
+async function bindPrompt(deviceId, deviceName){
+  try{ const d=await api("/credentials"); const creds=d.data||[];
+    if(!creds.length){ if(confirm("No credentials exist yet. Go to Credentials to create one?")) go("credentials"); return; }
+    const list=creds.map((c,i)=>`${i+1}. ${c.name} (${c.username||"—"})`).join("\n");
+    const pick=prompt("Bind which credential to \""+deviceName+"\"?\n\n"+list+"\n\nEnter number:");
+    const idx=parseInt(pick,10)-1; if(isNaN(idx)||!creds[idx]) return;
+    await api("/credentials/"+creds[idx].id+"/bind/"+deviceId,{method:"POST",body:JSON.stringify({is_default:true})});
+    alert("Bound \""+creds[idx].name+"\" to \""+deviceName+"\". Connect will now inject it.");
+  }catch(e){ alert(e.message); }
+}
+
+// ---- Sessions ----
+async function pageSessions(v){
+  try{ const d=await api("/sessions/active");
+    const rows=(d.data||[]).map(s=>`<tr><td style="font-family:monospace" class="muted">${esc(s.id.slice(0,8))}…</td>
+      <td style="text-transform:uppercase">${esc(s.protocol)}</td><td>${badge(s.status)}</td>
+      <td class="muted">${s.created_at?new Date(s.created_at).toLocaleString():"—"}</td>
+      <td style="text-align:right">${has("session:terminate")?`<button class="btn btn-danger" onclick="terminate('${s.id}')">Terminate</button>`:""}</td></tr>`).join("");
+    v.innerHTML=head("Active Sessions","Live brokered access sessions")+
+      `<div class="card" style="padding:0"><table><thead><tr><th>Session</th><th>Protocol</th><th>Status</th><th>Started</th><th></th></tr></thead>
+       <tbody>${rows||'<tr><td colspan=5 class="muted" style="padding:1.5rem">No active sessions</td></tr>'}</tbody></table></div>`;
+  }catch(e){ v.innerHTML=head("Active Sessions")+`<div class="err">${esc(e.message)}</div>`; }
+}
+function terminate(id){ api("/sessions/"+id+"/terminate",{method:"POST"}).then(()=>go("sessions")).catch(e=>alert(e.message)); }
+
+// ---- Approvals ----
+async function pageApprovals(v){
+  try{ const d=await api("/approvals?status=pending");
+    const rows=(d.data||[]).map(a=>`<div class="card" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem">
+      <div>${badge(a.status)} <span class="muted">${esc(a.mode)} · ${a.valid_minutes} min</span>
+      <div style="margin-top:.3rem">${esc(a.reason||"No reason provided")}</div>
+      <div class="muted">expires ${new Date(a.expires_at).toLocaleString()}</div></div>
+      ${has("approval:decide")?`<div style="display:flex;gap:.5rem"><button class="btn btn-primary" onclick="decide('${a.id}','approve')">Approve</button>
+      <button class="btn btn-danger" onclick="decide('${a.id}','deny')">Deny</button></div>`:""}</div>`).join("");
+    v.innerHTML=head("Approvals","Pending access requests")+(rows||'<div class="card muted">No pending approvals</div>');
+  }catch(e){ v.innerHTML=head("Approvals")+`<div class="err">${esc(e.message)}</div>`; }
+}
+function decide(id,action){ api("/approvals/"+id+"/"+action,{method:"POST"}).then(()=>go("approvals")).catch(e=>alert(e.message)); }
+
+// ---- Audit ----
+async function pageAudit(v){
+  try{ const d=await api("/audit?limit=100");
+    const rows=(d.data||[]).map(r=>`<tr><td class="muted" style="white-space:nowrap">${new Date(r.ts).toLocaleString()}</td>
+      <td>${esc(r.actor||"system")}</td><td style="font-family:monospace;font-size:.8rem">${esc(r.action)}</td>
+      <td class="muted">${r.target_type?esc(r.target_type):"—"}</td><td class="muted" style="font-family:monospace">${esc(r.ip||"—")}</td>
+      <td>${badge(r.result)}</td></tr>`).join("");
+    v.innerHTML=head("Audit Log","Tamper-evident, hash-chained record",
+        `<button class="btn btn-ghost" onclick="report('audit')">Export audit CSV</button>`)+
+      `<div class="card" style="padding:0"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>IP</th><th>Result</th></tr></thead>
+       <tbody>${rows||'<tr><td colspan=6 class="muted" style="padding:1.5rem">No events</td></tr>'}</tbody></table></div>`;
+  }catch(e){ v.innerHTML=head("Audit Log")+`<div class="err">${esc(e.message)} — needs the <code>log:read</code> permission.</div>`; }
+}
+async function report(type){
+  try{ const r=await fetch(API+"/reports",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+TOKEN},body:JSON.stringify({type,format:"csv"})});
+    const b=await r.blob(); const u=URL.createObjectURL(b); const a=document.createElement("a"); a.href=u; a.download="guardrail-"+type+"-report.csv"; a.click(); URL.revokeObjectURL(u);
+  }catch(e){ alert(e.message); }
+}
+
+// ---- Credentials (vault) ----
+async function pageCredentials(v){
+  try{ const d=await api("/credentials"); const creds=d.data||[]; const canW=has("credential:write");
+    const rows=creds.map(c=>`<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.type)}</td>
+      <td>${esc(c.username||"—")}</td><td><span class="badge b-slate">${esc(c.injection)}</span></td>
+      <td>${c.has_secret?'<span class="badge b-green">sealed</span>':'<span class="badge b-red">none</span>'}</td>
+      <td style="text-align:right;white-space:nowrap">
+        ${canW?`<button class="btn btn-ghost" onclick="bindFromCred('${c.id}','${esc(c.name)}')" title="Bind to device">Bind</button>`:""}
+        ${canW?`<button class="btn btn-danger" onclick="delCred('${c.id}','${esc(c.name)}')" title="Delete">🗑</button>`:""}
+      </td></tr>`).join("");
+    v.innerHTML = head("Credentials","Envelope-encrypted secrets — write-only, never exposed to users",
+        canW?`<button class="btn btn-primary" onclick="toggleForm('credForm')">+ Add credential</button>`:"") +
+      `<div id="credNotice"></div><div id="credForm" style="display:none"></div>
+       <div class="card" style="padding:0"><table><thead><tr><th>Name</th><th>Type</th><th>Username</th><th>Injection</th><th>Secret</th><th></th></tr></thead>
+       <tbody>${rows||'<tr><td colspan=6 class="muted" style="padding:1.5rem">No credentials yet — add one, then bind it to a device.</td></tr>'}</tbody></table></div>`;
+    if(canW) document.getElementById("credForm").innerHTML = credForm();
+  }catch(e){ v.innerHTML=head("Credentials")+`<div class="err">${esc(e.message)}</div>`; }
+}
+function credForm(){ return `<div class="card" style="margin-bottom:1rem"><h2>New credential</h2>
+  <div class="grid" style="grid-template-columns:1fr 1fr 1fr">
+    <div><label>Name</label><input id="cName" placeholder="fw-admin"></div>
+    <div><label>Type</label><select id="cType"><option value="password">password</option><option value="api_key">api_key</option><option value="token">token</option></select></div>
+    <div><label>Username</label><input id="cUser" placeholder="admin"></div>
+    <div><label>Injection</label><select id="cInj"><option value="basic">HTTP Basic</option><option value="form">Login form</option><option value="header">Header</option><option value="none">None</option></select></div>
+    <div style="grid-column:span 2"><label>Secret (write-only)</label><input id="cSecret" type="password" placeholder="the device password"></div>
+  </div><div style="margin-top:.8rem"><button class="btn btn-primary" onclick="createCred()">Create</button>
+  <button class="btn btn-ghost" onclick="toggleForm('credForm')">Cancel</button></div></div>`; }
+async function createCred(){
+  try{ await api("/credentials",{method:"POST",body:JSON.stringify({
+    name:val("cName"), type:val("cType"), username:val("cUser"), injection:val("cInj"), secret:val("cSecret") })});
+    go("credentials"); }catch(e){ alert(e.message); }
+}
+async function delCred(id,name){ if(!confirm("Delete credential \""+name+"\"?")) return;
+  try{ await api("/credentials/"+id,{method:"DELETE"}); go("credentials"); }catch(e){ alert(e.message); } }
+async function bindFromCred(credId, credName){
+  try{ const d=await api("/devices"); const devs=d.data||[];
+    if(!devs.length){ alert("No devices exist yet. Add a device first."); return; }
+    const list=devs.map((x,i)=>`${i+1}. ${x.name} (${x.host||x.url})`).join("\n");
+    const pick=prompt("Bind \""+credName+"\" to which device?\n\n"+list+"\n\nEnter number:");
+    const idx=parseInt(pick,10)-1; if(isNaN(idx)||!devs[idx]) return;
+    await api("/credentials/"+credId+"/bind/"+devs[idx].id,{method:"POST",body:JSON.stringify({is_default:true})});
+    document.getElementById("credNotice").innerHTML=`<div class="ok">Bound to "${esc(devs[idx].name)}". Connect will now inject it.</div>`;
+  }catch(e){ alert(e.message); }
+}
+
+// ---- Access Management (users + roles) ----
+let ROLES = [];
+async function pageAccess(v){
+  try{
+    const [ur, rr] = await Promise.all([ api("/users"), api("/roles") ]);
+    const users=ur.data||[]; ROLES=rr.data||[]; const canW=has("user:write");
+    const rows=users.map(u=>`<tr><td><b>${esc(u.email)}</b>${u.is_super_admin?' <span class="badge b-amber">super admin</span>':''}</td>
+      <td>${(u.roles||[]).map(r=>`<span class="badge b-slate" style="margin-right:.2rem">${esc(r)}</span>`).join("")||'<span class="muted">none</span>'}</td>
+      <td style="text-align:right">${canW?`<button class="btn btn-ghost" onclick='editRoles(${JSON.stringify(u.user_id)},${JSON.stringify(u.email)},${JSON.stringify(u.roles||[])})'>Edit roles</button>`:""}</td></tr>`).join("");
+    v.innerHTML = head("Access Management","Users, roles & permissions",
+        canW?`<button class="btn btn-primary" onclick="toggleForm('userForm')">+ Add user</button>`:"") +
+      `<div id="accNotice"></div><div id="userForm" style="display:none"></div>
+       <div class="card" style="padding:0;margin-bottom:1rem"><table><thead><tr><th>User</th><th>Roles</th><th></th></tr></thead>
+        <tbody>${rows||'<tr><td colspan=3 class="muted" style="padding:1.5rem">No users</td></tr>'}</tbody></table></div>
+       <div class="card"><h2>System roles</h2>${ROLES.map(r=>`<div style="padding:.35rem 0;border-top:1px solid #1e293b">
+         <b>${esc(r.name)}</b> ${r.is_system?'<span class="badge b-slate">system</span>':''}
+         <div class="muted">${esc(r.description||"")}</div>
+         <div class="muted" style="font-family:monospace;font-size:.72rem;margin-top:.2rem">${(r.permissions||[]).slice(0,12).join(", ")}${(r.permissions||[]).length>12?" …":""}</div></div>`).join("")}</div>`;
+    if(canW) document.getElementById("userForm").innerHTML = userForm();
+  }catch(e){ v.innerHTML=head("Access Management")+`<div class="err">${esc(e.message)}</div>`; }
+}
+function userForm(){ return `<div class="card" style="margin-bottom:1rem"><h2>New user</h2>
+  <div class="grid" style="grid-template-columns:1fr 1fr">
+    <div><label>Email</label><input id="uEmail" type="email" placeholder="op@yourco.com"></div>
+    <div><label>Password (min 12)</label><input id="uPass" type="password"></div>
+  </div><label style="margin-top:.5rem">Roles</label>
+  <div style="display:flex;flex-wrap:wrap;gap:.6rem">${ROLES.map(r=>`<label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem;color:#e2e8f0"><input type="checkbox" style="width:auto" value="${r.id}" class="uRole"> ${esc(r.name)}</label>`).join("")}</div>
+  <div style="margin-top:.8rem"><button class="btn btn-primary" onclick="createUser()">Create</button>
+  <button class="btn btn-ghost" onclick="toggleForm('userForm')">Cancel</button></div></div>`; }
+function checkedRoles(){ return Array.from(document.querySelectorAll(".uRole:checked")).map(c=>c.value); }
+async function createUser(){
+  try{ await api("/users",{method:"POST",body:JSON.stringify({
+    email:val("uEmail"), password:val("uPass"), role_ids: checkedRoles() })});
+    go("access"); }catch(e){ alert(e.message); }
+}
+function editRoles(userId, email, current){
+  const set=new Set(current.map(n=>n.toLowerCase()));
+  const boxes=ROLES.map(r=>`<label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem"><input type="checkbox" style="width:auto" class="erRole" value="${r.id}" ${set.has(r.name.toLowerCase())?"checked":""}> ${esc(r.name)}</label>`).join("");
+  document.getElementById("accNotice").innerHTML=`<div class="card" style="margin-bottom:1rem"><h2>Roles for ${esc(email)}</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:.6rem">${boxes}</div>
+    <div style="margin-top:.8rem"><button class="btn btn-primary" onclick="saveRoles('${userId}')">Save</button>
+    <button class="btn btn-ghost" onclick="document.getElementById('accNotice').innerHTML=''">Cancel</button></div></div>`;
+}
+async function saveRoles(userId){
+  const ids=Array.from(document.querySelectorAll(".erRole:checked")).map(c=>c.value);
+  try{ await api("/users/"+userId+"/roles",{method:"PUT",body:JSON.stringify({role_ids:ids})});
+    go("access"); }catch(e){ alert(e.message); }
+}
+
+// ---- Security (MFA) ----
+async function pageSecurity(v){
+  try{ const s=await api("/mfa");
+    let html = head("Security","Manage your second factor");
+    html += `<div class="card" style="max-width:640px"><div style="display:flex;justify-content:space-between;align-items:center">
+      <div><b>Two-factor authentication (TOTP)</b><div class="muted">Authenticator app · time-based codes</div></div>
+      ${badge(s.confirmed?"active":s.enabled?"pending":"disabled")}</div><div id="mfaArea" style="margin-top:1rem"></div></div>`;
+    v.innerHTML = html;
+    const area=document.getElementById("mfaArea");
+    if(!s.confirmed){ area.innerHTML=`<button class="btn btn-primary" onclick="mfaEnroll()">Set up authenticator</button>`; }
+    else { area.innerHTML=`<span class="muted">${s.recovery_codes_left} recovery codes remaining</span>
+      <div style="margin-top:.8rem;display:flex;gap:.5rem"><button class="btn btn-ghost" onclick="mfaRegen()">Regenerate codes</button>
+      <button class="btn btn-danger" onclick="mfaDisable()">Disable</button></div>`; }
+  }catch(e){ v.innerHTML=head("Security")+`<div class="err">${esc(e.message)}</div>`; }
+}
+async function mfaEnroll(){
+  try{ const e=await api("/mfa/totp/enroll",{method:"POST"});
+    document.getElementById("mfaArea").innerHTML=`<div class="card" style="background:#0b1220">
+      <p class="muted">Add this secret to your authenticator app, then enter a code to confirm.</p>
+      <div style="font-family:monospace;color:#c7d2fe;background:#111a2e;padding:.5rem;border-radius:6px">${esc(e.secret)}</div>
+      <a class="muted" href="${esc(e.provisioning_uri)}" style="word-break:break-all;font-size:.75rem">${esc(e.provisioning_uri)}</a>
+      <div style="display:flex;gap:.5rem;margin-top:.7rem"><input id="mfaConfirm" placeholder="123456" style="max-width:140px;text-align:center">
+      <button class="btn btn-primary" onclick="mfaConfirm()">Confirm</button></div></div>`;
+  }catch(e){ alert(e.message); }
+}
+async function mfaConfirm(){
+  try{ const r=await api("/mfa/totp/confirm",{method:"POST",body:JSON.stringify({code:val("mfaConfirm").trim()})});
+    showCodes(r.recovery_codes); }catch(e){ alert(e.message); }
+}
+async function mfaRegen(){ try{ const r=await api("/mfa/recovery-codes",{method:"POST"}); showCodes(r.recovery_codes);}catch(e){alert(e.message);} }
+async function mfaDisable(){ if(!confirm("Disable MFA?"))return; try{ await api("/mfa",{method:"DELETE"}); go("security"); }catch(e){alert(e.message);} }
+function showCodes(codes){
+  document.getElementById("mfaArea").innerHTML=`<div class="ok">Save these recovery codes now — shown only once.</div>
+    <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:.7rem;font-family:monospace">${codes.map(c=>`<div style="background:#0b1220;padding:.3rem .5rem;border-radius:5px">${esc(c)}</div>`).join("")}</div>
+    <div style="margin-top:.8rem"><button class="btn btn-ghost" onclick="go('security')">Done</button></div>`;
+}
+
+// ---- Search ----
+let searchTimer=null;
+function doSearch(q){ clearTimeout(searchTimer); if(q.trim().length<2) return;
+  searchTimer=setTimeout(async()=>{ try{ const r=await api("/search?q="+encodeURIComponent(q));
+    const parts=[]; ["devices","sessions","users"].forEach(k=>{ (r[k]||[]).forEach(h=>parts.push(k.slice(0,-1)+": "+h.label)); });
+    if(parts.length) alert("Search results:\n\n"+parts.slice(0,15).join("\n")); }catch(e){} },300); }
+
+// boot
+loadVersion(); loadProviders(); boot();
+document.getElementById("password").addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); });
+document.getElementById("mfaCode").addEventListener("keydown",e=>{ if(e.key==="Enter") doMFA(); });
+</script>
+</body>
+</html>

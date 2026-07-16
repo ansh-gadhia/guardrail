@@ -1,0 +1,71 @@
+# =============================================================================
+# GuardRail — https://github.com/ansh-gadhia/guardrail
+# =============================================================================
+
+# ---- Secrets & credentials --------------------------------------------------
+# .env holds GUARDRAIL_MASTER_KEY (the vault KEK) and every service password.
+# It must NEVER be committed. .env.example is the tracked, secret-free template.
+.env
+.env.*
+!.env.example
+
+# TLS material and any key/cert the deploy generates or you drop in.
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+deploy/tls/*
+!deploy/tls/.gitkeep
+
+# ---- Session recordings & runtime evidence ----------------------------------
+# Desktop (.guac) and other recording scratch written by guacd / the API when
+# run outside containers. In compose these live in named volumes, not the tree.
+desktop-recordings/
+recordings/
+*.guac
+
+# ---- Go (backend/) ----------------------------------------------------------
+/bin/
+backend/bin/
+backend/coverage.out
+backend/coverage.html
+*.test
+*.out
+*.prof
+vendor/
+
+# ---- Node / frontend --------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
+
+# ---- Build / tooling caches -------------------------------------------------
+.cache/
+tmp/
+*.tmp
+
+# ---- Logs -------------------------------------------------------------------
+*.log
+logs/
+
+# ---- Editor / IDE -----------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---- OS ---------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini

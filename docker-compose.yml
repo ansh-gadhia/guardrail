@@ -1,0 +1,305 @@
+# GuardRail — the whole platform, one file.
+#
+# Deploying to a server on your LAN:
+#
+#   1. cp .env.example .env   and fill in every secret it asks for
+#   2. docker compose up -d --build
+#   3. browse to https://<server-lan-ip>/  from any PC on the network
+#
+# Everything is reachable over the LAN on 443 (80 redirects to it). The bundled
+# certificate is self-signed, so the first visit warns until you install a real
+# one — see deploy/traefik/dynamic/tls.yml for how to replace or regenerate it.
+#
+# All services set `restart: unless-stopped`, so the stack comes back by itself
+# after a reboot as long as the Docker daemon starts at boot
+# (`systemctl enable docker`). State lives in the named volumes at the bottom
+# and survives `docker compose down`; only `down -v` destroys it.
+#
+# Every published port comes from .env — nothing here is hardcoded. The defaults
+# below apply when the variable is unset:
+#
+#   GUARDRAIL_HTTPS_PORT  443        console + API + brokered sessions (the LAN port)
+#   GUARDRAIL_HTTP_PORT   80         redirects to HTTPS
+#   POSTGRES_PORT         5432       bound to POSTGRES_BIND_ADDR (127.0.0.1)
+#   REDIS_PORT            6379       bound to REDIS_BIND_ADDR    (127.0.0.1)
+#
+# Postgres and Redis reach only the server itself, for psql and backups. The API
+# (8080) and its metrics (9090) are not published at all: they stay on the
+# internal Docker network behind Traefik.
+
+name: guardrail
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-guardrail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-guardrail}
+      GUARDRAIL_DB_APP_PASSWORD: ${GUARDRAIL_DB_APP_PASSWORD:?set GUARDRAIL_DB_APP_PASSWORD in .env}
+    # Loopback-bound on purpose: local psql, migrations and backups work, but the
+    # database is not exposed to the network. Widening POSTGRES_BIND_ADDR puts the
+    # database on the network — see the warning in .env.example.
+    ports:
+      - "${POSTGRES_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-guardrail} -d ${POSTGRES_DB:-guardrail}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-}"]
+    ports:
+      - "${REDIS_BIND_ADDR:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # guacd — the Apache Guacamole proxy daemon, which speaks RDP and VNC to devices
+  # and renders them into drawing instructions the console draws on a canvas.
+  #
+  # Enabled by profile: a deployment with no desktops to broker should not run a
+  # daemon it never uses. Start it with `docker compose --profile desktop up -d`,
+  # and set GUARDRAIL_DESKTOP_ENABLED=true so the API wires the gateways.
+  #
+  # Its port is published to LOOPBACK ONLY, and that default must not be widened.
+  # guacd has no authentication of its own — anything that can reach 4822 can ask
+  # it to connect to any host with any credential — so exposing it to the network
+  # would hand out an unauthenticated connection broker. It is published at all
+  # only because the API also runs as a native host process in this deployment
+  # (scripts/run-host-api.sh), where a container-network-only port is unreachable;
+  # this mirrors what postgres and redis already do, and 127.0.0.1 keeps it off
+  # the LAN. When the API runs as the compose `api` service it reaches guacd at
+  # guacd:4822 over the internal network and none of this applies.
+  guacd:
+    image: guacamole/guacd:1.5.5
+    profiles: ["desktop"]
+    # Runs as the image's own user (uid 1000), deliberately. An earlier attempt at
+    # the recording handover ran it as the API's uid instead, so that the file
+    # guacd writes would be owned by the reader. That broke RDP outright: uid 65532
+    # has no passwd entry in this image, so HOME is unset, and FreeRDP builds its
+    # certificate store under $HOME/.config/freerdp — with nowhere to put it the
+    # connection died at "Security negotiation failed (wrong security type?)",
+    # which reads like a protocol problem and is not one.
+    #
+    # No uid override is needed anyway: guacd creates recordings 0640 (see
+    # libguac/recording.c), so group-readable is enough. bootstrap.sh owns the
+    # directory 1000:65532 with setgid, which lets guacd write as itself and the
+    # API read as the group. Neither has to pretend to be the other.
+    ports:
+      - "${GUACD_BIND_ADDR:-127.0.0.1}:${GUACD_PORT:-4822}:4822"
+    volumes:
+      # Bind-mounted at an IDENTICAL path on both sides, not a named volume.
+      # GUARDRAIL_GUACD_RECORDING_DIR is a single string that guacd writes to and
+      # the API reads back, so it must mean the same thing in both namespaces. A
+      # named volume satisfies that only while the API is also a container; when it
+      # runs natively (scripts/run-host-api.sh) the path exists solely inside
+      # guacd, guacd records happily, and the API finds nothing to collect — a
+      # recorded session with no evidence, discovered when someone goes looking.
+      - ${GUARDRAIL_GUACD_RECORDING_DIR:-/var/lib/guardrail/desktop-recordings}:${GUARDRAIL_GUACD_RECORDING_DIR:-/var/lib/guardrail/desktop-recordings}
+    restart: unless-stopped
+
+  # One-shot migration runner (golang-migrate). Runs as the superuser to apply
+  # DDL, then exits. The API waits for it to complete successfully.
+  migrate:
+    image: migrate/migrate:v4.17.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/migrations:/migrations:ro
+    entrypoint:
+      - migrate
+      - -path=/migrations
+      - -database=postgres://${POSTGRES_USER:-guardrail}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-guardrail}?sslmode=disable
+      - up
+    restart: on-failure
+
+  # One-shot seed loader: after migrations, load the permission catalogue, system
+  # roles, and the default organization (idempotent — ON CONFLICT). The API needs
+  # this data to function (e.g. seed-admin resolves the default org).
+  seed:
+    image: postgres:16-alpine
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./backend/db/seed.sql:/seed.sql:ro
+    entrypoint:
+      - sh
+      - -c
+      - psql -h postgres -U ${POSTGRES_USER:-guardrail} -d ${POSTGRES_DB:-guardrail} -v ON_ERROR_STOP=1 -f /seed.sql
+    restart: on-failure
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+    environment:
+      GUARDRAIL_ENV: ${GUARDRAIL_ENV:-production}
+      # Fixed, and deliberately not configurable: this port exists only inside the
+      # container's own network namespace, where nothing can collide with it, and
+      # deploy/traefik/dynamic/routes.yml hardcodes the matching upstream. It is
+      # never published. Change both together or not at all.
+      GUARDRAIL_HTTP_ADDR: ":8080"
+      GUARDRAIL_METRICS_ADDR: ":9090"
+      # API connects as the least-privilege app role so RLS is enforced.
+      GUARDRAIL_POSTGRES_DSN: postgres://guardrail_app:${GUARDRAIL_DB_APP_PASSWORD}@postgres:5432/${POSTGRES_DB:-guardrail}?sslmode=disable
+      GUARDRAIL_REDIS_ADDR: redis:6379
+      GUARDRAIL_REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      GUARDRAIL_JWT_SIGNING_KEY: ${GUARDRAIL_JWT_SIGNING_KEY:?set in .env}
+      GUARDRAIL_MASTER_KEY: ${GUARDRAIL_MASTER_KEY:?set in .env}
+      # Primary super admin, seeded idempotently on first boot (see .env).
+      GUARDRAIL_ADMIN_EMAIL: ${GUARDRAIL_ADMIN_EMAIL:-}
+      GUARDRAIL_ADMIN_PASSWORD: ${GUARDRAIL_ADMIN_PASSWORD:-}
+      GUARDRAIL_ADMIN_USERNAME: ${GUARDRAIL_ADMIN_USERNAME:-admin}
+      GUARDRAIL_ADMIN_ORG: ${GUARDRAIL_ADMIN_ORG:-default}
+      # Traefik terminates TLS and is the only thing that can reach this port, so
+      # the client IP in the audit log is whatever it forwards. Defaults match
+      # that topology; .env can narrow them if you put the API somewhere else.
+      GUARDRAIL_TRUST_PROXY_HEADERS: ${GUARDRAIL_TRUST_PROXY_HEADERS:-true}
+      GUARDRAIL_TRUSTED_PROXIES: ${GUARDRAIL_TRUSTED_PROXIES:-0.0.0.0/0}
+      # The console is served from the same origin as the API, so this only
+      # matters if you point a separately-hosted UI at this server.
+      GUARDRAIL_CORS_ALLOW_ORIGINS: ${GUARDRAIL_CORS_ALLOW_ORIGINS:-}
+      # Session recording needs the isolation gateway: the reverse proxy never
+      # sees pixels. Chromium and the recordings directory ship in the image.
+      GUARDRAIL_BROWSER_ISOLATION: ${GUARDRAIL_BROWSER_ISOLATION:-true}
+      # RDP/VNC via the guacd sidecar. Both must agree: this switch wires the
+      # gateways, the compose profile starts the daemon.
+      GUARDRAIL_DESKTOP_ENABLED: ${GUARDRAIL_DESKTOP_ENABLED:-false}
+      GUARDRAIL_GUACD_ADDR: ${GUARDRAIL_GUACD_ADDR:-guacd:4822}
+      GUARDRAIL_GUACD_RECORDING_DIR: ${GUARDRAIL_GUACD_RECORDING_DIR:-/var/lib/guardrail/desktop-recordings}
+      GUARDRAIL_RECORDING_DIR: ${GUARDRAIL_RECORDING_DIR:-/var/lib/guardrail/recordings}
+      GUARDRAIL_LOG_LEVEL: ${GUARDRAIL_LOG_LEVEL:-info}
+      GUARDRAIL_LOG_FORMAT: ${GUARDRAIL_LOG_FORMAT:-json}
+
+      # Optional features, commented out in .env. They are forwarded anyway so
+      # that uncommenting one there is enough to switch it on — otherwise the
+      # variable would sit in .env looking configured while the container never
+      # saw it. The three defaults restated here have a non-empty default in Go
+      # (config.go), and passing an empty value would override it rather than
+      # fall back; keep them in step if that default ever changes.
+      GUARDRAIL_ACCESS_TOKEN_TTL: ${GUARDRAIL_ACCESS_TOKEN_TTL:-15m}
+      GUARDRAIL_REFRESH_TOKEN_TTL: ${GUARDRAIL_REFRESH_TOKEN_TTL:-720h}
+      GUARDRAIL_SERVICE_NAME: ${GUARDRAIL_SERVICE_NAME:-guardrail-api}
+      # These default to empty in Go, so forwarding empty is the same as unset.
+      GUARDRAIL_FEDERATION_ORG_ID: ${GUARDRAIL_FEDERATION_ORG_ID:-}
+      GUARDRAIL_OIDC_ISSUER: ${GUARDRAIL_OIDC_ISSUER:-}
+      GUARDRAIL_OIDC_CLIENT_ID: ${GUARDRAIL_OIDC_CLIENT_ID:-}
+      GUARDRAIL_OIDC_CLIENT_SECRET: ${GUARDRAIL_OIDC_CLIENT_SECRET:-}
+      GUARDRAIL_OIDC_REDIRECT_URL: ${GUARDRAIL_OIDC_REDIRECT_URL:-}
+      GUARDRAIL_LDAP_URL: ${GUARDRAIL_LDAP_URL:-}
+      GUARDRAIL_LDAP_BIND_DN: ${GUARDRAIL_LDAP_BIND_DN:-}
+      GUARDRAIL_LDAP_BIND_PASSWORD: ${GUARDRAIL_LDAP_BIND_PASSWORD:-}
+      GUARDRAIL_LDAP_BASE_DN: ${GUARDRAIL_LDAP_BASE_DN:-}
+      GUARDRAIL_LDAP_USER_FILTER: ${GUARDRAIL_LDAP_USER_FILTER:-}
+      GUARDRAIL_OTLP_ENDPOINT: ${GUARDRAIL_OTLP_ENDPOINT:-}
+    volumes:
+      - recordings:/var/lib/guardrail/recordings
+      # The same volume guacd writes desktop recordings into; the API moves them
+      # into the blob store when a session ends.
+      # Bind-mounted at an IDENTICAL path on both sides, not a named volume.
+      # GUARDRAIL_GUACD_RECORDING_DIR is a single string that guacd writes to and
+      # the API reads back, so it must mean the same thing in both namespaces. A
+      # named volume satisfies that only while the API is also a container; when it
+      # runs natively (scripts/run-host-api.sh) the path exists solely inside
+      # guacd, guacd records happily, and the API finds nothing to collect — a
+      # recorded session with no evidence, discovered when someone goes looking.
+      - ${GUARDRAIL_GUACD_RECORDING_DIR:-/var/lib/guardrail/desktop-recordings}:${GUARDRAIL_GUACD_RECORDING_DIR:-/var/lib/guardrail/desktop-recordings}
+    # Join guacd's group (its image's gid 1000). guacd writes each desktop
+    # recording group-readable (0640) into the shared dir above; this makes the
+    # API a member of that group, so it can read the recording back and move it to
+    # the blob store no matter what its own primary gid is. This is the whole
+    # mechanism that lets a recording survive the hop from guacd to the API — file
+    # permission at the OS level, with the recording:read RBAC still enforced at
+    # the API. Pair it with a recording dir owned 1000:1000 and setgid (bootstrap
+    # sets that) so new recordings keep landing in group 1000.
+    group_add:
+      - "1000"
+    # Chromium's renderers need more than Docker's default 64MB of /dev/shm, even
+    # with --disable-dev-shm-usage, once a device UI paints anything substantial.
+    shm_size: 1gb
+    healthcheck:
+      test: ["CMD", "/guardrail", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # Web console (React SPA served by nginx). Traefik routes everything that is
+  # not /api or /proxy here.
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:v3.1
+    command:
+      # Routes and TLS come from deploy/traefik/dynamic/*.yml. There is no Docker
+      # provider and no docker.sock mount here on purpose — see routes.yml.
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      # Traefik listens on the SAME port inside the container as the one published
+      # on the host. That symmetry is load-bearing: the HTTP->HTTPS redirect is
+      # built from the target entrypoint's own address, and Traefik has no idea
+      # what the host mapped it to. Publishing 8443:443 would bounce operators to
+      # https://server:443 — a port nothing is listening on.
+      - --entrypoints.web.address=:${GUARDRAIL_HTTP_PORT:-80}
+      - --entrypoints.websecure.address=:${GUARDRAIL_HTTPS_PORT:-443}
+      # A PAM console has no business answering in plaintext: the HTTP port exists
+      # only to bounce operators who typed the address without a scheme.
+      - --entrypoints.web.http.redirections.entryPoint.to=websecure
+      - --entrypoints.web.http.redirections.entryPoint.scheme=https
+      - --entrypoints.web.http.redirections.entryPoint.permanent=true
+    ports:
+      - "${GUARDRAIL_HTTP_PORT:-80}:${GUARDRAIL_HTTP_PORT:-80}"
+      - "${GUARDRAIL_HTTPS_PORT:-443}:${GUARDRAIL_HTTPS_PORT:-443}"
+    volumes:
+      - ./deploy/traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./deploy/tls:/etc/traefik/certs:ro
+    depends_on:
+      - api
+      - web
+    restart: unless-stopped
+
+volumes:
+  # Persistent across `docker compose down` and reboots; `down -v` wipes them.
+  pgdata:
+  redisdata:
+  # Session recordings. These are audit evidence — back this up with pgdata, and
+  # note that losing one without the other leaves sessions that reference video
+  # that no longer exists.
+  recordings:
+  # Scratch space between guacd and the API: guacd writes a desktop recording
+  # here, the API moves it into the blob store on teardown and deletes it. Nothing
+  # here is durable evidence — that lives in `recordings` — so it needs no backup.
+  desktop-recordings:
