@@ -26,7 +26,7 @@ func (g *Gateway) Console(w http.ResponseWriter, r *http.Request, sid uuid.UUID,
 	// prior reverse-proxy attempt; the canvas page needs nothing but itself.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(consolePage(sid.String())))
+	_, _ = w.Write([]byte(consolePage(sid.String(), bs.w, bs.h)))
 	return true
 }
 
@@ -69,7 +69,15 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 		}
 	}()
 
-	// Reader: input events (JSON). Blocks until the client disconnects.
+	// Input path: the reader must stay ahead of the dispatcher. Each event is
+	// dispatched into Chrome with a round-trip that costs ~one frame (~16ms), so a
+	// naive read-one-dispatch-one loop drains ~60 events/sec — slower than a moving
+	// mouse produces them. The backlog would grow and the cursor (plus any click or
+	// keystroke queued behind it) would fall progressively behind: the "screen
+	// share" lag. So the reader only parses and enqueues; a worker dispatches,
+	// collapsing runs of consecutive moves to the latest.
+	in := make(chan inputMsg, 512)
+	go g.inputWorker(ctx, sid, bs, in)
 	for {
 		typ, data, err := c.Read(ctx)
 		if err != nil {
@@ -78,7 +86,79 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 		if typ != websocket.MessageText {
 			continue
 		}
-		g.dispatchInput(sid, bs, data)
+		var m inputMsg
+		if json.Unmarshal(data, &m) != nil {
+			continue
+		}
+		select {
+		case in <- m:
+		default:
+			// Dispatcher momentarily behind. A move can be dropped — the next one
+			// carries an absolute position, so nothing is lost — but a click, key,
+			// wheel or paste must not be, so wait briefly for room.
+			if m.T == "m" && m.E == "move" {
+				continue
+			}
+			select {
+			case in <- m:
+			case <-ctx.Done():
+				return true
+			}
+		}
+	}
+}
+
+// inputWorker serializes input into Chrome (which requires ordered input, hence
+// one goroutine). Its one trick is fast-forwarding through a run of consecutive
+// mouse-moves to the most recent before dispatching, so the cursor jumps to where
+// the operator actually is instead of grinding through a stale trail at ~16ms
+// each. Non-move events (clicks, wheel, keys, paste) always dispatch individually
+// and in order.
+func (g *Gateway) inputWorker(ctx context.Context, sid uuid.UUID, bs *bSession, in <-chan inputMsg) {
+	var pushback *inputMsg
+	next := func() (inputMsg, bool) {
+		if pushback != nil {
+			m := *pushback
+			pushback = nil
+			return m, true
+		}
+		select {
+		case m := <-in:
+			return m, true
+		case <-ctx.Done():
+			return inputMsg{}, false
+		}
+	}
+	for {
+		m, ok := next()
+		if !ok {
+			return
+		}
+		if m.T == "m" && m.E == "move" {
+			m, pushback = coalesceMoves(in, m)
+		}
+		g.dispatchInput(sid, bs, m)
+	}
+}
+
+// coalesceMoves fast-forwards through mouse-moves already queued behind cur (a
+// move), returning the newest move to dispatch. If it reaches a non-move event it
+// returns that too, for the caller to process next — so a click or key that
+// arrived mid-drag is never dropped and never reordered ahead of the move. It
+// only consumes what is immediately available and never blocks.
+func coalesceMoves(in <-chan inputMsg, cur inputMsg) (inputMsg, *inputMsg) {
+	for {
+		select {
+		case n := <-in:
+			if n.T == "m" && n.E == "move" {
+				cur = n
+				continue
+			}
+			nn := n
+			return cur, &nn
+		default:
+			return cur, nil
+		}
 	}
 }
 
@@ -107,11 +187,7 @@ type inputMsg struct {
 	OK   bool    `json:"ok"`   // dialog: accepted?
 }
 
-func (g *Gateway) dispatchInput(sid uuid.UUID, bs *bSession, data []byte) {
-	var m inputMsg
-	if json.Unmarshal(data, &m) != nil {
-		return
-	}
+func (g *Gateway) dispatchInput(sid uuid.UUID, bs *bSession, m inputMsg) {
 	// Every one of these is the operator doing something, which is the only
 	// evidence this mode produces: an isolated session is a single long-lived
 	// socket, so no HTTP request ever says "still here". A resize is excluded —

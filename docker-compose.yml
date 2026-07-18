@@ -189,6 +189,15 @@ services:
       # Session recording needs the isolation gateway: the reverse proxy never
       # sees pixels. Chromium and the recordings directory ship in the image.
       GUARDRAIL_BROWSER_ISOLATION: ${GUARDRAIL_BROWSER_ISOLATION:-true}
+      # Isolated-session screencast geometry/quality. Left empty they fall back to
+      # the gateway default (1280x800 / quality 60, full sharpness). Capture holds
+      # ~60fps at that size, so lower these only on a host that is genuinely encode-
+      # or bandwidth-bound. MAX_FPS optionally caps the live viewer (0 = uncapped);
+      # it does not affect input responsiveness, which the gateway handles itself.
+      GUARDRAIL_ISOLATION_WIDTH: ${GUARDRAIL_ISOLATION_WIDTH:-}
+      GUARDRAIL_ISOLATION_HEIGHT: ${GUARDRAIL_ISOLATION_HEIGHT:-}
+      GUARDRAIL_ISOLATION_QUALITY: ${GUARDRAIL_ISOLATION_QUALITY:-}
+      GUARDRAIL_ISOLATION_MAX_FPS: ${GUARDRAIL_ISOLATION_MAX_FPS:-}
       # RDP/VNC via the guacd sidecar. Both must agree: this switch wires the
       # gateways, the compose profile starts the daemon.
       GUARDRAIL_DESKTOP_ENABLED: ${GUARDRAIL_DESKTOP_ENABLED:-false}

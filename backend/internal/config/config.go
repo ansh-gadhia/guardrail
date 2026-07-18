@@ -61,6 +61,18 @@ type BrowserConfig struct {
 	// that is wrong on every host but the one it was tuned for.
 	SessionMemoryMB int
 	HostReserveMB   int
+	// Screencast quality/geometry. These are the FPS levers: the headless
+	// Chromium software-encodes one JPEG per frame, so fewer pixels (Width x
+	// Height) and lower Quality mean cheaper frames and a higher achievable rate.
+	// 0 leaves the gateway's own default (see browser.Config.defaults).
+	Quality int
+	Width   int
+	Height  int
+	// MaxFPS optionally caps how often a frame is pushed to the LIVE viewer
+	// (the recorder still gets every frame). 0 means uncapped — send whatever
+	// Chrome produces. It is a pacing/stability limit, not a way to exceed
+	// Chrome's own capture rate.
+	MaxFPS int
 }
 
 // DesktopConfig configures RDP/VNC brokering through guacd, the Apache Guacamole
@@ -253,6 +265,13 @@ func Load() (*Config, error) {
 			ChromePath:      getEnv("GUARDRAIL_CHROME_PATH", ""),
 			SessionMemoryMB: getInt("GUARDRAIL_ISOLATION_SESSION_MEMORY_MB", 400),
 			HostReserveMB:   getInt("GUARDRAIL_ISOLATION_HOST_RESERVE_MB", 512),
+			// 0 = let the gateway pick its default (1280x800 / q60, full sharpness).
+			// Lower WIDTH/HEIGHT/QUALITY only if a host is encode- or bandwidth-bound;
+			// measurement shows resolution does not change the frame rate here.
+			Quality: getInt("GUARDRAIL_ISOLATION_QUALITY", 0),
+			Width:   getInt("GUARDRAIL_ISOLATION_WIDTH", 0),
+			Height:  getInt("GUARDRAIL_ISOLATION_HEIGHT", 0),
+			MaxFPS:  getInt("GUARDRAIL_ISOLATION_MAX_FPS", 0),
 		},
 		Desktop: DesktopConfig{
 			Enabled:      getBool("GUARDRAIL_DESKTOP_ENABLED", false),

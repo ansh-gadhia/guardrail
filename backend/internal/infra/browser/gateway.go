@@ -39,6 +39,10 @@ type Config struct {
 	Width      int64
 	Height     int64
 	Quality    int64 // JPEG quality 1..100 for the screencast
+	// MaxFPS caps how often a frame is handed to the LIVE viewer. The recorder
+	// still receives every frame. 0 means uncapped. It cannot raise Chrome's own
+	// capture rate; it only limits it, to steady pacing or save CPU/bandwidth.
+	MaxFPS int
 	// MaxRecordingBytes caps the frames one session may buffer in memory before
 	// they are flushed at teardown. A long, busy session would otherwise grow
 	// without bound.
@@ -61,6 +65,12 @@ type Config struct {
 }
 
 func (c *Config) defaults() {
+	// Default to full sharpness. Measurement (a headless Chromium on this class of
+	// host) showed the JPEG screencast holds ~60fps at 1280x800 quality 60 just as
+	// it does at smaller sizes, so trimming resolution buys no frame rate — it only
+	// softens the image. The lever that actually governs responsiveness is the
+	// input path, not pixel count. GUARDRAIL_ISOLATION_WIDTH/HEIGHT/QUALITY remain
+	// for hosts that are genuinely encode-bound or bandwidth-limited.
 	if c.Width == 0 {
 		c.Width = 1280
 	}
@@ -112,6 +122,35 @@ type bSession struct {
 	rec *recorder
 	// recording is the DB row the captured artifacts belong to.
 	recording *access.Recording
+	// lastLive is when a frame was last pushed to the live viewer, used only to
+	// enforce Config.MaxFPS. Touched solely from the single screencast callback
+	// goroutine (chromedp delivers a target's events serially), so it needs no
+	// lock; the recorder path above it is unaffected by the cap.
+	lastLive time.Time
+}
+
+// pushFrame enqueues a frame for the live viewer without ever blocking the
+// screencast callback. When the buffer is full it discards the OLDEST queued
+// frame and enqueues this one, so a writer that fell behind resumes on the
+// newest frame rather than draining a backlog of stale ones — the difference
+// between catching up instantly and replaying the last half-second of lag.
+//
+// Safe because there is exactly one producer (the per-target screencast
+// callback runs serially); the drain-then-send needs no retry loop.
+func pushFrame(bs *bSession, data []byte) {
+	select {
+	case bs.frames <- data:
+		return
+	default:
+	}
+	select {
+	case <-bs.frames: // drop the oldest
+	default:
+	}
+	select {
+	case bs.frames <- data:
+	default:
+	}
 }
 
 // Gateway is an access.Gateway backed by headless Chromium.
@@ -331,7 +370,11 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 	}
 	bs := &bSession{
 		tabCtx: tabCtx, cancel: cancel, token: randomToken(),
-		frames: make(chan []byte, 6),
+		// A shallow buffer on purpose. The client now coalesces to the newest
+		// frame per repaint, so queueing more here only lets a hitch replay stale
+		// frames before the fresh one; two slots give the writer a little pipelining
+		// without letting latency accumulate.
+		frames: make(chan []byte, 2),
 		// notes is small but never dropped-on-full the way frames are: a missed
 		// frame is invisible, a missed dialog leaves the operator staring at a
 		// frozen screen. replies holds one answer so a viewer that responds before
@@ -360,6 +403,11 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 	// records navigations, so the playback timeline is populated in browser mode
 	// exactly as it is behind the reverse proxy.
 	sessionID := s.ID
+	// Live-viewer frame interval from MaxFPS, computed once. Zero = uncapped.
+	var liveInterval time.Duration
+	if g.cfg.MaxFPS > 0 {
+		liveInterval = time.Second / time.Duration(g.cfg.MaxFPS)
+	}
 	chromedp.ListenTarget(tabCtx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *page.EventScreencastFrame:
@@ -373,10 +421,16 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 			if bs.rec != nil {
 				bs.rec.add(time.Now(), data)
 			}
-			select {
-			case bs.frames <- data:
-			default: // client behind — drop this frame, latest wins
+			// Optional live-viewer FPS cap. The recorder already holds this frame;
+			// here we only decide whether to also spend it on the operator's socket.
+			if liveInterval > 0 {
+				now := time.Now()
+				if !bs.lastLive.IsZero() && now.Sub(bs.lastLive) < liveInterval {
+					return
+				}
+				bs.lastLive = now
 			}
+			pushFrame(bs, data)
 
 		case *page.EventJavascriptDialogOpening:
 			g.onDialog(bs, sessionID, e)

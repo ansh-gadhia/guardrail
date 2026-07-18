@@ -152,15 +152,32 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
 
   // Tiled diagonal attribution. Deterrent only — see the note in console.go.
   if (WM) {
+    // The tile must fit the text's *rotated* bounding box, not the text's own.
+    // A fixed-height tile silently clips a long watermark: rotated up and to the
+    // right, the tail of the string climbs past the top edge and the end of it
+    // simply vanishes (e.g. "admin@guardrail.local · a1b2c3d4" showing as
+    // "admin@guardrail.l"). Sizing to the rotated extent keeps every glyph.
+    var FONT = '14px ui-monospace, monospace';
+    var ANGLE = -28 * Math.PI / 180;
+    var PAD = 22;
     var c = document.createElement('canvas'), g = c.getContext('2d');
-    g.font = '14px ui-monospace, monospace';
-    var w = Math.ceil(g.measureText(WM).width) + 60;
-    c.width = w; c.height = 90;
+    g.font = FONT;
+    var m = g.measureText(WM);
+    var tw = m.width;
+    var asc = m.actualBoundingBoxAscent || 11, desc = m.actualBoundingBoxDescent || 3;
+    var th = asc + desc;
+    var sin = Math.abs(Math.sin(ANGLE)), cos = Math.abs(Math.cos(ANGLE));
+    c.width = Math.ceil(tw * cos + th * sin) + PAD * 2;
+    c.height = Math.ceil(tw * sin + th * cos) + PAD * 2;
+    // Assigning width/height resets the context, so re-establish font and fill.
     g = c.getContext('2d');
-    g.font = '14px ui-monospace, monospace';
+    g.font = FONT;
     g.fillStyle = '#94a3b8';
-    g.translate(0, 70); g.rotate(-28 * Math.PI / 180);
-    g.fillText(WM, 10, 0);
+    // Anchor the baseline so the run's top-left corner sits at (PAD, PAD): its
+    // highest point is the right end climbing up by sin*tw, plus the ascender.
+    g.translate(PAD + sin * asc, PAD + sin * tw + cos * asc);
+    g.rotate(ANGLE);
+    g.fillText(WM, 0, 0);
     document.getElementById('wm').style.background = "url(" + c.toDataURL() + ") repeat";
   }
 

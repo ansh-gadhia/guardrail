@@ -42,9 +42,18 @@ func TestJSStrEscapes(t *testing.T) {
 }
 
 func TestConsolePageEmbedsSession(t *testing.T) {
-	p := consolePage("sess-123")
+	p := consolePage("sess-123", 1120, 700)
 	if !strings.Contains(p, "__ws__") || !strings.Contains(p, "createImageBitmap") {
 		t.Error("console page missing ws/render wiring")
+	}
+	// The canvas backing store and the input-coordinate mapping both key off these
+	// dimensions; if the placeholder ever stops being substituted the page would
+	// paint and map clicks at the wrong scale.
+	if !strings.Contains(p, "DEV_W=1120") || !strings.Contains(p, "DEV_H=700") {
+		t.Error("console page did not template render dimensions")
+	}
+	if strings.Contains(p, "__DEV_W__") || strings.Contains(p, "__DEV_H__") {
+		t.Error("console page left a dimension placeholder unsubstituted")
 	}
 }
 
