@@ -33,19 +33,20 @@ const STATE_CONNECTED = 3;
 const STATE_DISCONNECTING = 4;
 const STATE_DISCONNECTED = 5;
 
+// DesktopPlayer draws a graphical desktop: RDP and VNC, and only those.
+//
+// It once had a `terminal` flag, for when telnet was brokered through guacd and
+// arrived here as a rasterised terminal. Telnet is now served natively as text
+// and never reaches this component, so the flag and its Ctrl+Shift+V paste
+// variant are gone: everything this player renders is a remote OS that takes a
+// paste on its own Ctrl+V.
 export function DesktopPlayer({
   sessionId,
   watermark,
-  terminal,
   onEnded,
 }: {
   sessionId: string;
   watermark?: string;
-  // Whether guacd is drawing a terminal (telnet) rather than a graphical desktop
-  // (RDP/VNC). It changes only one thing the operator sees: how a paste lands.
-  // guacd's terminal takes an inbound clipboard on Ctrl+Shift+V; a desktop's
-  // remote OS takes it on its own Ctrl+V.
-  terminal?: boolean;
   onEnded?: () => void;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
@@ -199,10 +200,8 @@ export function DesktopPlayer({
   // model requires anyway) and hand the text to guacd over a clipboard stream.
   //
   // Setting guacd's clipboard is only half of a paste; the text still has to be
-  // pasted on the far side, and the gesture differs. guacd's terminal takes it on
-  // Ctrl+Shift+V (guac_terminal, terminal.c); a graphical desktop's remote OS
-  // takes it on its own Ctrl+V. So the toast tells the operator which — a paste
-  // button that silently did nothing visible would read as broken.
+  // pasted on the far side by the remote OS's own Ctrl+V. So the toast says so —
+  // a paste button that silently did nothing visible would read as broken.
   const paste = async () => {
     const client = clientRef.current;
     if (!client) return;
@@ -229,11 +228,7 @@ export function DesktopPlayer({
       toast.error("The clipboard could not be sent to the session.");
       return;
     }
-    toast.success(
-      terminal
-        ? "Sent to the session. Paste it in the terminal with Ctrl+Shift+V."
-        : "Sent to the session. Paste it on the desktop with Ctrl+V.",
-    );
+    toast.success("Sent to the session. Paste it on the desktop with Ctrl+V.");
   };
 
   return (
@@ -247,11 +242,7 @@ export function DesktopPlayer({
         <button
           type="button"
           onClick={paste}
-          title={
-            terminal
-              ? "Send your clipboard to the session, then paste with Ctrl+Shift+V"
-              : "Send your clipboard to the session, then paste with Ctrl+V"
-          }
+          title="Send your clipboard to the session, then paste with Ctrl+V"
           className="absolute right-3 top-3 z-20 flex items-center gap-1.5 rounded-lg border border-white/15 bg-black/50 px-2.5 py-1.5 text-xs text-white/80 backdrop-blur transition hover:bg-black/70 hover:text-white"
         >
           <IconClipboard size={14} />

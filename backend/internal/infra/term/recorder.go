@@ -1,4 +1,4 @@
-package sshgw
+package term
 
 import (
 	"context"
@@ -20,16 +20,20 @@ import (
 // has to name the same kind to serve it, and it cannot import this package.
 const ArtifactTranscript = access.ArtifactTranscript
 
-// chunk is one contiguous piece of terminal output at a point in time.
+// Chunk is one contiguous piece of terminal output at a point in time.
+//
+// Exported because it is a published format, not an internal detail: this is
+// what lands in the manifest artifact and what the console's transcript player
+// parses back. A reviewer replaying a session years from now is reading this.
 //
 // Only device output is captured, never the operator's keystrokes. That sounds
-// backwards for an audit trail until you consider what a keystroke log of an SSH
-// session actually contains: every password typed into sudo, every secret pasted
-// into a config. The device's echo already shows what was typed at a prompt,
-// while a password prompt echoes nothing — so recording output alone reproduces
-// the session faithfully and stops short of harvesting secrets the vault
-// deliberately never held.
-type chunk struct {
+// backwards for an audit trail until you consider what a keystroke log of a
+// terminal session actually contains: every password typed into sudo or into a
+// Cisco enable prompt, every secret pasted into a config. The device's echo
+// already shows what was typed at a prompt, while a password prompt echoes
+// nothing — so recording output alone reproduces the session faithfully and
+// stops short of harvesting secrets the vault deliberately never held.
+type Chunk struct {
 	// Offset is milliseconds since the recording started, so a player can replay
 	// with the original pauses — the rhythm of a session is itself evidence.
 	Offset int64 `json:"offset_ms"`
@@ -37,40 +41,48 @@ type chunk struct {
 	Len int `json:"len"`
 }
 
-// manifest indexes the transcript blob.
-type manifest struct {
+// Manifest indexes the transcript blob. Exported alongside Chunk: it is the
+// artifact a player reads, so it is part of the recording format.
+type Manifest struct {
 	Version int     `json:"version"`
 	Cols    int     `json:"cols"`
 	Rows    int     `json:"rows"`
-	Chunks  []chunk `json:"chunks"`
+	Chunks  []Chunk `json:"chunks"`
 	// Truncated marks a transcript that hit the byte cap. A player must say so
 	// rather than let a reviewer believe they watched the whole session.
 	Truncated bool `json:"truncated"`
 }
 
-// recorder accumulates a session transcript in memory and writes it once.
+// Recorder accumulates a session transcript in memory and writes it once.
 //
 // In-memory is affordable here precisely because this is text: the cap is a few
 // megabytes for a session that would be gigabytes as video. The browser gateway
 // makes the same trade for the same reason.
-type recorder struct {
+//
+// One Recorder spans the whole access session, not one device connection. A
+// telnet session that drops and is reconnected is still one session and gets one
+// continuous transcript; the gap shows up as a pause in the chunk offsets, and
+// the reason for it is recorded as a session event rather than written into the
+// transcript as text the device never printed.
+type Recorder struct {
 	mu       sync.Mutex
 	started  time.Time
 	buf      []byte
-	chunks   []chunk
+	chunks   []Chunk
 	max      int64
 	overflow bool
 	cols     int
 	rows     int
 }
 
-func newRecorder(max int64) *recorder {
-	return &recorder{started: time.Now(), max: max, cols: 80, rows: 24}
+// NewRecorder starts a transcript capped at max bytes.
+func NewRecorder(max int64) *Recorder {
+	return &Recorder{started: time.Now(), max: max, cols: 80, rows: 24}
 }
 
-// resize records the terminal geometry. The last size wins: a player needs one
+// Resize records the terminal geometry. The last size wins: a player needs one
 // canvas size, and mid-session resizes are cosmetic next to the content.
-func (r *recorder) resize(cols, rows int) {
+func (r *Recorder) Resize(cols, rows int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if cols > 0 && rows > 0 {
@@ -78,8 +90,8 @@ func (r *recorder) resize(cols, rows int) {
 	}
 }
 
-// write appends device output.
-func (r *recorder) write(b []byte) {
+// Write appends device output.
+func (r *Recorder) Write(b []byte) {
 	if len(b) == 0 {
 		return
 	}
@@ -92,15 +104,15 @@ func (r *recorder) write(b []byte) {
 		r.overflow = true
 		return
 	}
-	r.chunks = append(r.chunks, chunk{
+	r.chunks = append(r.chunks, Chunk{
 		Offset: time.Since(r.started).Milliseconds(),
 		Len:    len(b),
 	})
 	r.buf = append(r.buf, b...)
 }
 
-// flush persists the transcript and its index.
-func (r *recorder) flush(
+// Flush persists the transcript and its index.
+func (r *Recorder) Flush(
 	ctx context.Context,
 	blobs access.BlobStore,
 	store access.RecordingStore,
@@ -109,7 +121,7 @@ func (r *recorder) flush(
 ) error {
 	r.mu.Lock()
 	buf := r.buf
-	m := manifest{Version: 1, Cols: r.cols, Rows: r.rows, Chunks: r.chunks, Truncated: r.overflow}
+	m := Manifest{Version: 1, Cols: r.cols, Rows: r.rows, Chunks: r.chunks, Truncated: r.overflow}
 	r.mu.Unlock()
 
 	// A session where nothing was printed still gets finalized — the absence of
@@ -123,7 +135,7 @@ func (r *recorder) flush(
 		}
 		mb, err := json.Marshal(m)
 		if err != nil {
-			return fmt.Errorf("sshgw: marshal manifest: %w", err)
+			return fmt.Errorf("term: marshal manifest: %w", err)
 		}
 		if err := putArtifact(ctx, blobs, store, rec, access.ArtifactManifest,
 			prefix+"/manifest.json", "application/json", mb); err != nil {
@@ -143,7 +155,7 @@ func putArtifact(
 	body []byte,
 ) error {
 	if err := blobs.Put(ctx, key, body, contentType); err != nil {
-		return fmt.Errorf("sshgw: put %s: %w", kind, err)
+		return fmt.Errorf("term: put %s: %w", kind, err)
 	}
 	sum := sha256.Sum256(body)
 	return store.AddArtifact(ctx, rec.ID, access.Artifact{

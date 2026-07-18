@@ -44,7 +44,7 @@ func TestCheckCredentialAcceptsPassword(t *testing.T) {
 // signs in there as somebody else entirely, with no credential injected, while
 // the audit trail records that a credential was resolved and used.
 func TestCheckCredentialRefusesEmptyUsername(t *testing.T) {
-	for _, p := range []access.Protocol{access.ProtocolRDP, access.ProtocolTelnet} {
+	for _, p := range []access.Protocol{access.ProtocolRDP} {
 		t.Run(string(p), func(t *testing.T) {
 			err := checkCredential(access.Credential{Injection: InjectPassword, Secret: "s3cret"}, p)
 			if err == nil {

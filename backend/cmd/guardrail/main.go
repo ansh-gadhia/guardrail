@@ -42,6 +42,7 @@ import (
 	"github.com/guardrail/guardrail/internal/infra/proxy"
 	"github.com/guardrail/guardrail/internal/infra/security"
 	"github.com/guardrail/guardrail/internal/infra/sshgw"
+	"github.com/guardrail/guardrail/internal/infra/telnetgw"
 	"github.com/guardrail/guardrail/internal/platform/cache"
 	"github.com/guardrail/guardrail/internal/platform/database"
 	"github.com/guardrail/guardrail/internal/platform/httpserver"
@@ -387,8 +388,26 @@ func run() error {
 		HostKeys: sshgw.TOFU{Store: postgres.NewHostKeyRepo(pg)},
 		Log:      log,
 	})
-	sshGateways := []domaccess.Gateway{sshGateway}
 	sessionServers = append(sessionServers, sshGateway)
+
+	// Telnet, native for the same reasons as SSH. It was previously routed
+	// through guacd, which does speak telnet — but that means a remote desktop
+	// daemon rasterises a router console into a canvas and streams it back as
+	// drawing instructions. It works, and it feels like screen sharing, because
+	// that is what it is. Carried natively a Cisco console is what it always was:
+	// a byte stream, delivered as text, recorded as a transcript an investigator
+	// can grep.
+	telnetGateway := telnetgw.NewGateway(telnetgw.Config{}, telnetgw.Deps{
+		Devices:    deviceLookup,
+		Events:     eventRepo,
+		Recordings: recordingRepo,
+		Blobs:      blobStore,
+		Activity:   activity,
+		Log:        log,
+	})
+	// The two text protocols, which between them need no sidecar at all.
+	terminalGateways := []domaccess.Gateway{sshGateway, telnetGateway}
+	sessionServers = append(sessionServers, telnetGateway)
 
 	// RDP and VNC, brokered through guacd. Off unless a sidecar is configured:
 	// unlike SSH this needs a service running, and a deployment with no desktops
@@ -414,19 +433,25 @@ func run() error {
 		}
 		// One gateway per protocol: the broker routes by protocol and a gateway
 		// reports exactly one. guacd makes them otherwise identical.
+		//
+		// Telnet is deliberately not in this list any more. Two gateways claiming
+		// one protocol is not a fallback, it is an ambiguity — the broker picks
+		// whichever it sees first, so the delivery mode of a device would depend
+		// on slice order rather than on anything a reader could reason about.
 		for _, proto := range []domaccess.Protocol{
-			domaccess.ProtocolRDP, domaccess.ProtocolVNC, domaccess.ProtocolTelnet,
+			domaccess.ProtocolRDP, domaccess.ProtocolVNC,
 		} {
 			gw := guacgw.NewGateway(proto, guacCfg, guacDeps)
 			desktopGateways = append(desktopGateways, gw)
 			sessionServers = append(sessionServers, gw)
 		}
-		log.Info("desktop brokering available; RDP, VNC and telnet devices will be served through guacd",
+		log.Info("desktop brokering available; RDP and VNC devices will be served through guacd",
 			zap.String("guacd", cfg.Desktop.Addr),
 			zap.String("recording_dir", cfg.Desktop.RecordingDir))
 	} else {
-		log.Info("desktop brokering disabled; RDP, VNC and telnet devices cannot be connected to " +
-			"(set GUARDRAIL_DESKTOP_ENABLED and run a guacd sidecar)")
+		log.Info("desktop brokering disabled; RDP and VNC devices cannot be connected to " +
+			"(set GUARDRAIL_DESKTOP_ENABLED and run a guacd sidecar). Telnet is unaffected: " +
+			"it is served natively and needs no sidecar")
 	}
 
 	sessionServer := v1.SessionMux(sessionServers)
@@ -434,7 +459,7 @@ func run() error {
 	brokerSvc := appaccess.NewService(appaccess.Deps{
 		Sessions:         sessionRepo,
 		Authorizer:       postgres.NewAuthorizerRepo(pg),
-		Gateways:         append(append([]domaccess.Gateway{proxyGateway}, sshGateways...), desktopGateways...),
+		Gateways:         append(append([]domaccess.Gateway{proxyGateway}, terminalGateways...), desktopGateways...),
 		IsolatedGateways: isolatedGateways,
 		Activity:         activity,
 		Registry:         liveRegistry,
@@ -473,7 +498,7 @@ func run() error {
 	// not hold. Missing one here would leave a live Chromium serving a session
 	// that the rest of the cluster considers ended.
 	allGateways := append([]domaccess.Gateway{proxyGateway}, isolatedGateways...)
-	allGateways = append(allGateways, sshGateways...)
+	allGateways = append(allGateways, terminalGateways...)
 	go func() {
 		if err := liveRegistry.SubscribeTerminate(ctx, func(sid uuid.UUID) {
 			for _, gw := range allGateways {

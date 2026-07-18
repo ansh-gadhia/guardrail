@@ -40,6 +40,39 @@ function absLocal(iso: string): string {
   if (Number.isNaN(dt.getTime())) return "—";
   return dt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
+// absExact is the value an investigator writes down: seconds included, and the
+// zone named so a timestamp copied out of here still means something in a ticket
+// read by someone in another country. Used on hover, where it costs no space.
+//
+// The fields are listed out rather than asked for as dateStyle/timeStyle. Those
+// two are shorthands that ECMA-402 forbids combining with any explicit field —
+// including timeZoneName — and it enforces that by THROWING TypeError, not by
+// ignoring the option. Thrown from a render path it takes the whole page to the
+// error boundary, which is exactly what it did here: every row called this, so
+// the Access Log died on first paint.
+//
+// Wrapped as well, because a formatter that throws must never be able to cost
+// the operator the page again. Same lesson as the MFA QR: format defensively at
+// the boundary, degrade to something readable.
+function absExact(iso: string): string {
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return "—";
+  try {
+    const local = dt.toLocaleString(undefined, {
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      timeZoneName: "short",
+    });
+    return `${local}\nUTC: ${dt.toISOString()}`;
+  } catch {
+    return dt.toISOString();
+  }
+}
 function parseUA(ua: string): { browser: string; os: string } {
   if (!ua) return { browser: "Unknown client", os: "" };
   let browser = "Browser";
@@ -227,7 +260,7 @@ export function AccessLogPage() {
       header: "Signed in",
       value: (s) => s.signed_in_at,
       cell: (s) => (
-        <div className="leading-tight">
+        <div className="leading-tight" title={absExact(s.signed_in_at)}>
           <div className="whitespace-nowrap text-sm text-fg">{absLocal(s.signed_in_at)}</div>
           <div className="text-2xs text-faint">{relTime(s.signed_in_at)}</div>
         </div>
@@ -237,11 +270,18 @@ export function AccessLogPage() {
       key: "last_seen",
       header: "Last active",
       value: (s) => s.last_seen_at,
+      // Both, like "Signed in" above: the relative form is what the eye scans for
+      // "is this happening now", the absolute is what an investigation cites. A
+      // relative time alone is also the one that rots — a page left open all
+      // afternoon still says "2m ago".
       cell: (s) => (
-        <span className="inline-flex items-center gap-1.5 text-sm text-muted">
-          <IconClock size={13} className="text-faint" />
-          {relTime(s.last_seen_at)}
-        </span>
+        <div className="leading-tight" title={absExact(s.last_seen_at)}>
+          <div className="inline-flex items-center gap-1.5 whitespace-nowrap text-sm text-muted">
+            <IconClock size={13} className="text-faint" />
+            {absLocal(s.last_seen_at)}
+          </div>
+          <div className="text-2xs text-faint">{relTime(s.last_seen_at)}</div>
+        </div>
       ),
     },
     {
@@ -381,7 +421,21 @@ export function AccessLogPage() {
                         </div>
                         <span className="hidden font-mono text-xs text-faint sm:inline">{r.ip || "—"}</span>
                         <Badge tone={a.tone}>{a.badge}</Badge>
-                        <time className="w-20 shrink-0 text-right font-mono text-2xs tabular-nums text-faint">{relTime(r.ts)}</time>
+                        {/* dateTime carries the machine-readable instant; the two
+                            rendered lines are for people. A sign-in attempt is the
+                            thing most likely to be quoted in an incident report,
+                            so the date has to be here and not only on hover. */}
+                        {/* spans, not divs: <time> takes phrasing content only,
+                            and a <div> inside it is invalid markup React will
+                            warn about on every render. */}
+                        <time
+                          dateTime={r.ts}
+                          title={absExact(r.ts)}
+                          className="w-32 shrink-0 text-right leading-tight tabular-nums"
+                        >
+                          <span className="block whitespace-nowrap text-2xs text-muted">{absLocal(r.ts)}</span>
+                          <span className="block font-mono text-2xs text-faint">{relTime(r.ts)}</span>
+                        </time>
                       </li>
                     );
                   })}

@@ -36,7 +36,12 @@ import (
 
 	"github.com/guardrail/guardrail/internal/domain/access"
 	"github.com/guardrail/guardrail/internal/infra/proxy"
+	"github.com/guardrail/guardrail/internal/infra/term"
 )
+
+// ArtifactTranscript is re-exported so callers that reason about SSH evidence
+// need not know the transcript is written by the shared terminal package.
+const ArtifactTranscript = term.ArtifactTranscript
 
 // Injection methods this gateway understands. They mirror the vault's stored
 // values; the HTTP-shaped methods (form/basic/header) are meaningless for a
@@ -138,10 +143,19 @@ type sshSession struct {
 	// deviceLabel is what the operator is connected to, for the console header.
 	deviceLabel string
 
+	// What a reconnect needs. The credential is deliberately absent: it is
+	// re-resolved from the vault on every dial, so a session that lives for hours
+	// never holds a plaintext secret in memory waiting to be read out of a core
+	// dump.
+	sess  *access.Session
+	creds access.CredentialResolver
+	ep    access.Endpoint
+	addr  string
+
 	client *ssh.Client
 
 	// rec accumulates the transcript. nil when the device is not recorded.
-	rec       *recorder
+	rec       *term.Recorder
 	recording *access.Recording
 
 	// attached guards the socket: one terminal per session. A second viewer would
@@ -173,43 +187,11 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		return access.LiveSession{}, err
 	}
 
-	cred, err := r.Resolve(ctx, s)
-	if err != nil && !errors.Is(err, access.ErrNoCredential) {
-		return access.LiveSession{}, err
-	}
-	// Unlike a web UI, there is no useful "show me the device's own login page"
-	// state for SSH: without a credential there is nothing to authenticate with
-	// and no page to render. Break-glass therefore cannot mean "connect anyway".
-	if errors.Is(err, access.ErrNoCredential) {
-		return access.LiveSession{}, access.ErrNoCredential
-	}
-
-	auth, err := authMethod(cred)
-	if err != nil {
-		return access.LiveSession{}, err
-	}
-
 	port := ep.Port
 	if port == 0 {
 		port, _ = access.DefaultPort(access.ProtocolSSH)
 	}
 	addr := net.JoinHostPort(ep.Host, strconv.Itoa(port))
-
-	hk, err := g.hostKeyCallback(ctx, s, ep)
-	if err != nil {
-		return access.LiveSession{}, err
-	}
-
-	conf := &ssh.ClientConfig{
-		User:            cred.Username,
-		Auth:            []ssh.AuthMethod{auth},
-		HostKeyCallback: hk,
-		Timeout:         g.cfg.DialTimeout,
-	}
-	client, err := dial(ctx, addr, conf, g.cfg.HandshakeTimeout)
-	if err != nil {
-		return access.LiveSession{}, err
-	}
 
 	sess := &sshSession{
 		id: s.ID, orgID: s.OrganizationID,
@@ -217,7 +199,10 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		expires:     time.Now().Add(g.cfg.SessionTTL),
 		watermark:   s.WatermarkOr(),
 		deviceLabel: ep.Host,
-		client:      client,
+		sess:        s,
+		creds:       r,
+		ep:          ep,
+		addr:        addr,
 	}
 
 	// Attach to the recording the broker already opened for this session; do not
@@ -232,8 +217,12 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		rec, rerr := g.deps.Recordings.FindBySessionSystem(ctx, s.ID)
 		if rerr == nil && rec != nil {
 			sess.recording = rec
-			sess.rec = newRecorder(g.cfg.MaxRecordingBytes)
+			sess.rec = term.NewRecorder(g.cfg.MaxRecordingBytes)
 		}
+	}
+
+	if err := g.connect(ctx, sess); err != nil {
+		return access.LiveSession{}, err
 	}
 
 	g.mu.Lock()
@@ -245,6 +234,86 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		ProxyPath:  "/proxy/" + s.ID.String() + "/",
 		ProxyToken: sess.token,
 	}, nil
+}
+
+// connect opens the device connection and authenticates, storing the client on
+// the session.
+//
+// Used both for the first connection and for a reconnect, so there is exactly
+// one path that knows how to get into a device — a reconnect that authenticated
+// differently from a connect would be a hole, and the credential is re-resolved
+// from the vault each time rather than cached for the life of the session.
+func (g *Gateway) connect(ctx context.Context, s *sshSession) error {
+	cred, err := s.creds.Resolve(ctx, s.sess)
+	if err != nil && !errors.Is(err, access.ErrNoCredential) {
+		return err
+	}
+	// Unlike a web UI, there is no useful "show me the device's own login page"
+	// state for SSH: without a credential there is nothing to authenticate with
+	// and no page to render. Break-glass therefore cannot mean "connect anyway".
+	if errors.Is(err, access.ErrNoCredential) {
+		return access.ErrNoCredential
+	}
+
+	auth, err := authMethod(cred)
+	if err != nil {
+		return err
+	}
+	hk, err := g.hostKeyCallback(ctx, s.sess, s.ep)
+	if err != nil {
+		return err
+	}
+	client, err := dial(ctx, s.addr, &ssh.ClientConfig{
+		User:            cred.Username,
+		Auth:            []ssh.AuthMethod{auth},
+		HostKeyCallback: hk,
+		Timeout:         g.cfg.DialTimeout,
+	}, g.cfg.HandshakeTimeout)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.client = client
+	s.mu.Unlock()
+	return nil
+}
+
+// deviceSession opens a shell channel, redialling the device if the client is
+// dead.
+//
+// A reconnect is the point: the operator's authorisation is still good and the
+// session is still live, so a device that dropped us (rebooted, reset the TCP
+// connection) should be dialled again rather than leaving a Reconnect button
+// that can never work. The new shell is genuinely new — cwd, environment and any
+// running program are gone — because that is what reconnecting to SSH means.
+func (g *Gateway) deviceSession(ctx context.Context, s *sshSession) (*ssh.Session, error) {
+	s.mu.Lock()
+	client := s.client
+	s.mu.Unlock()
+
+	if client != nil {
+		if sess, err := client.NewSession(); err == nil {
+			return sess, nil
+		}
+		// The client is unusable. Close it before replacing it or its socket and
+		// goroutines leak for as long as the session lives.
+		_ = client.Close()
+		s.mu.Lock()
+		s.client = nil
+		s.mu.Unlock()
+	}
+
+	if err := g.connect(ctx, s); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	client = s.client
+	s.mu.Unlock()
+	if client == nil {
+		return nil, fmt.Errorf("sshgw: no device connection after redial")
+	}
+	return client.NewSession()
 }
 
 // End tears the session down and flushes its transcript.
@@ -280,7 +349,7 @@ func (g *Gateway) teardown(s *sshSession) error {
 	// the operator closed the tab would be the worst possible time to lose it.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := s.rec.flush(ctx, g.deps.Blobs, g.deps.Recordings, s.recording, s.orgID)
+	err := s.rec.Flush(ctx, g.deps.Blobs, g.deps.Recordings, s.recording, s.orgID)
 	if err != nil && g.deps.Log != nil {
 		g.deps.Log.Error("sshgw: session transcript was not persisted; the recording has no evidence",
 			zap.String("session_id", s.id.String()), zap.Error(err))

@@ -168,9 +168,9 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 	}
 	// Break-glass. This used to refuse unconditionally, reasoning that "a desktop
 	// has no useful show-me-the-login-page state". That is not true of the
-	// protocols guacd brokers: connect an RDP, VNC or telnet session with no
-	// credential and the device presents its own login, exactly as a web device
-	// does — which is the whole of what break-glass means everywhere else.
+	// protocols guacd brokers: connect an RDP or VNC session with no credential
+	// and the device presents its own login, exactly as a web device does — which
+	// is the whole of what break-glass means everywhere else.
 	//
 	// The refusal also contradicted the error it produced. ErrNoCredential is
 	// rendered to the operator as "bind one, or enable break-glass unmanaged
@@ -286,7 +286,17 @@ const InjectPassword = "password"
 // The API validates this at write time, so this is the second line: it also
 // covers devices whose protocol was changed after the credential was bound, and
 // rows written before that validation existed.
+// It serves RDP and VNC only. Telnet was once brokered here too — guacd does
+// speak it — but that meant rasterising a text console into a canvas, which is
+// why it now has a native gateway of its own (internal/infra/telnetgw).
 func checkCredential(c access.Credential, proto access.Protocol) error {
+	if proto == access.ProtocolTelnet {
+		// Unreachable via main.go, which no longer builds a telnet guacd gateway.
+		// Stated anyway: this is the mistake that would silently undo the fix, and
+		// a wrong-but-working telnet session looks identical to a right one until
+		// somebody notices the console feels like screen sharing again.
+		return fmt.Errorf("guacgw: refusing to broker telnet through guacd; telnet is served natively by telnetgw")
+	}
 	if c.Injection != InjectPassword {
 		return fmt.Errorf("%w: this device speaks %s, but its credential is set to %q. Re-save the credential using %q",
 			access.ErrCredentialUnusable, proto, c.Injection, InjectPassword)
@@ -366,23 +376,6 @@ func (g *Gateway) params(ep access.Endpoint, cred access.Credential, port int, r
 		// canvas: a 1280x800 desktop stretched over a 4K screen is unreadable, and
 		// unreadable evidence is not evidence.
 		p["resize-method"] = "display-update"
-	}
-
-	if g.proto == access.ProtocolTelnet {
-		// Telnet has no authentication step to speak of: guacd watches the byte
-		// stream for a prompt and types the credential at it. Which means the regex
-		// below is the authentication — if it does not match, guacd never sends the
-		// username, and the session opens to a login prompt that just sits there.
-		//
-		// guacd's default only matches "login:". Cisco IOS asks "Username:", so on
-		// the exact devices this protocol was added for, the default silently does
-		// nothing. Match both.
-		//
-		// Written in POSIX ERE — bracket classes, no \s and no (?:) — because guacd
-		// compiles this with regcomp(REG_EXTENDED) and the official image is musl,
-		// whose regcomp implements POSIX and not the GNU extensions. A pattern that
-		// works on a glibc box and fails in the container is a bad way to find out.
-		p["username-regex"] = "([Ll]ogin|[Uu]sername):[[:space:]]*$"
 	}
 
 	if recordingName != "" {

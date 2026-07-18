@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/guardrail/guardrail/internal/domain/access"
+	"github.com/guardrail/guardrail/internal/infra/term"
 )
 
 // fakeBlobs captures what was persisted.
@@ -243,7 +244,7 @@ func TestStreamCarriesInputAndOutput(t *testing.T) {
 	}
 
 	// A keystroke must reach the device.
-	msg, _ := json.Marshal(clientMsg{T: "i", D: "whoami\n"})
+	msg, _ := json.Marshal(term.ClientMsg{T: "i", D: "whoami\n"})
 	if err := c.Write(ctx, websocket.MessageText, msg); err != nil {
 		t.Fatalf("write input: %v", err)
 	}
@@ -269,7 +270,7 @@ func TestStreamTouchesActivityOnInputOnly(t *testing.T) {
 
 	// A resize must NOT count: a window manager can emit one with nobody at the
 	// keyboard, which would keep an abandoned session alive past its timeout.
-	rs, _ := json.Marshal(clientMsg{T: "r", Cols: 100, Rows: 40})
+	rs, _ := json.Marshal(term.ClientMsg{T: "r", Cols: 100, Rows: 40})
 	if err := c.Write(ctx, websocket.MessageText, rs); err != nil {
 		t.Fatalf("write resize: %v", err)
 	}
@@ -278,7 +279,7 @@ func TestStreamTouchesActivityOnInputOnly(t *testing.T) {
 		t.Errorf("resize touched activity %d times; an idle session would never expire", n)
 	}
 
-	in, _ := json.Marshal(clientMsg{T: "i", D: "x"})
+	in, _ := json.Marshal(term.ClientMsg{T: "i", D: "x"})
 	if err := c.Write(ctx, websocket.MessageText, in); err != nil {
 		t.Fatalf("write input: %v", err)
 	}
@@ -301,7 +302,7 @@ func TestRecordedSessionWritesSearchableTranscript(t *testing.T) {
 	c := h.dial(t, ctx)
 	_, _, _ = c.Read(ctx) // banner
 
-	msg, _ := json.Marshal(clientMsg{T: "i", D: "cat /etc/shadow\n"})
+	msg, _ := json.Marshal(term.ClientMsg{T: "i", D: "cat /etc/shadow\n"})
 	if err := c.Write(ctx, websocket.MessageText, msg); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -337,7 +338,7 @@ func TestRecordedSessionWritesSearchableTranscript(t *testing.T) {
 	if mb == nil {
 		t.Fatal("no manifest written")
 	}
-	var m manifest
+	var m term.Manifest
 	if err := json.Unmarshal(mb, &m); err != nil {
 		t.Fatalf("manifest is not valid JSON: %v", err)
 	}
@@ -384,7 +385,7 @@ func TestUnrecordedSessionWritesNothing(t *testing.T) {
 
 	c := h.dial(t, ctx)
 	_, _, _ = c.Read(ctx)
-	msg, _ := json.Marshal(clientMsg{T: "i", D: "secret-command\n"})
+	msg, _ := json.Marshal(term.ClientMsg{T: "i", D: "secret-command\n"})
 	_ = c.Write(ctx, websocket.MessageText, msg)
 	time.Sleep(200 * time.Millisecond)
 	c.CloseNow()

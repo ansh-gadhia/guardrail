@@ -4,7 +4,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, getAccessToken } from "@/lib/api";
 import { Button, Badge, cn } from "@/components/ui";
 import { toast } from "@/components/Toast";
-import { IconTrash, IconMaximize, IconMinimize } from "@/components/icons";
+import { IconTrash, IconMaximize, IconMinimize, IconRefresh } from "@/components/icons";
 import { DesktopPlayer } from "@/components/DesktopPlayer";
 
 // SessionViewPage embeds the brokered device UI in a same-origin iframe. The
@@ -50,12 +50,12 @@ export function SessionViewPage() {
   // instructions decoded onto a canvas in this app; everything else is the
   // gateway's own page in an iframe. The session says which — asking the device
   // would be asking a record that may have been edited since.
-  // Telnet is in this list despite being a terminal: guacd renders it to the same
-  // canvas as a desktop and streams the same instructions, so the desktop player
-  // is its player. What decides the branch is how the session is drawn, not
-  // whether a human would call it a desktop.
-  const isDesktop =
-    status.data?.protocol === "rdp" || status.data?.protocol === "vnc" || status.data?.protocol === "telnet";
+  //
+  // Telnet used to be in this list, because it was brokered through guacd and so
+  // arrived as pixels like a desktop. It is now served natively as text, the same
+  // as SSH, and takes the iframe branch with it: the gateway serves an xterm
+  // console at the session root.
+  const isDesktop = status.data?.protocol === "rdp" || status.data?.protocol === "vnc";
 
   // Close the tab, close the session. `pagehide` fires on a real unload (tab
   // close, reload, external navigation) but NOT on in-app React Router
@@ -83,6 +83,17 @@ export function SessionViewPage() {
   // device's screen bigger, not the console's chrome. The desktop player already
   // follows its container via a ResizeObserver, and the iframe fills it, so both
   // simply grow.
+  // Reconnect. The gateways already heal what they can on their own — a dropped
+  // WebSocket re-attaches itself, and a device that hung up gets an offer inside
+  // the terminal — but both of those only appear once something has visibly
+  // broken. This is the case they miss: a session that is not disconnected and
+  // not working either, where the operator can see it is wrong and has nothing to
+  // press. Remounting the frame is a real reconnect for every protocol, because
+  // it opens a new session socket, and the gateway dials the device again if its
+  // connection is gone.
+  const [frameKey, setFrameKey] = useState(0);
+  const reconnect = () => setFrameKey((k) => k + 1);
+
   const stageRef = useRef<HTMLDivElement>(null);
   const [isFull, setIsFull] = useState(false);
   useEffect(() => {
@@ -118,6 +129,16 @@ export function SessionViewPage() {
           {!ended && (
             <Button
               variant="ghost"
+              icon={IconRefresh}
+              onClick={reconnect}
+              title="Reopen the connection to this device. The session, and its recording, continue."
+            >
+              Reconnect
+            </Button>
+          )}
+          {!ended && (
+            <Button
+              variant="ghost"
               icon={isFull ? IconMinimize : IconMaximize}
               onClick={toggleFull}
               title={isFull ? "Exit full screen" : "Full screen"}
@@ -140,14 +161,13 @@ export function SessionViewPage() {
           isDesktop ? "bg-[#0b0e14]" : "bg-white",
         )}
       >
+        {/* key is the reconnect: changing it remounts the child, which tears the
+            old socket down and opens a new one. */}
         {status.isLoading ? null : isDesktop ? (
-          <DesktopPlayer
-            sessionId={id}
-            watermark={status.data?.watermark}
-            terminal={status.data?.protocol === "telnet"}
-          />
+          <DesktopPlayer key={frameKey} sessionId={id} watermark={status.data?.watermark} />
         ) : (
           <iframe
+            key={frameKey}
             title={name}
             src={proxyUrl}
             className="h-full w-full"
