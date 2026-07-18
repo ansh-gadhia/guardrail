@@ -350,6 +350,14 @@ func run() error {
 				Node:                  cfg.Telemetry.ServiceName,
 				SessionMemoryEstimate: uint64(cfg.Browser.SessionMemoryMB) << 20,
 				HostReserve:           uint64(cfg.Browser.HostReserveMB) << 20,
+				// Screencast tuning. Zero values fall through to Config.defaults;
+				// previously these were never passed at all, so the env vars had no
+				// effect and the recorder cap silently ignored GUARDRAIL_RECORDING_MAX_BYTES.
+				Quality:           int64(cfg.Browser.Quality),
+				Width:             int64(cfg.Browser.Width),
+				Height:            int64(cfg.Browser.Height),
+				MaxFPS:            cfg.Browser.MaxFPS,
+				MaxRecordingBytes: cfg.Recording.MaxBytes,
 			},
 			browser.Deps{
 				Devices:    deviceLookup,

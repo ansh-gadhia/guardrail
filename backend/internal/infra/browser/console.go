@@ -1,14 +1,23 @@
 package browser
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // consolePage returns the self-contained canvas viewer served at a session root.
 // It opens the streaming WebSocket, paints incoming JPEG frames to a canvas, and
-// forwards mouse/keyboard as JSON. Device dimensions are fixed to the gateway's
-// render size; the canvas is CSS-scaled to fit and input coordinates are mapped
-// back. No device markup ever reaches this page — only pixels.
-func consolePage(sid string) string {
-	return strings.NewReplacer("__SID__", sid).Replace(consoleTmpl)
+// forwards mouse/keyboard as JSON. The canvas backing store AND the input
+// coordinate mapping are sized to (w,h) — the gateway's render dimensions — so
+// the page stays correct at whatever resolution GUARDRAIL_ISOLATION_WIDTH/HEIGHT
+// select; the canvas is then CSS-scaled to fit the viewport. No device markup
+// ever reaches this page — only pixels.
+func consolePage(sid string, w, h int64) string {
+	return strings.NewReplacer(
+		"__SID__", sid,
+		"__DEV_W__", strconv.FormatInt(w, 10),
+		"__DEV_H__", strconv.FormatInt(h, 10),
+	).Replace(consoleTmpl)
 }
 
 const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
@@ -37,7 +46,7 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
    background:#1e293b;color:#e2e8f0}
  #dlgok{background:#0ea5e9;border-color:#0ea5e9;color:#04202e;font-weight:600}
 </style></head><body>
-<div id="wrap"><canvas id="screen" width="1280" height="800" tabindex="0"></canvas></div>
+<div id="wrap"><canvas id="screen" width="__DEV_W__" height="__DEV_H__" tabindex="0"></canvas></div>
 <div id="status">Connecting to session…</div>
 <button id="paste" type="button" title="Paste your clipboard into the device (Ctrl+V goes to your own browser, not the device)">Paste clipboard</button>
 <div id="dlgwrap" role="dialog" aria-modal="true" aria-labelledby="dlgm">
@@ -50,7 +59,7 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
 </div>
 <script>
 (function(){
- var DEV_W=1280, DEV_H=800;
+ var DEV_W=__DEV_W__, DEV_H=__DEV_H__;
  var cv=document.getElementById('screen'), cx=cv.getContext('2d');
  var st=document.getElementById('status');
  var proto=location.protocol==='https:'?'wss:':'ws:';
@@ -60,11 +69,33 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
  ws.onopen=function(){ st.textContent='Connected'; setTimeout(function(){st.style.display='none';},1200); cv.focus(); };
  ws.onclose=function(){ st.style.display='block'; st.textContent='Session ended'; };
  ws.onerror=function(){ st.style.display='block'; st.textContent='Connection error'; };
+ /* Painting is coalesced to the display refresh, newest-wins. Frames can arrive
+    faster than the screen repaints (or faster than a JPEG decodes); decoding one
+    per message would put the main thread to work painting stale frames it then
+    immediately overdraws, which is felt as lag. So keep only the most recent
+    frame, decode at most one at a time, and paint at most once per animation
+    frame — the operator always sees the freshest frame the instant the display
+    can show it, and superseded frames cost nothing. */
+ var pending=null;    // newest undecoded frame; a later one replaces it
+ var decoding=false;  // a createImageBitmap is in flight
+ var scheduled=false; // a rAF paint is already queued
+ function schedule(){ if(!scheduled){ scheduled=true; requestAnimationFrame(paint); } }
+ function paint(){
+   scheduled=false;
+   if(pending===null||decoding) return;
+   var buf=pending; pending=null; decoding=true;
+   createImageBitmap(new Blob([buf],{type:'image/jpeg'})).then(function(bmp){
+     cx.drawImage(bmp,0,0,DEV_W,DEV_H); bmp.close&&bmp.close();
+   }).catch(function(){}).then(function(){
+     decoding=false;
+     if(pending!==null) schedule(); // a newer frame landed mid-decode — show it next
+   });
+ }
  ws.onmessage=function(ev){
    // Text = a notification about the session; binary = a frame of the device.
    if(typeof ev.data==='string'){ onNote(ev.data); return; }
-   var blob=new Blob([ev.data],{type:'image/jpeg'});
-   createImageBitmap(blob).then(function(bmp){ cx.drawImage(bmp,0,0,DEV_W,DEV_H); bmp.close&&bmp.close(); });
+   pending=ev.data; // discard any earlier undrawn frame; only the newest matters
+   schedule();
  };
  function send(o){ if(ws.readyState===1) ws.send(JSON.stringify(o)); }
 
@@ -122,9 +153,22 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
  function mods(e){ return (e.altKey?1:0)|(e.ctrlKey?2:0)|(e.metaKey?4:0)|(e.shiftKey?8:0); }
  function pt(e){ var r=cv.getBoundingClientRect();
    return {x:(e.clientX-r.left)*(DEV_W/r.width), y:(e.clientY-r.top)*(DEV_H/r.height)}; }
- cv.addEventListener('mousemove',function(e){ var p=pt(e); send({t:'m',e:'move',x:p.x,y:p.y,mod:mods(e)}); });
- cv.addEventListener('mousedown',function(e){ e.preventDefault(); cv.focus(); var p=pt(e); send({t:'m',e:'down',x:p.x,y:p.y,b:e.button,mod:mods(e)}); });
- window.addEventListener('mouseup',function(e){ var p=pt(e); send({t:'m',e:'up',x:p.x,y:p.y,b:e.button,mod:mods(e)}); });
+ /* Mouse-move throttling. The server dispatches each input event into the
+    headless browser with a round-trip that costs about one frame (~16ms), so it
+    absorbs ~60 events/sec. A moving mouse fires far more; sending every one
+    queues them faster than they drain and the cursor — with any click or key
+    stuck behind it — falls seconds behind. That IS the "screen share" lag. So
+    coalesce: keep only the latest position and flush one move per animation
+    frame. Discrete events (down/up/wheel/keys) send at once, flushing any pending
+    move first so ordering holds. */
+ var moveP=null, moveRAF=0;
+ function sendMove(){ moveRAF=0; if(moveP===null) return;
+   send({t:'m',e:'move',x:moveP.x,y:moveP.y,mod:moveP.mod}); moveP=null; }
+ function flushMove(){ if(moveRAF) cancelAnimationFrame(moveRAF); sendMove(); }
+ cv.addEventListener('mousemove',function(e){ var p=pt(e); moveP={x:p.x,y:p.y,mod:mods(e)};
+   if(!moveRAF) moveRAF=requestAnimationFrame(sendMove); });
+ cv.addEventListener('mousedown',function(e){ e.preventDefault(); cv.focus(); flushMove(); var p=pt(e); send({t:'m',e:'down',x:p.x,y:p.y,b:e.button,mod:mods(e)}); });
+ window.addEventListener('mouseup',function(e){ flushMove(); var p=pt(e); send({t:'m',e:'up',x:p.x,y:p.y,b:e.button,mod:mods(e)}); });
  cv.addEventListener('contextmenu',function(e){ e.preventDefault(); });
  cv.addEventListener('wheel',function(e){ e.preventDefault(); var p=pt(e); send({t:'m',e:'wheel',x:p.x,y:p.y,dx:e.deltaX,dy:e.deltaY,mod:mods(e)}); },{passive:false});
  cv.addEventListener('keydown',function(e){ e.preventDefault(); var pr=e.key.length===1;
