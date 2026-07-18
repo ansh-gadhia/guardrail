@@ -144,6 +144,12 @@ export const IconMinimize = (p: IconProps) => (
   <svg {...base(p)}><path d="M8 3v3a2 2 0 0 1-2 2H3M16 3v3a2 2 0 0 0 2 2h3M16 21v-3a2 2 0 0 1 2-2h3M8 21v-3a2 2 0 0 0-2-2H3" /></svg>
 );
 
+// Two arcs with arrowheads — the usual "go round again". Used for reconnecting a
+// live session, so it must not read as the browser's page reload.
+export const IconRefresh = (p: IconProps) => (
+  <svg {...base(p)}><path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-7.5-4M3 12a9 9 0 0 1 9-9 9 9 0 0 1 7.5 4" /><path d="M21 3v5h-5M3 21v-5h5" /></svg>
+);
+
 export const IconClipboard = (p: IconProps) => (
   <svg {...base(p)}><rect x="8" y="2" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /></svg>
 );

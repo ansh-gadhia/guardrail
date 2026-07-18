@@ -2,7 +2,6 @@ package sshgw
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,11 +10,9 @@ import (
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/ssh"
-)
 
-// maxInputBytes bounds a single client message. Terminal input is keystrokes and
-// the occasional paste; anything larger is not a person typing.
-const maxInputBytes = 1 << 20
+	"github.com/guardrail/guardrail/internal/infra/term"
+)
 
 // Console serves the terminal page for a session.
 func (g *Gateway) Console(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token, path string) bool {
@@ -25,7 +22,12 @@ func (g *Gateway) Console(w http.ResponseWriter, r *http.Request, sid uuid.UUID,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(consolePage(sid.String(), s.deviceLabel, s.watermark)))
+	_, _ = w.Write([]byte(term.Page(term.Options{
+		SessionID: sid.String(),
+		Device:    s.deviceLabel,
+		Watermark: s.watermark,
+		Protocol:  "SSH",
+	})))
 	return true
 }
 
@@ -61,24 +63,30 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 	}
 	defer c.CloseNow()
 	// Terminal output is unbounded in time; the socket lives as long as the shell.
-	c.SetReadLimit(maxInputBytes)
+	c.SetReadLimit(term.MaxInputBytes)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
 	if err := g.pump(ctx, c, s); err != nil && !isNormalClose(err) {
-		// The device connection is gone; tell the operator rather than leaving a
-		// terminal that has silently stopped responding.
-		_ = c.Close(websocket.StatusInternalError, "session ended")
+		// The device connection is gone while the session itself is still good.
+		// Say so with the code the console reads as "offer a reconnect", rather
+		// than the old generic error that left a terminal which had silently
+		// stopped responding and no way to act on it.
+		_ = c.Close(term.CloseDeviceGone, "device connection lost")
 		return true
 	}
+	// A clean end — the shell exited, or the session was torn down. There is
+	// nothing to reconnect to, and the console must not pretend otherwise.
 	_ = c.Close(websocket.StatusNormalClosure, "")
 	return true
 }
 
 // pump wires the PTY to the socket until either end closes.
 func (g *Gateway) pump(ctx context.Context, c *websocket.Conn, s *sshSession) error {
-	sess, err := s.client.NewSession()
+	// Redials if the device connection died since the last viewer. This is the
+	// reconnect path: the console's Reconnect button is just a new WebSocket.
+	sess, err := g.deviceSession(ctx, s)
 	if err != nil {
 		return err
 	}
@@ -157,37 +165,26 @@ func (g *Gateway) pump(ctx context.Context, c *websocket.Conn, s *sshSession) er
 	}
 }
 
-// clientMsg is one message from the terminal.
-type clientMsg struct {
-	// T is the type: "i" input, "r" resize.
-	T string `json:"t"`
-	// D is input data (for "i").
-	D string `json:"d,omitempty"`
-	// Cols/Rows are the new geometry (for "r").
-	Cols int `json:"cols,omitempty"`
-	Rows int `json:"rows,omitempty"`
-}
-
 // dispatch applies one client message.
 func (g *Gateway) dispatch(sess *ssh.Session, stdin io.Writer, s *sshSession, data []byte) error {
-	var m clientMsg
-	if err := json.Unmarshal(data, &m); err != nil {
+	m, ok := term.ParseClientMsg(data)
+	if !ok {
 		return nil // ignore malformed frames rather than killing the session
 	}
 	switch m.T {
-	case "i":
+	case term.MsgInput:
 		// Typing is what proves an operator is still there. A resize is not: a
 		// window manager can emit one with nobody at the keyboard, so counting it
 		// as activity would keep an abandoned session alive past its idle timeout.
 		g.touch(s)
 		_, err := stdin.Write([]byte(m.D))
 		return err
-	case "r":
+	case term.MsgResize:
 		if m.Cols <= 0 || m.Rows <= 0 {
 			return nil
 		}
 		if s.rec != nil {
-			s.rec.resize(m.Cols, m.Rows)
+			s.rec.Resize(m.Cols, m.Rows)
 		}
 		return sess.WindowChange(m.Rows, m.Cols)
 	}
@@ -197,7 +194,7 @@ func (g *Gateway) dispatch(sess *ssh.Session, stdin io.Writer, s *sshSession, da
 // emit sends device output to the operator and to the transcript.
 func (g *Gateway) emit(ctx context.Context, c *websocket.Conn, s *sshSession, b []byte) {
 	if s.rec != nil {
-		s.rec.write(b)
+		s.rec.Write(b)
 	}
 	// Bound the write so a browser that has stopped reading cannot wedge the
 	// reader goroutine and, with it, the device session.

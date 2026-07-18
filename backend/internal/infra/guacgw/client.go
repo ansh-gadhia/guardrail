@@ -55,7 +55,7 @@ func negotiateVersion(offered string) string {
 
 // connConfig is one device connection's parameters.
 type connConfig struct {
-	// Protocol is the guacd protocol name: "rdp", "vnc" or "telnet".
+	// Protocol is the guacd protocol name: "rdp" or "vnc".
 	Protocol string
 	// Params are guacd connection parameters by name (hostname, port, username,
 	// password, …). Only names guacd asked for are sent.
