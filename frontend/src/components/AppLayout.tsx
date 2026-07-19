@@ -8,7 +8,7 @@ import { api } from "@/lib/api";
 import type { Session } from "@/lib/types";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { CommandPalette, type Command } from "./CommandPalette";
-import { BrandMark } from "./brand";
+import { BrandMark, CompanyLogo } from "./brand";
 import { Footer } from "./Footer";
 import { Menu, MenuItem, Badge, cn } from "./ui";
 import {
@@ -100,7 +100,7 @@ export function AppLayout() {
 
   const SidebarInner = ({ collapsed }: { collapsed: boolean }) => (
     <>
-      <div className={cn("flex items-center gap-2.5 px-5 py-5", collapsed && "justify-center px-0")}>
+      <div className={cn("flex items-center gap-2.5 px-5 pb-3 pt-5", collapsed && "justify-center px-0 pb-5")}>
         <BrandMark className="h-9 w-9 shrink-0 drop-shadow-sm" />
         {!collapsed && (
           <div>
@@ -109,6 +109,35 @@ export function AppLayout() {
           </div>
         )}
       </div>
+
+      {/* The company mark, seated just under the product wordmark — a small
+          animated "seal" that leans into the Virtual Galaxy name: a breathing
+          accent aura, drifting starlight, and a mark that blooms on hover. Hidden
+          when the rail is collapsed, where only the product emblem shows. */}
+      {!collapsed && (
+        <div className="brand-seal px-4 pb-2">
+          <div className="seal-divider mb-2.5 h-px w-full" aria-hidden />
+          <a
+            href="https://vgipl.com"
+            target="_blank"
+            rel="noreferrer noopener"
+            title="Virtual Galaxy"
+            className="group relative flex flex-col items-center gap-1.5 rounded-xl py-2 outline-none transition-colors hover:bg-surface-2/40 focus-visible:ring-2 focus-visible:ring-accent/50"
+          >
+            <span className="text-[8.5px] font-semibold uppercase tracking-[0.24em] text-faint transition-colors group-hover:text-accent">
+              Engineered by
+            </span>
+            <span className="seal-cluster relative flex items-center justify-center px-3 py-0.5">
+              <span className="seal-aura" aria-hidden />
+              <span className="seal-star seal-star-1" aria-hidden />
+              <span className="seal-star seal-star-2" aria-hidden />
+              <span className="seal-star seal-star-3" aria-hidden />
+              <CompanyLogo className="seal-logo relative h-7 w-auto" />
+            </span>
+          </a>
+        </div>
+      )}
+
       <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-2">
         {sections.map((section) => (
           <div key={section}>
