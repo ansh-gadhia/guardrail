@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
+import { plausibleDate } from "@/lib/dates";
 import type { DashboardSummary, Device } from "@/lib/types";
 import { ErrorNote, StatusBadge, Panel, EmptyState, Skeleton, Hairline, cn } from "@/components/ui";
 import { Donut, Legend, PostureBar } from "@/components/charts";
@@ -223,7 +224,7 @@ function ActivityRail({ activity }: { activity: { ts: string; actor: string; act
               <span className="text-faint"> · {a.actor || "system"}</span>
             </div>
           </div>
-          <time className="shrink-0 font-mono text-2xs tabular-nums text-faint">{new Date(a.ts).toLocaleTimeString()}</time>
+          <time className="shrink-0 font-mono text-2xs tabular-nums text-faint">{plausibleDate(a.ts)?.toLocaleTimeString() ?? "—"}</time>
           <StatusBadge value={a.result} />
         </li>
       ))}

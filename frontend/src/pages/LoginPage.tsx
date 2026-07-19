@@ -6,6 +6,7 @@ import { isMFAChallenge } from "@/lib/types";
 import type { AuthProviders } from "@/lib/types";
 import { useVersion } from "@/hooks/useVersion";
 import { ErrorNote, Hairline, cn } from "@/components/ui";
+import { BrandMark, CompanyLogo } from "@/components/brand";
 import { IconKey, IconCheck, IconShield, IconAudit } from "@/components/icons";
 
 export function LoginPage() {
@@ -74,9 +75,7 @@ export function LoginPage() {
         <div className="relative w-full max-w-sm">
           {/* Compact mark — only when the rail panel is hidden */}
           <div className="mb-8 flex flex-col items-center gap-3 text-center lg:hidden">
-            <div className="grid h-14 w-14 place-items-center rounded-2xl accent-grad text-2xl font-bold text-white shadow-md ring-1 ring-white/20">
-              G
-            </div>
+            <BrandMark className="h-16 w-16 drop-shadow-md" />
             <div>
               <div className="font-display text-xl font-semibold tracking-tight">GuardRail</div>
               <div className="text-2xs uppercase tracking-[0.14em] text-faint">Privileged Access Management</div>
@@ -188,7 +187,12 @@ export function LoginPage() {
             )}
           </div>
 
-          <div className="mt-6 text-center text-2xs text-faint lg:hidden">GuardRail v{version.data?.version ?? "…"}</div>
+          {/* Company mark — shown here on small screens (the brand rail carries it
+              on desktop). Theme-aware: dark ink on light, light ink on dark. */}
+          <div className="mt-8 flex flex-col items-center gap-2 lg:hidden">
+            <CompanyLogo className="h-9 w-auto" />
+            <span className="text-2xs text-faint">GuardRail v{version.data?.version ?? "…"}</span>
+          </div>
         </div>
       </main>
     </div>
@@ -224,12 +228,10 @@ function BrandRail({ version }: { version?: string }) {
 
       {/* wordmark */}
       <div className="relative flex items-center gap-3">
-        <div className="grid h-11 w-11 place-items-center rounded-xl accent-grad text-lg font-bold text-white shadow-lg ring-1 ring-white/20">
-          G
-        </div>
+        <BrandMark className="h-12 w-12 drop-shadow-lg" />
         <div>
           <div className="font-display text-lg font-semibold tracking-tight text-white">GuardRail</div>
-          <div className="font-mono text-2xs uppercase tracking-[0.18em] text-teal-300/80">Privileged Access</div>
+          <div className="font-mono text-2xs uppercase tracking-[0.18em] text-teal-300/80">Privileged Access Management</div>
         </div>
       </div>
 
@@ -260,10 +262,13 @@ function BrandRail({ version }: { version?: string }) {
         </ol>
       </div>
 
-      {/* footer */}
-      <div className="relative flex items-center justify-between font-mono text-2xs text-slate-500">
-        <span>Secrets stay in the vault. People never touch them.</span>
-        <span className="tabular-nums">v{version ?? "…"}</span>
+      {/* footer — the company mark sits here on desktop, always on the dark rail */}
+      <div className="relative space-y-4">
+        <CompanyLogo onDark className="h-10 w-auto" />
+        <div className="flex items-center justify-between font-mono text-2xs text-slate-500">
+          <span>Secrets stay in the vault. People never touch them.</span>
+          <span className="tabular-nums">v{version ?? "…"}</span>
+        </div>
       </div>
     </aside>
   );

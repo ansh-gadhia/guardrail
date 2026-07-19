@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
+import { plausibleDate } from "@/lib/dates";
 import type { LoginSession, DashboardSummary } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, StatCluster, Panel, Badge, Button, ErrorNote, EmptyState, Skeleton, cn } from "@/components/ui";
@@ -14,8 +15,9 @@ import { IconActivity, IconMonitor, IconGlobe, IconClock, IconLogout, IconCheck,
    wire is UTC, the browser localizes. Relative and countdown values are pure
    math on epoch millis, so they're timezone-agnostic by construction. */
 function relTime(iso: string): string {
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "—";
+  const d = plausibleDate(iso);
+  if (!d) return "—";
+  const t = d.getTime();
   const s = Math.round((Date.now() - t) / 1000);
   if (s < 5) return "just now";
   if (s < 60) return `${s}s ago`;
@@ -26,8 +28,9 @@ function relTime(iso: string): string {
   return `${Math.round(h / 24)}d ago`;
 }
 function until(iso: string): string {
-  const diff = new Date(iso).getTime() - Date.now();
-  if (Number.isNaN(diff)) return "—";
+  const d = plausibleDate(iso);
+  if (!d) return "—";
+  const diff = d.getTime() - Date.now();
   if (diff <= 0) return "expired";
   const m = Math.round(diff / 60000);
   if (m < 60) return `${m}m`;
@@ -36,8 +39,8 @@ function until(iso: string): string {
   return `${Math.round(h / 24)}d`;
 }
 function absLocal(iso: string): string {
-  const dt = new Date(iso);
-  if (Number.isNaN(dt.getTime())) return "—";
+  const dt = plausibleDate(iso);
+  if (!dt) return "—";
   return dt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 // absExact is the value an investigator writes down: seconds included, and the
@@ -55,8 +58,8 @@ function absLocal(iso: string): string {
 // the operator the page again. Same lesson as the MFA QR: format defensively at
 // the boundary, degrade to something readable.
 function absExact(iso: string): string {
-  const dt = new Date(iso);
-  if (Number.isNaN(dt.getTime())) return "—";
+  const dt = plausibleDate(iso);
+  if (!dt) return "—";
   try {
     const local = dt.toLocaleString(undefined, {
       weekday: "short",

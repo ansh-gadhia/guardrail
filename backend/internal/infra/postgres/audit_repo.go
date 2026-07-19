@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -25,6 +26,16 @@ func NewAuditRepo(db *DB) *AuditRepo { return &AuditRepo{db: db} }
 
 // Record appends an event, linking it to the previous event for its org.
 func (r *AuditRepo) Record(ctx context.Context, e audit.Event) error {
+	// Never persist a zero timestamp. Several callers (the access, vault and notify
+	// services) build the event without setting Timestamp, and the column's
+	// DEFAULT now() does NOT apply because an explicit value — the Go zero time — is
+	// passed, so those rows landed as 0001-01-01 and rendered as "739814d ago".
+	// Default it here, before the hash below is computed over it, so the timestamp
+	// is both stored and chained correctly. Callers that set Timestamp themselves
+	// (the IAM auth path) keep their own value.
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
 	return r.db.withSystemScope(ctx, func(tx pgx.Tx) error {
 		// Serialize per-org chain writers.
 		lockKey := "system"

@@ -46,7 +46,7 @@ func newSpiedGateway(t *testing.T, spy *upstreamSpy) (*HTTPGateway, uuid.UUID, s
 		token:  token,
 		proxy: &httputil.ReverseProxy{
 			Director:       g.director(target, nil, access.Credential{Injection: "none"}, prefix),
-			ModifyResponse: modifyResponse(prefix, "op@example.com"),
+			ModifyResponse: modifyResponse(prefix),
 		},
 		expiresAt: time.Now().Add(time.Hour),
 	}

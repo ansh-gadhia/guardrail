@@ -127,6 +127,11 @@ func indexGateways(gws []access.Gateway) map[access.Protocol]access.Gateway {
 // real UI, downloads and clipboard included — but it can only re-serve a site
 // that tolerates living under a path prefix, which an appliance SPA does not.
 //
+// The 'tunnel' delivery mode is delivered by the reverse proxy too: it is the
+// same credential-injecting proxy on the same /proxy/<sid>/ path, so a tunnel
+// device resolves here with isolate=false and lands on the proxy gateway. It has
+// no separate gateway of its own.
+//
 // Falling back to the proxy when isolation is asked for but unavailable keeps a
 // host with no Chromium serving sessions. That is a safe trade for delivery — the
 // operator reaches the device either way — and an unsafe one for recording, which

@@ -8,6 +8,8 @@ import { api } from "@/lib/api";
 import type { Session } from "@/lib/types";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { CommandPalette, type Command } from "./CommandPalette";
+import { BrandMark } from "./brand";
+import { Footer } from "./Footer";
 import { Menu, MenuItem, Badge, cn } from "./ui";
 import {
   IconDashboard, IconDevices, IconSessions, IconSliders, IconAudit, IconShield,
@@ -99,11 +101,11 @@ export function AppLayout() {
   const SidebarInner = ({ collapsed }: { collapsed: boolean }) => (
     <>
       <div className={cn("flex items-center gap-2.5 px-5 py-5", collapsed && "justify-center px-0")}>
-        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl accent-grad font-bold text-white shadow-md ring-1 ring-white/20">G</div>
+        <BrandMark className="h-9 w-9 shrink-0 drop-shadow-sm" />
         {!collapsed && (
           <div>
             <div className="font-display text-[15px] font-semibold leading-none tracking-tight text-fg">GuardRail</div>
-            <div className="mt-1 text-2xs uppercase tracking-wider text-faint">Privileged Access</div>
+            <div className="mt-1 text-2xs uppercase tracking-wider text-faint">Privileged Access Management</div>
           </div>
         )}
       </div>
@@ -251,9 +253,10 @@ export function AppLayout() {
           </div>
         </header>
 
-        <main key={location.pathname} className="page-enter isolate mx-auto w-full max-w-7xl flex-1 overflow-auto px-4 pb-20 pt-6 sm:px-5">
+        <main key={location.pathname} className="page-enter isolate mx-auto w-full max-w-7xl flex-1 overflow-auto px-4 pb-12 pt-6 sm:px-5">
           <Outlet />
         </main>
+        <Footer />
       </div>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />

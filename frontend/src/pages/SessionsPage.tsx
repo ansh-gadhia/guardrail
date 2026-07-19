@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, problemDetail } from "@/lib/api";
+import { plausibleDate } from "@/lib/dates";
 import type { Session, Device, UserRow } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, ErrorNote, EmptyState, StatusBadge, Badge, Skeleton } from "@/components/ui";
@@ -126,7 +127,7 @@ export function SessionsPage() {
                 <Badge tone="neutral">{s.protocol?.toUpperCase()}</Badge>
                 <span className="inline-flex items-center gap-1 text-xs text-faint">
                   <IconClock size={13} />
-                  {s.created_at ? new Date(s.created_at).toLocaleTimeString() : "—"}
+                  {plausibleDate(s.created_at)?.toLocaleTimeString() ?? "—"}
                 </span>
                 {exp && <span className="text-2xs text-faint">· {exp}</span>}
               </div>

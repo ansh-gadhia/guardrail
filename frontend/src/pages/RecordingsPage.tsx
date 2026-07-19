@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
+import { plausibleDate } from "@/lib/dates";
 import type { Session, SessionEvent, Device, UserRow, RecordingMeta } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, StatCluster, Panel, Badge, StatusBadge, Modal, EmptyState, ErrorNote, Skeleton, cn } from "@/components/ui";
@@ -12,14 +13,13 @@ import { DesktopReplay } from "@/components/DesktopReplay";
 
 /* ---- time + duration helpers (UTC in, local out; math on epoch millis) ---- */
 function absLocal(iso?: string): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  const d = plausibleDate(iso);
+  return d ? d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—";
 }
 function relTime(iso?: string): string {
-  if (!iso) return "";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "";
+  const d = plausibleDate(iso);
+  if (!d) return "";
+  const t = d.getTime();
   const s = Math.round((Date.now() - t) / 1000);
   if (s < 60) return "just now";
   const m = Math.round(s / 60);
@@ -403,7 +403,7 @@ function ActivityTimeline({ events }: { events: SessionEvent[] }) {
               </div>
             </div>
             <time className="shrink-0 font-mono text-2xs tabular-nums text-faint">
-              {new Date(e.ts).toLocaleTimeString()}
+              {plausibleDate(e.ts)?.toLocaleTimeString() ?? "—"}
             </time>
           </li>
         );

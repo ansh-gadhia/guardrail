@@ -32,7 +32,7 @@ func respFor(dest, body string) *http.Response {
 // response must survive byte-for-byte.
 func TestXHRResponseIsNotRewritten(t *testing.T) {
 	resp := respFor("empty", "0")
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -48,7 +48,7 @@ func TestXHRResponseIsNotRewritten(t *testing.T) {
 func TestXHRScriptPayloadSurvivesIntact(t *testing.T) {
 	const payload = `0document.location="/ng/prompt?viewOnly&redir=%2F";`
 	resp := respFor("empty", payload)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	if body := readBody(t, resp); body != payload {
@@ -61,7 +61,7 @@ func TestXHRScriptPayloadSurvivesIntact(t *testing.T) {
 func TestDocumentAndIframeAreStillRewritten(t *testing.T) {
 	for _, dest := range []string{"document", "iframe", "frame"} {
 		resp := respFor(dest, `<html><head></head><body>hi</body></html>`)
-		if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+		if err := modifyResponse(testPrefix)(resp); err != nil {
 			t.Fatal(err)
 		}
 		body := readBody(t, resp)
@@ -79,7 +79,7 @@ func TestDocumentAndIframeAreStillRewritten(t *testing.T) {
 func TestSubresourceDestsAreNotRewritten(t *testing.T) {
 	for _, dest := range []string{"script", "style", "image", "font"} {
 		resp := respFor(dest, "0")
-		if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+		if err := modifyResponse(testPrefix)(resp); err != nil {
 			t.Fatal(err)
 		}
 		if body := readBody(t, resp); body != "0" {
@@ -93,7 +93,7 @@ func TestSubresourceDestsAreNotRewritten(t *testing.T) {
 // page, and existing callers keep working.
 func TestAbsentSecFetchDestFallsBackToRewriting(t *testing.T) {
 	resp := respFor("", `<html><head></head><body>hi</body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(readBody(t, resp), `<base href="`+testPrefix+`">`) {
@@ -111,7 +111,7 @@ func TestAbsentSecFetchDestFallsBackToRewriting(t *testing.T) {
 // script.
 func TestShimRefusesServiceWorkerRegistration(t *testing.T) {
 	resp := respFor("iframe", `<html><head></head><body></body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -131,7 +131,7 @@ func TestShimRefusesServiceWorkerRegistration(t *testing.T) {
 // matching its own routes and renders an empty page.
 func TestShimPatchesHistoryNavigation(t *testing.T) {
 	resp := respFor("iframe", `<html><head></head><body></body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
