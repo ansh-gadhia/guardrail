@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { plausibleDate } from "@/lib/dates";
 import type { AuditRow } from "@/lib/types";
 import { PageHero, ErrorNote, EmptyState, StatusBadge, Select, Button, Skeleton, Drawer } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
@@ -44,7 +45,7 @@ export function AuditPage() {
       key: "ts",
       header: "Time",
       value: (r) => r.ts,
-      cell: (r) => <span className="whitespace-nowrap text-xs tabular-nums text-faint">{new Date(r.ts).toLocaleString()}</span>,
+      cell: (r) => <span className="whitespace-nowrap text-xs tabular-nums text-faint">{fmtAbs(r.ts)}</span>,
     },
     {
       key: "action",
@@ -176,8 +177,7 @@ export function AuditPage() {
    the structured payload the action recorded (a device name, a session id,
    a failure cause…). This is what makes the log answer "what exactly happened". */
 function AuditDetailDrawer({ event, onClose }: { event: Row; onClose: () => void }) {
-  const dt = new Date(event.ts);
-  const validDate = !Number.isNaN(dt.getTime());
+  const dt = plausibleDate(event.ts);
   const detailEntries = Object.entries(event.detail ?? {});
 
   return (
@@ -185,13 +185,13 @@ function AuditDetailDrawer({ event, onClose }: { event: Row; onClose: () => void
       <div className="space-y-5">
         <div className="flex items-center gap-2">
           <StatusBadge value={event.result} />
-          {validDate && <span className="text-xs text-muted">{timeAgo(dt)}</span>}
+          {dt && <span className="text-xs text-muted">{timeAgo(dt)}</span>}
         </div>
 
         <dl className="space-y-3">
           <DRow label="When">
-            <div className="text-sm text-fg">{validDate ? dt.toLocaleString() : event.ts}</div>
-            {validDate && <div className="font-mono text-2xs text-faint">{dt.toISOString()}</div>}
+            <div className="text-sm text-fg">{dt ? dt.toLocaleString() : "unknown"}</div>
+            {dt && <div className="font-mono text-2xs text-faint">{dt.toISOString()}</div>}
           </DRow>
           <DRow label="Actor">{event.actor || "system"}</DRow>
           <DRow label="Action">
@@ -245,6 +245,11 @@ function DRow({ label, children }: { label: string; children: ReactNode }) {
       <dd className="min-w-0 text-sm text-fg">{children}</dd>
     </div>
   );
+}
+
+function fmtAbs(iso?: string): string {
+  const d = plausibleDate(iso);
+  return d ? d.toLocaleString() : "—";
 }
 
 function timeAgo(dt: Date): string {

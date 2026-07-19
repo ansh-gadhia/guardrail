@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, problemDetail } from "@/lib/api";
+import { plausibleDate } from "@/lib/dates";
 import type { AssetGroup, Device, Session, UserRow } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, Panel, Badge, StatusBadge, EmptyState, ErrorNote, Skeleton, cn } from "@/components/ui";
@@ -21,17 +22,15 @@ interface DeviceAuditRow {
   detail?: Record<string, unknown> | null;
 }
 
-/* ---- time helpers (UTC in, local out) ---- */
+/* ---- time helpers (UTC in, local out; zero/invalid dates guarded via plausibleDate) ---- */
 function absLocal(iso?: string): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  const d = plausibleDate(iso);
+  return d ? d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—";
 }
 function relTime(iso?: string): string {
-  if (!iso) return "";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "";
-  const s = Math.round((Date.now() - t) / 1000);
+  const d = plausibleDate(iso);
+  if (!d) return iso ? "unknown" : "";
+  const s = Math.round((Date.now() - d.getTime()) / 1000);
   if (s < 60) return "just now";
   const m = Math.round(s / 60);
   if (m < 60) return `${m}m ago`;

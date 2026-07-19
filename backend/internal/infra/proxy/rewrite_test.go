@@ -46,7 +46,7 @@ func TestRewriteHTMLRebasesRootAbsoluteAssets(t *testing.T) {
 		`<script src="/static/runtime.js"></script>` +
 		`<script src="/static/main.js"></script>` +
 		`</body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -85,7 +85,7 @@ func TestRewriteHTMLLeavesNonRootAbsoluteURLsAlone(t *testing.T) {
 		`<img src="data:image/png;base64,AAAA">` +
 		`<img srcset="/a.png 1x, /b.png 2x">` +
 		`</body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -108,7 +108,7 @@ func TestRewriteHTMLLeavesNonRootAbsoluteURLsAlone(t *testing.T) {
 // POST lands on GuardRail's API instead of the device's.
 func TestRewriteHTMLRebasesFormAction(t *testing.T) {
 	resp := htmlResp(`<html><head></head><body><form action="/api/v2/authenticate" method="post"></form></body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	if body := readBody(t, resp); !strings.Contains(body, `action="`+testPrefix+`api/v2/authenticate"`) {
@@ -120,7 +120,7 @@ func TestRewriteHTMLRebasesFormAction(t *testing.T) {
 // which happens on any page the device itself renders from a proxied response.
 func TestRewriteHTMLDoesNotDoublePrefix(t *testing.T) {
 	resp := htmlResp(`<html><head></head><body><script src="` + testPrefix + `static/main.js"></script></body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -134,7 +134,7 @@ func TestRewriteHTMLDoesNotDoublePrefix(t *testing.T) {
 
 func TestRewriteHTMLInjectsBaseAndShim(t *testing.T) {
 	resp := htmlResp(`<!doctype html><html><head><base href="/"><title>x</title></head><body>hi</body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -154,7 +154,7 @@ func TestRewriteHTMLInjectsBaseAndShim(t *testing.T) {
 
 func TestRewriteHTMLNoHeadFallsBackToPrepend(t *testing.T) {
 	resp := htmlResp(`<div>no head here</div>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -166,7 +166,7 @@ func TestRewriteHTMLNoHeadFallsBackToPrepend(t *testing.T) {
 func TestNonHTMLUntouched(t *testing.T) {
 	resp := &http.Response{Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"a":1}`))}
 	resp.Header.Set("Content-Type", "application/json")
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	if b := readBody(t, resp); b != `{"a":1}` {
@@ -185,7 +185,7 @@ func TestRebaseLocationHeader(t *testing.T) {
 	for in, want := range cases {
 		resp := &http.Response{Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}
 		resp.Header.Set("Location", in)
-		if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+		if err := modifyResponse(testPrefix)(resp); err != nil {
 			t.Fatal(err)
 		}
 		if got := resp.Header.Get("Location"); got != want {
@@ -197,7 +197,7 @@ func TestRebaseLocationHeader(t *testing.T) {
 func TestRebaseCookiePath(t *testing.T) {
 	resp := &http.Response{Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}
 	resp.Header.Add("Set-Cookie", "sid=abc; Path=/; HttpOnly")
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	got := resp.Header.Get("Set-Cookie")
@@ -222,10 +222,11 @@ func TestShimEscapesPrefix(t *testing.T) {
 	}
 }
 
-// The watermark has to reach the document the user's browser renders, on both
-// injection paths — including the no-<head> fallback, which is exactly the kind
-// of odd document where a missed injection would go unnoticed.
-func TestRewriteHTMLInjectsWatermark(t *testing.T) {
+// The reverse proxy must NOT inject a watermark: on this path it is a removable,
+// unrecorded deterrent that breaks strict-CSP appliances and body-owning SPAs.
+// The functional <base>+shim rewrite must still land, on every injection path
+// including the no-<head> fallback where a missed injection would go unnoticed.
+func TestRewriteHTMLOmitsWatermarkButKeepsRewrite(t *testing.T) {
 	for name, doc := range map[string]string{
 		"with head":    `<!doctype html><html><head><title>x</title></head><body>hi</body></html>`,
 		"without head": `<html><body>hi</body></html>`,
@@ -233,15 +234,20 @@ func TestRewriteHTMLInjectsWatermark(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			resp := htmlResp(doc)
-			if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+			if err := modifyResponse(testPrefix)(resp); err != nil {
 				t.Fatal(err)
 			}
 			body := readBody(t, resp)
-			if !strings.Contains(body, testWatermark) {
-				t.Errorf("watermark text absent from proxied document: %s", body)
+			// The load-bearing rewrite is still there.
+			if !strings.Contains(body, `<base href="`+testPrefix+`">`) {
+				t.Errorf("<base> rewrite missing from proxied document: %s", body)
 			}
-			if !strings.Contains(body, "pointer-events:none") {
-				t.Errorf("watermark overlay not injected: %s", body)
+			// The watermark is not: neither its text nor its overlay marker.
+			if strings.Contains(body, testWatermark) {
+				t.Errorf("watermark text leaked into proxied document: %s", body)
+			}
+			if strings.Contains(body, "pointer-events:none") {
+				t.Errorf("watermark overlay was injected but must not be: %s", body)
 			}
 			if got := resp.Header.Get("Content-Length"); got != itoa(len(body)) {
 				t.Errorf("content-length %q != body len %d", got, len(body))
@@ -255,7 +261,7 @@ func TestRewriteHTMLInjectsWatermark(t *testing.T) {
 func TestRewriteLeavesNonHTMLAlone(t *testing.T) {
 	resp := htmlResp(`{"ok":true}`)
 	resp.Header.Set("Content-Type", "application/json")
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	if body := readBody(t, resp); body != `{"ok":true}` {
@@ -275,7 +281,7 @@ func noCTResp(body string) *http.Response {
 }
 
 // The bug this pins: micro_httpd on the project's own test router sends no
-// Content-Type, so isHTML("") was false and base+shim+watermark were silently
+// Content-Type, so isHTML("") was false and the base+shim rewrite was silently
 // skipped. net/http then sniffed the body on write, so the browser still got
 // text/html and rendered fine — the injection was simply absent, with nothing
 // to show for it.
@@ -283,7 +289,7 @@ func TestRewriteInjectsWhenDeviceOmitsContentType(t *testing.T) {
 	// Byte-for-byte the shape the test router actually returns: no Content-Type,
 	// no <head>, script straight inside <html>.
 	resp := noCTResp("<html>\n<script language=\"javascript\">\nvar loginstatus='0';\n</script>\n<body>hi</body></html>")
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -293,8 +299,8 @@ func TestRewriteInjectsWhenDeviceOmitsContentType(t *testing.T) {
 	if !strings.Contains(body, "window.fetch=function") {
 		t.Errorf("no URL shim injected:\n%s", body)
 	}
-	if !strings.Contains(body, testWatermark) {
-		t.Errorf("no watermark injected:\n%s", body)
+	if strings.Contains(body, testWatermark) {
+		t.Errorf("watermark must not be injected on the proxy path:\n%s", body)
 	}
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("Content-Type must be declared once we rewrite, got %q", ct)
@@ -308,7 +314,7 @@ func TestRewriteInjectsWhenDeviceOmitsContentType(t *testing.T) {
 // script: that script's relative URLs resolve against our <base>.
 func TestInjectionPrecedesDeviceScriptWhenNoHead(t *testing.T) {
 	resp := noCTResp("<html>\n<script>var a=1;</script>\n<body>hi</body></html>")
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -327,7 +333,7 @@ func TestInjectionPrecedesDeviceScriptWhenNoHead(t *testing.T) {
 func TestNoContentTypeNonHTMLLeftAlone(t *testing.T) {
 	png := string([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13})
 	resp := noCTResp(png)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	if body := readBody(t, resp); body != png {
@@ -339,7 +345,7 @@ func TestNoContentTypeNonHTMLLeftAlone(t *testing.T) {
 func TestDeclaredNonHTMLNotBuffered(t *testing.T) {
 	resp := htmlResp(`body{color:red}`)
 	resp.Header.Set("Content-Type", "text/css;charset=utf-8")
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	if body := readBody(t, resp); body != `body{color:red}` {
@@ -354,7 +360,7 @@ func TestDeclaredNonHTMLNotBuffered(t *testing.T) {
 // it has to be caught server-side.
 func TestRewriteHTMLContainsFrameBusting(t *testing.T) {
 	resp := htmlResp(`<script language="javascript">` + "\n" + `top.location="/login";` + "\n" + `</script>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -374,7 +380,7 @@ func TestRewriteHTMLContainsParentNavigation(t *testing.T) {
 		`<script>window.top.location.replace("/z");</script>`,
 	} {
 		resp := htmlResp(in)
-		if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+		if err := modifyResponse(testPrefix)(resp); err != nil {
 			t.Fatal(err)
 		}
 		body := readBody(t, resp)
@@ -386,7 +392,7 @@ func TestRewriteHTMLContainsParentNavigation(t *testing.T) {
 }
 
 // The browser pre-scans only the first 1024 bytes for the encoding declaration.
-// The shim and the watermark are kilobytes, so injecting ahead of <meta charset>
+// The URL-rewriting shim is kilobytes, so injecting ahead of <meta charset>
 // pushed it out of that window and the encoding fell back to a guess — the device
 // sends "text/html" with no charset, so nothing authoritative was left anywhere.
 func TestRewriteHTMLKeepsCharsetInPrescanWindow(t *testing.T) {
@@ -394,7 +400,7 @@ func TestRewriteHTMLKeepsCharsetInPrescanWindow(t *testing.T) {
 		`<meta charset="utf-8">` +
 		`<title>FortiGate</title>` +
 		`</head><body><fos-root></fos-root></body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -419,7 +425,7 @@ func TestRewriteHTMLKeepsCharsetInPrescanWindow(t *testing.T) {
 // The http-equiv spelling counts too.
 func TestRewriteHTMLHandlesHTTPEquivCharset(t *testing.T) {
 	resp := htmlResp(`<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"><title>x</title></head><body>b</body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	body := readBody(t, resp)
@@ -432,7 +438,7 @@ func TestRewriteHTMLHandlesHTTPEquivCharset(t *testing.T) {
 // <head>, exactly as before.
 func TestRewriteHTMLNoCharsetStillInjectsAtHead(t *testing.T) {
 	resp := htmlResp(`<html><head><title>x</title></head><body>b</body></html>`)
-	if err := modifyResponse(testPrefix, testWatermark)(resp); err != nil {
+	if err := modifyResponse(testPrefix)(resp); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(readBody(t, resp), `<head><base href="`+testPrefix+`">`) {

@@ -109,9 +109,9 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 			ForceAttemptHTTP2: true,
 		},
 		// Rebase device responses (HTML <base>+shim, redirects, cookies) under the
-		// session prefix so a UI written for the origin root works when re-served
-		// at /proxy/<sid>/, and stamp the attribution watermark into HTML.
-		ModifyResponse: modifyResponse(prefix, s.WatermarkOr()),
+		// session prefix so a UI written for the origin root works when re-served at
+		// /proxy/<sid>/. No watermark is injected on this path — see modifyResponse.
+		ModifyResponse: modifyResponse(prefix),
 		// Never leak upstream errors (which could echo device internals) to the
 		// user; log-and-generic is applied by the caller's middleware.
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {

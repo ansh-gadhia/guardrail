@@ -1,4 +1,5 @@
 import type { Device, DeviceHealth } from "@/lib/types";
+import { plausibleDate } from "@/lib/dates";
 import { Badge, cn } from "./ui";
 
 /* A small reachability indicator: a pulsing green dot when the device's
@@ -11,8 +12,9 @@ const META = {
 } as const;
 
 function healthTitle(health: DeviceHealth | undefined, label: string): string {
+  const checked = plausibleDate(health?.checked_at);
   return `${label}${health?.latency_ms != null ? ` · ${health.latency_ms} ms` : ""}${
-    health?.checked_at ? ` · checked ${new Date(health.checked_at).toLocaleTimeString()}` : ""
+    checked ? ` · checked ${checked.toLocaleTimeString()}` : ""
   }`;
 }
 

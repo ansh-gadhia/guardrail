@@ -22,14 +22,19 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-
-	"github.com/guardrail/guardrail/internal/infra/watermark"
 )
 
 // modifyResponse returns an httputil.ReverseProxy ModifyResponse hook that
-// rebases device responses under prefix (which has form "/proxy/<sid>/") and
-// stamps the session watermark into HTML documents.
-func modifyResponse(prefix, wm string) func(*http.Response) error {
+// rebases device responses under prefix (which has form "/proxy/<sid>/").
+//
+// It deliberately does NOT stamp a watermark. This path serves the device's own
+// HTML to the operator's browser, so a watermark here is only a deterrent a
+// determined user removes with devtools, is never captured (the proxy records no
+// pixels), and — injected as a node into the live DOM — is a real page-breaker on
+// strict-CSP appliances and body-owning SPAs. Accountability for a proxied
+// session rests on the audit trail; the burned-into-pixels watermark that is an
+// actual control lives in browser isolation, which is where recorded devices go.
+func modifyResponse(prefix string) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		rebaseLocation(resp, prefix)
 		rebaseCookies(resp, prefix)
@@ -52,8 +57,8 @@ func modifyResponse(prefix, wm string) func(*http.Response) error {
 		// Either it says HTML, or it says nothing at all — and "nothing" has to be
 		// looked at rather than skipped. Embedded servers (micro_httpd on consumer
 		// routers, for one) routinely omit Content-Type entirely. Skipping those
-		// silently disabled the <base> tag, the URL shim and the watermark on
-		// exactly the devices this platform exists to broker, and it hid itself:
+		// silently disabled the <base> tag and the URL shim on exactly the devices
+		// this platform exists to broker, and it hid itself:
 		// net/http sniffs the body when it writes the response, so the browser
 		// still received "text/html" and the page still rendered. The only symptom
 		// was the injected markup quietly not being there.
@@ -68,13 +73,13 @@ func modifyResponse(prefix, wm string) func(*http.Response) error {
 			restoreBody(resp, body)
 			return nil
 		}
-		return rewriteHTML(resp, prefix, wm, body)
+		return rewriteHTML(resp, prefix, body)
 	}
 }
 
 // rendersAsDocument reports whether the browser will render this response as a
-// page, and so whether injecting <base>, the shim and the watermark into it is
-// meaningful rather than destructive.
+// page, and so whether injecting <base> and the shim into it is meaningful
+// rather than destructive.
 //
 // Content-Type alone cannot answer this. A FortiGate's login POST replies with
 // ONE byte — "0" — under Content-Type: text/html. It is not a page; it is a
@@ -170,25 +175,24 @@ func rebaseRootAbsolute(u, prefix string) string {
 	return strings.TrimSuffix(prefix, "/") + u
 }
 
-// rewriteHTML injects a <base> tag, the runtime URL-rewriting shim, and the
-// session watermark into an HTML document, then fixes Content-Length. The
-// upstream is asked (in the director) not to compress, so the body is plain
-// text here.
+// rewriteHTML injects a <base> tag and the runtime URL-rewriting shim into an
+// HTML document, then fixes Content-Length. The upstream is asked (in the
+// director) not to compress, so the body is plain text here.
 //
-// Injecting the watermark server-side is what makes it survive someone opening
-// the session URL directly instead of through the console. It does not make it
-// tamper-proof: this mode hands the device's real DOM to the user's browser, so
-// devtools can still remove the node. Only browser isolation, where the user
-// receives pixels, closes that.
-func rewriteHTML(resp *http.Response, prefix, wm string, body []byte) error {
+// No watermark is injected: on this path the device's real DOM is handed to the
+// operator's browser, where an overlay is a removable, unrecorded deterrent that
+// also breaks strict-CSP appliances and body-owning SPAs. The <base>+shim, by
+// contrast, are load-bearing — without them the SPA's own URLs escape the session
+// prefix — so those stay.
+func rewriteHTML(resp *http.Response, prefix string, body []byte) error {
 	html := string(body)
 	// Drop any existing <base> so ours wins, rebase the device's own markup, then
-	// inject <base>+shim+watermark. Rebasing runs first so it only ever sees the
-	// device's URLs, never the prefix we are about to inject.
+	// inject <base>+shim. Rebasing runs first so it only ever sees the device's
+	// URLs, never the prefix we are about to inject.
 	html = baseTagRe.ReplaceAllString(html, "")
 	html = rebaseMarkupURLs(html, prefix)
 	html = containFrameBusting(html)
-	inject := `<base href="` + prefix + `">` + shim(prefix) + watermark.HTML(wm)
+	inject := `<base href="` + prefix + `">` + shim(prefix)
 	html = injectInto(html, inject)
 
 	// Once rewritten, declare the type instead of leaving it to be sniffed. The
@@ -220,9 +224,9 @@ func injectInto(html, inject string) string {
 	// After the character encoding declaration, when there is one.
 	//
 	// A browser decides the encoding by pre-scanning only the FIRST 1024 BYTES of
-	// the document. Injecting ahead of <meta charset> pushed it to roughly byte
-	// 2600 — the shim and the watermark are kilobytes — so the declaration was
-	// never seen and the encoding fell back to a guess. The device compounds it by
+	// the document. Injecting ahead of <meta charset> pushed it well past that —
+	// the URL-rewriting shim is kilobytes — so the declaration was never seen and
+	// the encoding fell back to a guess. The device compounds it by
 	// sending "Content-Type: text/html" with no charset of its own, leaving nothing
 	// authoritative anywhere.
 	//
@@ -294,7 +298,7 @@ func rebaseMarkupURLs(html, prefix string) string {
 //
 // Served inside the console's session frame, "top" is the operator's console tab,
 // so that one line steers the whole console to the device's login page and the
-// session view — chrome, watermark, controls — is simply gone. The device page is
+// session view — chrome, controls, the whole GuardRail shell — is simply gone. The device page is
 // same-origin with the console (everything is re-served under /proxy/), so the
 // browser permits it, and no client-side shim can stop it: window.top and
 // Location are both unforgeable.

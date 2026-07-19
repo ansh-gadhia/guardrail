@@ -214,6 +214,68 @@
   .animate-drawer-in {
     animation: drawer-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
+
+  /* ---- Footer: animated brand strip ---------------------------------------
+     Motion is CSS-only, so the global reduced-motion rule below neutralises it. */
+  @keyframes footer-flow {
+    to { background-position: 200% 50%; }
+  }
+  /* A slim beam flowing along the footer's top edge, tinted teal→green→red so it
+     reads as one piece with the Virtual Galaxy mark anchored below it. */
+  .footer-beam {
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgb(var(--accent) / 0.55) 20%,
+      #7bc043 42%,
+      #ff3b30 58%,
+      rgb(var(--accent) / 0.55) 80%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: footer-flow 7s linear infinite;
+  }
+  @keyframes footer-text {
+    to { background-position: -200% 0; }
+  }
+  .footer-shimmer {
+    background: linear-gradient(
+      90deg,
+      rgb(var(--muted)) 0%,
+      rgb(var(--muted)) 38%,
+      rgb(var(--fg)) 50%,
+      rgb(var(--muted)) 62%,
+      rgb(var(--muted)) 100%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: footer-text 6s linear infinite;
+  }
+  @keyframes footer-pulse {
+    0%, 100% { opacity: 0.18; transform: scale(0.9); }
+    50% { opacity: 0.5; transform: scale(1.1); }
+  }
+  .footer-logo-glow {
+    background: radial-gradient(closest-side, rgb(var(--accent) / 0.4), transparent 72%);
+    animation: footer-pulse 4.5s ease-in-out infinite;
+  }
+  @keyframes footer-float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2.5px); }
+  }
+  .footer-float {
+    animation: footer-float 5s ease-in-out infinite;
+  }
+  @keyframes footer-rise {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .footer-rise {
+    animation: footer-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     *,
     ::before,

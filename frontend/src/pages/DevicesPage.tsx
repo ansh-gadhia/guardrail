@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, problemDetail } from "@/lib/api";
+import { plausibleDate } from "@/lib/dates";
 import type { Device, DeviceCredential, ConnectResult } from "@/lib/types";
 import { injectionMethodsFor, defaultInjectionFor } from "@/lib/types";
 import { useAuth } from "@/store/auth";
@@ -108,9 +109,8 @@ export function deviceTypeLabel(t: string): string {
   return TYPE_LABEL[t] ?? t.charAt(0).toUpperCase() + t.slice(1);
 }
 function addedOn(iso?: string): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { dateStyle: "medium" });
+  const d = plausibleDate(iso);
+  return d ? d.toLocaleDateString(undefined, { dateStyle: "medium" }) : "";
 }
 
 interface DeviceForm {

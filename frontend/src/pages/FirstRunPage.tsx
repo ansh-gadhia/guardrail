@@ -4,6 +4,7 @@ import { api, problemDetail } from "@/lib/api";
 import type { Enrollment, MFAStatus } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { ErrorNote, Field, Spinner, cn } from "@/components/ui";
+import { BrandMark } from "@/components/brand";
 import { IconShield, IconLock, IconKey, IconCheck } from "@/components/icons";
 import { PasswordStrength, scorePassword, MIN_PASSWORD_LEN } from "@/components/PasswordStrength";
 import { QRCode } from "@/components/QRCode";
@@ -27,12 +28,10 @@ export function FirstRunPage() {
     <div className="min-h-screen bg-surface-2/40 px-4 py-10">
       <div className="mx-auto w-full max-w-lg">
         <header className="mb-7 flex items-center gap-3">
-          <span className="grid h-10 w-10 place-items-center rounded-xl accent-grad text-white shadow-sm ring-1 ring-white/20">
-            <IconShield size={19} />
-          </span>
+          <BrandMark className="h-11 w-11 drop-shadow-sm" />
           <div>
             <div className="text-sm font-semibold text-fg">GuardRail</div>
-            <div className="text-2xs uppercase tracking-widest text-faint">Privileged Access</div>
+            <div className="text-2xs uppercase tracking-widest text-faint">Privileged Access Management</div>
           </div>
         </header>
 
