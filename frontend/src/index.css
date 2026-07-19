@@ -253,27 +253,84 @@
     color: transparent;
     animation: footer-text 6s linear infinite;
   }
-  @keyframes footer-pulse {
-    0%, 100% { opacity: 0.18; transform: scale(0.9); }
-    50% { opacity: 0.5; transform: scale(1.1); }
-  }
-  .footer-logo-glow {
-    background: radial-gradient(closest-side, rgb(var(--accent) / 0.4), transparent 72%);
-    animation: footer-pulse 4.5s ease-in-out infinite;
-  }
-  @keyframes footer-float {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-2.5px); }
-  }
-  .footer-float {
-    animation: footer-float 5s ease-in-out infinite;
-  }
   @keyframes footer-rise {
     from { opacity: 0; transform: translateY(10px); }
     to { opacity: 1; transform: translateY(0); }
   }
   .footer-rise {
     animation: footer-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* ---- Sidebar brand seal: the company mark, framed under the product wordmark.
+     A galaxy in miniature — a breathing accent aura, drifting starlight, and a
+     mark that blooms on hover. All motion is CSS-only, so the reduced-motion rule
+     below neutralises it. -------------------------------------------------------*/
+  @keyframes seal-rise {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .brand-seal {
+    animation: seal-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: 0.1s;
+  }
+  /* an animated gradient hairline dividing the product brand from the company mark */
+  .seal-divider {
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      rgb(var(--line)) 22%,
+      rgb(var(--accent) / 0.55) 50%,
+      rgb(var(--line)) 78%,
+      transparent
+    );
+    background-size: 200% 100%;
+    animation: footer-flow 9s linear infinite;
+  }
+  /* a soft accent aura that breathes behind the logo */
+  @keyframes seal-breathe {
+    0%, 100% { opacity: 0.25; transform: scale(0.88); }
+    50% { opacity: 0.5; transform: scale(1.08); }
+  }
+  .seal-aura {
+    position: absolute;
+    inset: -45% -14%;
+    border-radius: 9999px;
+    background: radial-gradient(closest-side, rgb(var(--accent) / 0.3), transparent 72%);
+    filter: blur(5px);
+    animation: seal-breathe 6s ease-in-out infinite;
+    pointer-events: none;
+  }
+  .group:hover .seal-aura { animation-duration: 3.2s; }
+  /* the whole cluster drifts, so the mark feels weightless */
+  @keyframes seal-float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2px); }
+  }
+  .seal-cluster { animation: seal-float 5.5s ease-in-out infinite; }
+  /* twinkling star sparks — the 'galaxy' — staggered, and quicker on hover */
+  @keyframes seal-twinkle {
+    0%, 100% { opacity: 0; transform: scale(0.3); }
+    50% { opacity: 0.85; transform: scale(1); }
+  }
+  .seal-star {
+    position: absolute;
+    width: 3px; height: 3px;
+    border-radius: 9999px;
+    background: rgb(var(--accent));
+    box-shadow: 0 0 5px rgb(var(--accent) / 0.85);
+    opacity: 0;
+    animation: seal-twinkle 4.2s ease-in-out infinite;
+    pointer-events: none;
+  }
+  .group:hover .seal-star { animation-duration: 2.4s; }
+  .seal-star-1 { top: 0; left: 4%; animation-delay: 0s; }
+  .seal-star-2 { top: 18%; right: 4%; width: 2px; height: 2px; animation-delay: 1.4s; }
+  .seal-star-3 { bottom: 4%; right: 26%; animation-delay: 2.7s; }
+  /* the logo itself: a soft glow blooms and it lifts on hover */
+  .seal-logo { transition: transform 0.3s, filter 0.3s; }
+  .group:hover .seal-logo {
+    transform: scale(1.05);
+    filter: drop-shadow(0 2px 10px rgb(var(--accent) / 0.35));
   }
 
   @media (prefers-reduced-motion: reduce) {
