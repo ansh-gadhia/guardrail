@@ -153,6 +153,13 @@ jobs:
           scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
           exit-code: "1"
+          # backend/vendor is the Go dependency tree, checked in so the image can
+          # build offline. It contains other projects' Dockerfiles and test data,
+          # none of which we build or ship — go-toml's own Dockerfile was failing
+          # the scan for not declaring a USER. Vulnerabilities in those
+          # dependencies are still caught: that scan reads backend/go.mod, which
+          # is not in this directory.
+          skip-dirs: backend/vendor
 
   # Builds both runtime images and, on main only, publishes them to GHCR.
   #

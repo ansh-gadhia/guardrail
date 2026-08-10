@@ -71,5 +71,6 @@ http:
     web:
       loadBalancer:
         servers:
-          - url: "http://web:80"
+          # 8080: the console image runs nginx unprivileged, which cannot bind 80.
+          - url: "http://web:8080"
         passHostHeader: true
