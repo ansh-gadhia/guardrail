@@ -7,6 +7,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -218,8 +219,8 @@ func Load() (*Config, error) {
 		},
 		Postgres: PostgresConfig{
 			DSN:             getEnv("GUARDRAIL_POSTGRES_DSN", ""),
-			MaxConns:        int32(getInt("GUARDRAIL_POSTGRES_MAX_CONNS", 10)),
-			MinConns:        int32(getInt("GUARDRAIL_POSTGRES_MIN_CONNS", 2)),
+			MaxConns:        getInt32("GUARDRAIL_POSTGRES_MAX_CONNS", 10),
+			MinConns:        getInt32("GUARDRAIL_POSTGRES_MIN_CONNS", 2),
 			MaxConnLifetime: getDuration("GUARDRAIL_POSTGRES_CONN_LIFETIME", time.Hour),
 		},
 		Redis: RedisConfig{
@@ -373,6 +374,26 @@ func getInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// getInt32 reads an int setting that is stored as an int32, clamping instead of
+// wrapping.
+//
+// The environment is untrusted input: `GUARDRAIL_POSTGRES_MAX_CONNS=3000000000`
+// silently became a NEGATIVE pool size through a plain int32 conversion, and a
+// negative pool is a database layer that refuses every connection at startup for
+// no stated reason. Clamping keeps the failure legible — you asked for more than
+// the type holds, you get the most it holds.
+func getInt32(key string, def int32) int32 {
+	n := getInt(key, int(def))
+	switch {
+	case n > math.MaxInt32:
+		return math.MaxInt32
+	case n < math.MinInt32:
+		return math.MinInt32
+	default:
+		return int32(n)
+	}
 }
 
 func getBool(key string, def bool) bool {

@@ -100,12 +100,12 @@ func TestTunnel_GrantRejectsTamperedExpiredAndCrossSession(t *testing.T) {
 
 	valid := h.mintGrant(sid, time.Now().Add(30*time.Second))
 	cases := map[string]string{
-		"tampered mac":  valid[:len(valid)-2] + "AA",
-		"empty":         "",
-		"not a grant":   "garbage",
-		"expired":       h.mintGrant(sid, time.Now().Add(-time.Second)),
-		"another sid":   h.mintGrant(other, time.Now().Add(30*time.Second)),
-		"missing dot":   strings.ReplaceAll(valid, ".", ""),
+		"tampered mac": valid[:len(valid)-2] + "AA",
+		"empty":        "",
+		"not a grant":  "garbage",
+		"expired":      h.mintGrant(sid, time.Now().Add(-time.Second)),
+		"another sid":  h.mintGrant(other, time.Now().Add(30*time.Second)),
+		"missing dot":  strings.ReplaceAll(valid, ".", ""),
 		"swapped halves": func() string {
 			a, b, _ := strings.Cut(valid, ".")
 			return b + "." + a

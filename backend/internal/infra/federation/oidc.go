@@ -161,7 +161,7 @@ func (p *OIDCProvider) verifyIDToken(ctx context.Context, raw, nonce string) (*i
 	}
 	return &iam.ExternalIdentity{
 		Provider:    "oidc",
-		Subject:     claims.RegisteredClaims.Subject,
+		Subject:     claims.Subject,
 		Email:       claims.Email,
 		Username:    claims.Username,
 		DisplayName: claims.Name,

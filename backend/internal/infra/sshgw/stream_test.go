@@ -242,7 +242,7 @@ func TestStreamCarriesInputAndOutput(t *testing.T) {
 	defer cancel()
 
 	c := h.dial(t, ctx)
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 
 	// The shell banner should arrive unprompted.
 	_, data, err := c.Read(ctx)
@@ -275,7 +275,7 @@ func TestStreamTouchesActivityOnInputOnly(t *testing.T) {
 	defer cancel()
 
 	c := h.dial(t, ctx)
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 	_, _, _ = c.Read(ctx) // banner
 
 	// A resize must NOT count: a window manager can emit one with nobody at the
@@ -325,7 +325,7 @@ func TestRecordedSessionWritesSearchableTranscript(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	time.Sleep(200 * time.Millisecond)
-	c.CloseNow()
+	_ = c.CloseNow()
 
 	if err := h.g.End(context.Background(), h.sess.ID); err != nil {
 		t.Fatalf("End: %v", err)
@@ -401,7 +401,7 @@ func TestUnrecordedSessionWritesNothing(t *testing.T) {
 	msg, _ := json.Marshal(term.ClientMsg{T: "i", D: "secret-command\n"})
 	_ = c.Write(ctx, websocket.MessageText, msg)
 	time.Sleep(200 * time.Millisecond)
-	c.CloseNow()
+	_ = c.CloseNow()
 
 	if err := h.g.End(context.Background(), h.sess.ID); err != nil {
 		t.Fatalf("End: %v", err)
@@ -419,7 +419,7 @@ func TestSecondAttachIsRefused(t *testing.T) {
 	defer cancel()
 
 	c1 := h.dial(t, ctx)
-	defer c1.CloseNow()
+	defer func() { _ = c1.CloseNow() }()
 	_, _, _ = c1.Read(ctx) // ensure attached
 
 	if _, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(h.ts.URL, "http")+"/__ws__", nil); err == nil {

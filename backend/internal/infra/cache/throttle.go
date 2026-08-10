@@ -18,9 +18,9 @@ type Throttle struct {
 	prefix string
 }
 
-// NewThrottle builds a throttle allowing up to max failures per window.
-func NewThrottle(rdb *redis.Client, max int, window time.Duration) *Throttle {
-	return &Throttle{rdb: rdb, max: max, window: window, prefix: "throttle:"}
+// NewThrottle builds a throttle allowing up to maxFailures per window.
+func NewThrottle(rdb *redis.Client, maxFailures int, window time.Duration) *Throttle {
+	return &Throttle{rdb: rdb, max: maxFailures, window: window, prefix: "throttle:"}
 }
 
 // Allow reports whether an attempt for key may proceed. When blocked it returns

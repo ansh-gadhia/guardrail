@@ -66,7 +66,10 @@ func (h *Argon2Hasher) Verify(password, encodedHash string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// #nosec G115 -- key is a base64-decoded hash digest bounded by the encoded
+	// hash string; its length cannot approach 2^31, let alone 2^32.
 	other := argon2.IDKey([]byte(password), salt, p.Iterations, p.Memory, p.Parallelism, uint32(len(key)))
+	// #nosec G115 -- both lengths are digest sizes, as above.
 	if subtle.ConstantTimeEq(int32(len(other)), int32(len(key))) == 0 {
 		return false, nil
 	}
@@ -109,7 +112,10 @@ func decodeArgon2(encoded string) (Argon2Params, []byte, []byte, error) {
 	if err != nil {
 		return Argon2Params{}, nil, nil, errInvalidHash
 	}
+	// #nosec G115 -- salt and key are base64-decoded from the stored hash string,
+	// so their lengths are bounded by it and cannot overflow uint32.
 	p.SaltLength = uint32(len(salt))
+	// #nosec G115 -- as above.
 	p.KeyLength = uint32(len(key))
 	return p, salt, key, nil
 }

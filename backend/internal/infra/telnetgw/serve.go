@@ -15,7 +15,7 @@ import (
 )
 
 // Console serves the terminal page for a session.
-func (g *Gateway) Console(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token, path string) bool {
+func (g *Gateway) Console(w http.ResponseWriter, _ *http.Request, sid uuid.UUID, token string, _ string) bool {
 	s := g.lookup(sid, token)
 	if s == nil {
 		return false
@@ -64,7 +64,9 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 	if err != nil {
 		return true // handshake already responded
 	}
-	defer c.CloseNow()
+	// Errors on a teardown close are not actionable — the peer is going away
+	// either way — but they are swallowed explicitly rather than silently.
+	defer func() { _ = c.CloseNow() }()
 	c.SetReadLimit(term.MaxInputBytes)
 
 	ctx, cancel := context.WithCancel(r.Context())

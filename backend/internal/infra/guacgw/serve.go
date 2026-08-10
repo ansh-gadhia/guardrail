@@ -80,7 +80,9 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 		return true // the handshake already responded
 	}
 	c.SetReadLimit(maxClientBytes)
-	defer c.CloseNow()
+	// Errors on a teardown close are not actionable — the peer is going away
+	// either way — but they are swallowed explicitly rather than silently.
+	defer func() { _ = c.CloseNow() }()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()

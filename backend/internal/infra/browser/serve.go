@@ -17,7 +17,7 @@ import (
 // this is a self-contained canvas page that opens the streaming WebSocket; the
 // device pixels arrive over that socket, so the device HTML/JS never reaches the
 // user. Returns false if the session is unknown/expired or the token is wrong.
-func (g *Gateway) Console(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token, path string) bool {
+func (g *Gateway) Console(w http.ResponseWriter, _ *http.Request, sid uuid.UUID, token string, _ string) bool {
 	bs := g.lookup(sid, token)
 	if bs == nil {
 		return false
@@ -42,7 +42,9 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 	if err != nil {
 		return true // handshake already responded
 	}
-	defer c.CloseNow()
+	// Errors on a teardown close are not actionable — the peer is going away
+	// either way — but they are swallowed explicitly rather than silently.
+	defer func() { _ = c.CloseNow() }()
 
 	// Tie the socket lifetime to the tab and a generous read budget.
 	ctx, cancel := context.WithCancel(bs.tabCtx)
@@ -278,14 +280,15 @@ func (g *Gateway) dispatchKey(bs *bSession, m inputMsg) {
 	p := &input.DispatchKeyEventParams{
 		Modifiers: input.Modifier(m.Mod), Key: m.Key, Code: m.Code, WindowsVirtualKeyCode: m.KC,
 	}
-	if m.E == "up" {
+	switch {
+	case m.E == "up":
 		p.Type = input.KeyUp
-	} else if len(m.Text) > 0 {
+	case len(m.Text) > 0:
 		// Printable key: keyDown with text inserts the character.
 		p.Type = input.KeyDown
 		p.Text = m.Text
 		p.UnmodifiedText = m.Text
-	} else {
+	default:
 		// Non-printable (Enter, Backspace, arrows, …).
 		p.Type = input.KeyRawDown
 	}

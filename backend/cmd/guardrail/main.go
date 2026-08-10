@@ -175,6 +175,10 @@ func buildFederation(cfg config.FederationConfig, log *zap.Logger) (domiam.OIDCA
 // This is diagnostic only: it is logged so an operator knows what to point DNS
 // at, and nothing in the request path consults it. Every listener binds 0.0.0.0.
 func detectPrimaryIP() string {
+	// #nosec G102 -- not a listener.
+	//nolint:noctx // A UDP "dial" sends no packet: it only asks the kernel which
+	// source address it would route from. There is nothing to time out or cancel,
+	// and it returns immediately.
 	c, err := net.Dial("udp", "192.0.2.1:9")
 	if err != nil {
 		return ""
@@ -209,6 +213,11 @@ func healthcheck() int {
 		addr = ":8080"
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
+	// #nosec G704 -- the host is the literal loopback address; only the port comes
+	// from configuration, and this runs as the container healthcheck against our
+	// own listener. There is no request-path input reachable from here.
+	//nolint:noctx // The client above carries a 2s timeout, which is the whole
+	// budget a container healthcheck has; a context would duplicate it.
 	resp, err := client.Get("http://127.0.0.1" + addr + "/healthz")
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "healthcheck failed:", err)
@@ -396,10 +405,13 @@ func run() error {
 			browser.Config{
 				// The resolved path, not the configured one: with autodetect, config
 				// is empty and chromedp would fall back to exec'ing "google-chrome".
-				ChromePath:            chromePath,
-				Node:                  cfg.Telemetry.ServiceName,
+				ChromePath: chromePath,
+				Node:       cfg.Telemetry.ServiceName,
+				// #nosec G115 -- megabyte counts from config, clamped to a sane range by
+				// Load(); a negative here would be caught there, not silently wrapped.
 				SessionMemoryEstimate: uint64(cfg.Browser.SessionMemoryMB) << 20,
-				HostReserve:           uint64(cfg.Browser.HostReserveMB) << 20,
+				// #nosec G115 -- as above.
+				HostReserve: uint64(cfg.Browser.HostReserveMB) << 20,
 				// Screencast tuning. Zero values fall through to Config.defaults;
 				// previously these were never passed at all, so the env vars had no
 				// effect and the recorder cap silently ignored GUARDRAIL_RECORDING_MAX_BYTES.

@@ -17,26 +17,26 @@
 package expr
 
 import (
-    `sync`
+	"sync"
 )
 
 var (
-    expressionPool sync.Pool
+	expressionPool sync.Pool
 )
 
 func newExpression() *Expr {
-    if v := expressionPool.Get(); v == nil {
-        return new(Expr)
-    } else {
-        return resetExpression(v.(*Expr))
-    }
+	if v := expressionPool.Get(); v == nil {
+		return new(Expr)
+	} else {
+		return resetExpression(v.(*Expr))
+	}
 }
 
 func freeExpression(p *Expr) {
-    expressionPool.Put(p)
+	expressionPool.Put(p)
 }
 
 func resetExpression(p *Expr) *Expr {
-    *p = Expr{}
-    return p
+	*p = Expr{}
+	return p
 }

@@ -15,7 +15,7 @@ import (
 )
 
 // Console serves the terminal page for a session.
-func (g *Gateway) Console(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token, path string) bool {
+func (g *Gateway) Console(w http.ResponseWriter, _ *http.Request, sid uuid.UUID, token string, _ string) bool {
 	s := g.lookup(sid, token)
 	if s == nil {
 		return false
@@ -61,7 +61,8 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 	if err != nil {
 		return true // handshake already responded
 	}
-	defer c.CloseNow()
+	// Errors closing a socket that is already going away are not actionable.
+	defer func() { _ = c.CloseNow() }()
 	// Terminal output is unbounded in time; the socket lives as long as the shell.
 	c.SetReadLimit(term.MaxInputBytes)
 

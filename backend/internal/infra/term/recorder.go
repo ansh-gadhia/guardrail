@@ -75,9 +75,9 @@ type Recorder struct {
 	rows     int
 }
 
-// NewRecorder starts a transcript capped at max bytes.
-func NewRecorder(max int64) *Recorder {
-	return &Recorder{started: time.Now(), max: max, cols: 80, rows: 24}
+// NewRecorder starts a transcript capped at maxBytes.
+func NewRecorder(maxBytes int64) *Recorder {
+	return &Recorder{started: time.Now(), max: maxBytes, cols: 80, rows: 24}
 }
 
 // Resize records the terminal geometry. The last size wins: a player needs one

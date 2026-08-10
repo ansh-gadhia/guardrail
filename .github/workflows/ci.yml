@@ -43,10 +43,16 @@ jobs:
           cache-dependency-path: backend/go.sum
       - name: Download modules
         run: go mod download
+      # Action v9 drives golangci-lint v2; v6 drove v1. `version: latest` is what
+      # broke this step: latest rolled over to v2, which rejects a v1 config
+      # outright, so lint failed on the config file rather than on any Go code.
+      # Pinned to an exact version so the linter cannot change underneath a green
+      # build — a lint gate that fails for reasons unrelated to the diff is a gate
+      # people learn to ignore.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12.2
           working-directory: backend
       - name: Test (race + coverage)
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...

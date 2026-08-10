@@ -62,7 +62,9 @@ func NewLDAPAuthenticator(cfg LDAPConfig) *LDAPAuthenticator {
 }
 
 // Authenticate verifies username/password against the directory.
-func (a *LDAPAuthenticator) Authenticate(ctx context.Context, username, password string) (*iam.ExternalIdentity, error) {
+// TODO: the context is not yet honoured — a wedged directory server holds this
+// call until the LDAP library's own timeout, not the caller's deadline.
+func (a *LDAPAuthenticator) Authenticate(_ context.Context, username, password string) (*iam.ExternalIdentity, error) {
 	if password == "" { // unauthenticated (anonymous) bind guard
 		return nil, iam.ErrInvalidCredentials
 	}
@@ -115,6 +117,8 @@ func (a *LDAPAuthenticator) Authenticate(ctx context.Context, username, password
 func dialLDAP(cfg LDAPConfig) (ldapConn, error) {
 	opts := []ldap.DialOpt{}
 	if strings.HasPrefix(cfg.URL, "ldaps://") {
+		// #nosec G402 -- explicit, documented opt-in (GUARDRAIL_LDAP_INSECURE) for lab
+		// directories with self-signed certs. Defaults to verifying.
 		opts = append(opts, ldap.DialWithTLSConfig(&tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify})) //nolint:gosec // lab opt-in
 	}
 	c, err := ldap.DialURL(cfg.URL, opts...)
@@ -122,6 +126,8 @@ func dialLDAP(cfg LDAPConfig) (ldapConn, error) {
 		return nil, err
 	}
 	if cfg.StartTLS && strings.HasPrefix(cfg.URL, "ldap://") {
+		// #nosec G402 -- same documented opt-in as the ldaps:// path above; the
+		// StartTLS upgrade honours the identical setting rather than a laxer one.
 		if err := c.StartTLS(&tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify}); err != nil { //nolint:gosec // lab opt-in
 			_ = c.Close()
 			return nil, err

@@ -20,12 +20,12 @@ const (
 
 func normalizeLimit(l int) int { return normalizeLimitUpTo(l, maxLimit) }
 
-func normalizeLimitUpTo(l, max int) int {
+func normalizeLimitUpTo(l, ceiling int) int {
 	switch {
 	case l <= 0:
 		return defaultLimit
-	case l > max:
-		return max
+	case l > ceiling:
+		return ceiling
 	default:
 		return l
 	}

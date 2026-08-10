@@ -3,6 +3,9 @@ package security
 import (
 	"crypto/hmac"
 	"crypto/rand"
+	// #nosec G505 -- RFC 6238 defines TOTP over HMAC-SHA1, and every authenticator
+	// app implements that. Using a stronger hash here would produce codes no
+	// client can generate. The weakness is not exploitable in HMAC.
 	"crypto/sha1"
 	"crypto/subtle"
 	"encoding/base32"
@@ -114,6 +117,8 @@ func (a *TOTPAuthenticator) ProvisioningURI(issuer, account, secret string) stri
 // hotp computes an RFC 4226 HMAC-based OTP for the given counter.
 func hotp(key []byte, counter int64, digits int) string {
 	var msg [8]byte
+	// #nosec G115 -- counter is a Unix-time/step value; it is never negative and
+	// the big-endian encoding of the two-complement bits is what RFC 4226 asks for.
 	binary.BigEndian.PutUint64(msg[:], uint64(counter))
 	mac := hmac.New(sha1.New, key)
 	mac.Write(msg[:])

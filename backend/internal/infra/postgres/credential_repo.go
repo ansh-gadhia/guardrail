@@ -23,6 +23,8 @@ const credCols = `id, organization_id, name, type, username, injection,
 	rotated_at, created_at, updated_at`
 
 // credColsC is credCols qualified with the "c." alias for joined queries.
+// #nosec G101 -- a SELECT column list. The names describe where ciphertext is
+// stored; no secret is present in this string.
 const credColsC = `c.id, c.organization_id, c.name, c.type, c.username, c.injection,
 	c.secret_ciphertext, c.secret_nonce, c.dek_wrapped, c.dek_nonce, c.kek_id, c.metadata,
 	c.rotated_at, c.created_at, c.updated_at`

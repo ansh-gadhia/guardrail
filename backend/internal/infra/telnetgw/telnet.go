@@ -339,6 +339,8 @@ func (c *conn) sendNAWS() error {
 	// The size bytes are escaped like any other data: a 255-column window would
 	// otherwise emit a bare IAC inside the subnegotiation and desynchronise the
 	// device's parser.
+	// #nosec G115 -- NAWS encodes the geometry as two big-endian uint16s, so
+	// truncating each half to a byte IS the wire format, not an accident.
 	b = appendEscaped(b, []byte{byte(cols >> 8), byte(cols), byte(rows >> 8), byte(rows)})
 	b = append(b, cmdIAC, cmdSE)
 	return c.sendRaw(b)

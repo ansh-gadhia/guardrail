@@ -23,6 +23,9 @@ func GuardSSRF(host string) error {
 	}
 	h = strings.Trim(h, "[]")
 
+	//nolint:noctx // GuardSSRF is a pure policy check called before a request is
+	// built, and by gateways that have no request at all. Threading a context in
+	// would mean every caller inventing one; the resolver's own timeout applies.
 	ips, err := net.LookupIP(h)
 	if err != nil {
 		// If it doesn't resolve, let the proxy attempt and fail normally; do not

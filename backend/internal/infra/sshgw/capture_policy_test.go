@@ -32,7 +32,7 @@ func TestVideoOnlyPolicyWritesNoTranscript(t *testing.T) {
 	// Let the device echo before tearing down, so any transcript that was going
 	// to be written has had its chance.
 	time.Sleep(200 * time.Millisecond)
-	c.CloseNow()
+	_ = c.CloseNow()
 	if err := h.g.End(context.Background(), h.sess.ID); err != nil {
 		t.Fatalf("End: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestTranscriptOnlyPolicyStillRecords(t *testing.T) {
 		t.Fatalf("read banner: %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
-	c.CloseNow()
+	_ = c.CloseNow()
 	if err := h.g.End(context.Background(), h.sess.ID); err != nil {
 		t.Fatalf("End: %v", err)
 	}

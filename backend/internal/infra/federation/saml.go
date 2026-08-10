@@ -34,11 +34,11 @@ type SAMLProvider struct{ cfg SAMLConfig }
 func NewSAMLProvider(cfg SAMLConfig) *SAMLProvider { return &SAMLProvider{cfg: cfg} }
 
 // AuthnRequestURL will build the IdP redirect URL for a SAML AuthnRequest.
-func (p *SAMLProvider) AuthnRequestURL(relayState string) (string, error) {
+func (p *SAMLProvider) AuthnRequestURL(_ string) (string, error) {
 	return "", ErrSAMLNotImplemented
 }
 
 // ConsumeAssertion will validate a POSTed SAML assertion and return the identity.
-func (p *SAMLProvider) ConsumeAssertion(ctx context.Context, samlResponse string) (*iam.ExternalIdentity, error) {
+func (p *SAMLProvider) ConsumeAssertion(_ context.Context, _ string) (*iam.ExternalIdentity, error) {
 	return nil, ErrSAMLNotImplemented
 }

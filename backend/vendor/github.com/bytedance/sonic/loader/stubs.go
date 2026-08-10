@@ -17,9 +17,9 @@
 package loader
 
 import (
-    "sync/atomic"
-    "unsafe"
-    _ `unsafe`
+	"sync/atomic"
+	"unsafe"
+	_ "unsafe"
 )
 
 //go:linkname lastmoduledatap runtime.lastmoduledatap
@@ -27,34 +27,34 @@ import (
 var lastmoduledatap *moduledata
 
 func registerModule(mod *moduledata) {
-    registerModuleLockFree(&lastmoduledatap, mod)
+	registerModuleLockFree(&lastmoduledatap, mod)
 }
 
 //go:linkname moduledataverify1 runtime.moduledataverify1
 func moduledataverify1(_ *moduledata)
 
 func registerModuleLockFree(tail **moduledata, mod *moduledata) {
-    for {
-        oldTail := loadModule(tail)
-        if casModule(tail, oldTail, mod) {
-            storeModule(&oldTail.next, mod)
-            break
-        }
-    }
+	for {
+		oldTail := loadModule(tail)
+		if casModule(tail, oldTail, mod) {
+			storeModule(&oldTail.next, mod)
+			break
+		}
+	}
 }
 
 func loadModule(p **moduledata) *moduledata {
-    return (*moduledata)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(p))))
+	return (*moduledata)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(p))))
 }
 
 func storeModule(p **moduledata, value *moduledata) {
-    atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(p)), unsafe.Pointer(value))
+	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(p)), unsafe.Pointer(value))
 }
 
 func casModule(p **moduledata, oldValue *moduledata, newValue *moduledata) bool {
-    return atomic.CompareAndSwapPointer(
-        (*unsafe.Pointer)(unsafe.Pointer(p)),
-        unsafe.Pointer(oldValue),
-        unsafe.Pointer(newValue),
-    )
+	return atomic.CompareAndSwapPointer(
+		(*unsafe.Pointer)(unsafe.Pointer(p)),
+		unsafe.Pointer(oldValue),
+		unsafe.Pointer(newValue),
+	)
 }

@@ -82,7 +82,7 @@ func TestStreamNegotiatesTheGuacamoleSubprotocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a client offering the guacamole subprotocol could not connect: %v", err)
 	}
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 
 	if got := c.Subprotocol(); got != "guacamole" {
 		t.Fatalf("server selected subprotocol %q, want \"guacamole\" — every browser drops the tunnel", got)
@@ -108,7 +108,7 @@ func TestStreamDeliversAnOversizedInstructionIntact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 	c.SetReadLimit(8 << 20)
 
 	// Read messages until the trailing sync arrives, parsing exactly as the browser
@@ -163,7 +163,7 @@ func TestStreamDeliversBytesBufferedBeforeTheViewerAttached(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 
 	_, data, err := c.Read(ctx)
 	if err != nil {
@@ -208,7 +208,7 @@ func TestStreamAnswersTunnelPingsWithoutTellingGuacd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 
 	// Exactly what guacamole-common-js sends: empty opcode, "ping", timestamp.
 	ping := Instruction{Opcode: "", Args: []string{"ping", "1752579000000"}}
@@ -261,7 +261,7 @@ func TestStreamForwardsRealInputToGuacd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.CloseNow()
+	defer func() { _ = c.CloseNow() }()
 
 	key := Instruction{Opcode: "key", Args: []string{"65", "1"}}
 	if err := c.Write(ctx, websocket.MessageText, []byte(key.String())); err != nil {

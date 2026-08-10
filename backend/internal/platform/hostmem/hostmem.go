@@ -173,6 +173,8 @@ func (s Source) procMemAvailable() (uint64, bool) {
 // unlimited) is reported as absent rather than as a huge number, so a caller
 // comparing limits never mistakes "no cap" for "an enormous cap".
 func readUintFile(path string) (uint64, bool) {
+	// #nosec G304 -- path is a compile-time constant /proc or /sys path chosen by
+	// this package; nothing external reaches it.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return 0, false

@@ -32,7 +32,7 @@ func (s *Service) OIDCEnabled() bool { return s.oidcEnabled() }
 func (s *Service) LDAPEnabled() bool { return s.ldapEnabled() }
 
 // BeginOIDCLogin creates PKCE + state/nonce and returns the authorization URL.
-func (s *Service) BeginOIDCLogin(ctx context.Context) (*OIDCTransaction, error) {
+func (s *Service) BeginOIDCLogin(_ context.Context) (*OIDCTransaction, error) {
 	if !s.oidcEnabled() {
 		return nil, iam.ErrNotFound
 	}

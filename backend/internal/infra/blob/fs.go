@@ -73,6 +73,9 @@ func (f *FS) Put(_ context.Context, key string, data []byte, _ string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("blob: close: %w", err)
 	}
+	// #nosec G302 -- 0640, not 0600, deliberately: recordings are written by this
+	// process and read back by a sidecar running as a member of the same group.
+	// Group-readable is the requirement; world has no access.
 	if err := os.Chmod(tmpName, 0o640); err != nil {
 		return fmt.Errorf("blob: chmod: %w", err)
 	}
@@ -88,6 +91,8 @@ func (f *FS) Get(_ context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// #nosec G304 -- p is built by this package from the store root and a
+	// caller-supplied key that safeKey() has already rejected traversal in.
 	b, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotFound

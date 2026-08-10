@@ -172,11 +172,11 @@ func redact(b []byte, secret string) []byte {
 // trimBanner keeps the tail of the login output for replay to a viewer, so a
 // device whose MOTD is a `show tech` wall does not push the actual prompt off
 // the operator's screen.
-func trimBanner(b []byte, max int) []byte {
-	if len(b) <= max {
+func trimBanner(b []byte, maxBytes int) []byte {
+	if len(b) <= maxBytes {
 		return b
 	}
-	cut := b[len(b)-max:]
+	cut := b[len(b)-maxBytes:]
 	// Start at a line boundary so the replay does not open mid-escape-sequence.
 	if i := bytes.IndexByte(cut, '\n'); i >= 0 && i < len(cut)-1 {
 		cut = cut[i+1:]

@@ -117,12 +117,18 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 		Transport: &http.Transport{
 			// verify_tls is honored per device; management UIs often use
 			// self-signed certs, so this is configurable per target.
+			// #nosec G402 -- per-device policy, not a blanket opt-out: verification is
+			// on unless the operator unticked it for this device, which management UIs
+			// with self-signed certs require. The device is reached over the management
+			// network and its credential is injected server-side either way.
 			TLSClientConfig:   &tls.Config{InsecureSkipVerify: !ep.VerifyTLS}, //nolint:gosec // per-device policy
 			ForceAttemptHTTP2: true,
 		},
 		// Rebase device responses (HTML <base>+shim, redirects, cookies) under the
 		// session prefix so a UI written for the origin root works when re-served at
 		// /proxy/<sid>/. No watermark is injected on this path — see modifyResponse.
+		//nolint:bodyclose // ModifyResponse inspects the upstream response and hands
+		// it on; closing the body here would truncate the reply to the operator.
 		ModifyResponse: modifyResponse(prefix),
 		// Never leak upstream errors (which could echo device internals) to the
 		// user; log-and-generic is applied by the caller's middleware.
@@ -142,8 +148,9 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 	if g.tunnelDomain != "" {
 		tunnelHost = s.ID.String() + "." + g.tunnelDomain
 		tp = &httputil.ReverseProxy{
-			Director:       g.tunnelDirector(target, ep.CustomHeaders, cred, tunnelHost),
-			Transport:      rp.Transport,
+			Director:  g.tunnelDirector(target, ep.CustomHeaders, cred, tunnelHost),
+			Transport: rp.Transport,
+			//nolint:bodyclose // as above: the body is forwarded, not consumed.
 			ModifyResponse: modifyTunnelResponse(target, tunnelHost),
 			ErrorHandler:   rp.ErrorHandler,
 		}

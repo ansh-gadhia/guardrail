@@ -1,6 +1,6 @@
 // Package analytics is the read-model application layer: dashboard aggregates,
 // global search, audit querying, and report generation (CSV). It depends on a
-// single AnalyticsStore port implemented by the persistence layer.
+// single Store port implemented by the persistence layer.
 package analytics
 
 import (
@@ -92,18 +92,18 @@ type AuditRow struct {
 	Detail map[string]any
 }
 
-// AnalyticsStore is the read port implemented by the persistence layer.
-type AnalyticsStore interface {
+// Store is the read port implemented by the persistence layer.
+type Store interface {
 	Dashboard(ctx context.Context, s Scope) (Summary, error)
 	Search(ctx context.Context, s Scope, q string, limit int) (SearchResults, error)
 	ListAudit(ctx context.Context, s Scope, f AuditFilter) ([]AuditRow, error)
 }
 
 // Service implements the analytics use cases.
-type Service struct{ store AnalyticsStore }
+type Service struct{ store Store }
 
 // NewService constructs the analytics service.
-func NewService(store AnalyticsStore) *Service { return &Service{store: store} }
+func NewService(store Store) *Service { return &Service{store: store} }
 
 // Dashboard returns the dashboard summary for the actor's tenant.
 func (s *Service) Dashboard(ctx context.Context, actor iam.Claims) (Summary, error) {

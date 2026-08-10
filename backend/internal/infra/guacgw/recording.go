@@ -74,6 +74,8 @@ func (g *Gateway) storeRecording(ctx context.Context, s *guacSession) error {
 		return g.deps.Recordings.Finalize(ctx, s.recording.SessionID, time.Now())
 	}
 
+	// #nosec G304 -- file is the path this process told guacd to write, composed
+	// from the configured recording directory and a session UUID.
 	body, err := os.ReadFile(file)
 	if err != nil {
 		return fmt.Errorf("guac: reading the recording guacd wrote: %w", err)

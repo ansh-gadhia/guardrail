@@ -199,16 +199,16 @@ type Session struct {
 	DeviceType    string
 	DeviceAddress string
 	Protocol      Protocol
-	Status         Status
-	GrantedFrom    *time.Time
-	GrantedUntil   *time.Time
-	ClientIP       string
-	UserAgent      string
-	GatewayNode    string
-	StartedAt      *time.Time
-	EndedAt        *time.Time
-	EndReason      string
-	CreatedAt      time.Time
+	Status        Status
+	GrantedFrom   *time.Time
+	GrantedUntil  *time.Time
+	ClientIP      string
+	UserAgent     string
+	GatewayNode   string
+	StartedAt     *time.Time
+	EndedAt       *time.Time
+	EndReason     string
+	CreatedAt     time.Time
 	// Watermark is the attribution text a gateway stamps over the device UI: who
 	// is in the session and which session it is. The broker fills it in from the
 	// acting principal at Connect time and it is stored with the session, so a

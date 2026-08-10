@@ -68,7 +68,10 @@ type mirror struct {
 // bytes are being captured. Failure is reported rather than swallowed: a terminal
 // gateway that asked for video and silently got none would leave a device whose
 // policy promises evidence that does not exist.
-func (g *Gateway) OpenMirror(ctx context.Context, rec *access.Recording, orgID uuid.UUID, o access.MirrorOptions) (access.TerminalMirror, error) {
+// The caller's context is deliberately not used: a mirror outlives the Connect
+// request that starts it, so its tab hangs off the allocator context. Binding it
+// to the request would tear the recording down the moment Connect returned.
+func (g *Gateway) OpenMirror(_ context.Context, rec *access.Recording, orgID uuid.UUID, o access.MirrorOptions) (access.TerminalMirror, error) {
 	if rec == nil {
 		return nil, fmt.Errorf("browser: mirror needs a recording")
 	}

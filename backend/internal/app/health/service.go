@@ -152,6 +152,8 @@ func (s *Service) probe(ctx context.Context, t assets.ProbeTarget) assets.Health
 		Transport: &http.Transport{
 			// verify_tls is honoured per device, matching the proxy: management UIs
 			// commonly present self-signed certs.
+			// #nosec G402 -- mirrors the device's own VerifyTLS setting; a liveness
+			// probe must not be stricter than the session it is predicting.
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: !t.VerifyTLS}, //nolint:gosec // per-device policy
 		},
 		// A redirect is still a live device; don't chase it.

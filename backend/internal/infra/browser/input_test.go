@@ -2,7 +2,7 @@ package browser
 
 import "testing"
 
-func mv(x float64) inputMsg  { return inputMsg{T: "m", E: "move", X: x} }
+func mv(x float64) inputMsg   { return inputMsg{T: "m", E: "move", X: x} }
 func down(x float64) inputMsg { return inputMsg{T: "m", E: "down", X: x} }
 
 // TestCoalesceMovesKeepsNewest: a run of queued moves collapses to the most

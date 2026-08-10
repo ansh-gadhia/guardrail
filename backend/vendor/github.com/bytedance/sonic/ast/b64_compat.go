@@ -1,3 +1,4 @@
+//go:build !amd64 || !go1.16
 // +build !amd64 !go1.16
 
 /*
@@ -19,13 +20,13 @@
 package ast
 
 import (
-    `encoding/base64`
+	"encoding/base64"
 )
 
 func decodeBase64(src string) ([]byte, error) {
-    return base64.StdEncoding.DecodeString(src)
+	return base64.StdEncoding.DecodeString(src)
 }
 
 func encodeBase64(src []byte) string {
-    return base64.StdEncoding.EncodeToString(src)
+	return base64.StdEncoding.EncodeToString(src)
 }

@@ -277,6 +277,7 @@ func (f *fakeRecordings) AddArtifact(_ context.Context, recordingID uuid.UUID, a
 	f.artifacts[recordingID.String()+"/"+a.Kind] = a
 	return nil
 }
+
 // byKind is what GetArtifact serves, keyed by artifact kind. Left nil by
 // default so the existing tests keep seeing ErrNotFound.
 func (f *fakeRecordings) GetArtifact(_ context.Context, _ access.Scope, _ uuid.UUID, kind string) (*access.Artifact, error) {
