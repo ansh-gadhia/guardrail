@@ -139,18 +139,18 @@ setup_input() {
 
 # read_input VAR [prompt] — returns non-zero at EOF.
 read_input() {
-    local __v="$1" __p="${2:-}" __a=""
-    if [ -n "$__p" ]; then printf '%s' "$__p"; fi
-    IFS= read -r -u 3 __a || return 1
-    printf -v "$__v" '%s' "$__a"
+    local __ri_v="$1" __ri_p="${2:-}" __ri_a=""
+    if [ -n "$__ri_p" ]; then printf '%s' "$__ri_p"; fi
+    IFS= read -r -u 3 __ri_a || return 1
+    printf -v "$__ri_v" '%s' "$__ri_a"
 }
 
 read_secret() {
-    local __v="$1" __p="${2:-}" __a=""
-    if [ -n "$__p" ]; then printf '%s' "$__p"; fi
-    IFS= read -r -s -u 3 __a || return 1
+    local __rs_v="$1" __rs_p="${2:-}" __rs_a=""
+    if [ -n "$__rs_p" ]; then printf '%s' "$__rs_p"; fi
+    IFS= read -r -s -u 3 __rs_a || return 1
     echo
-    printf -v "$__v" '%s' "$__a"
+    printf -v "$__rs_v" '%s' "$__rs_a"
 }
 
 no_input() { die "no input available — run this from a terminal, or pipe answers in"; }
@@ -320,38 +320,49 @@ fetch_release() {
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
+# These write their answer into a caller-named variable, which makes shadowing a
+# real hazard: a helper whose local happens to share a name with the variable it
+# was asked to fill assigns to ITS OWN copy, the caller sees nothing, and a
+# validation loop spins forever. That is exactly what ask_port -> ask did when
+# both used "__ans".
+#
+# So each function's internals carry ITS OWN prefix — __ask_, __yn_, __port_,
+# __pw_, __ri_, __rs_. A caller passes either a user-level name or one of its own
+# __<self>_ names, and a callee only ever declares __<callee>_ names, so the two
+# cannot collide by construction. A shared prefix would NOT have been enough:
+# that just moves the collision, which is how the first fix failed.
 ask() { # ask VAR "Prompt" "default"
-    local __var="$1" __prompt="$2" __default="${3:-}" __ans=""
-    if [ -n "$__default" ]; then
-        read_input __ans "  ${__prompt} ${D}[${__default}]${R}: " || no_input
-        __ans="${__ans:-$__default}"
+    local __ask_var="$1" __ask_prompt="$2" __ask_default="${3:-}" __ask_ans=""
+    if [ -n "$__ask_default" ]; then
+        read_input __ask_ans "  ${__ask_prompt} ${D}[${__ask_default}]${R}: " || no_input
+        __ask_ans="${__ask_ans:-$__ask_default}"
     else
-        while [ -z "$__ans" ]; do
-            read_input __ans "  ${__prompt}: " || no_input
+        while [ -z "$__ask_ans" ]; do
+            read_input __ask_ans "  ${__ask_prompt}: " || no_input
         done
     fi
-    printf -v "$__var" '%s' "$__ans"
+    printf -v "$__ask_var" '%s' "$__ask_ans"
 }
 
 ask_yn() { # ask_yn VAR "Prompt" "y|n"
-    local __var="$1" __prompt="$2" __default="${3:-y}" __ans=""
-    local hint="[Y/n]"; [ "$__default" = "n" ] && hint="[y/N]"
+    local __yn_var="$1" __yn_prompt="$2" __yn_default="${3:-y}" __yn_ans=""
+    local __yn_hint="[Y/n]"; [ "$__yn_default" = "n" ] && __yn_hint="[y/N]"
     while true; do
-        read_input __ans "  ${__prompt} ${D}${hint}${R}: " || no_input
-        __ans="${__ans:-$__default}"
-        case "${__ans,,}" in
-            y|yes) printf -v "$__var" '%s' "yes"; return 0 ;;
-            n|no)  printf -v "$__var" '%s' "no";  return 0 ;;
+        read_input __yn_ans "  ${__yn_prompt} ${D}${__yn_hint}${R}: " || no_input
+        __yn_ans="${__yn_ans:-$__yn_default}"
+        case "${__yn_ans,,}" in
+            y|yes) printf -v "$__yn_var" '%s' "yes"; return 0 ;;
+            n|no)  printf -v "$__yn_var" '%s' "no";  return 0 ;;
             *) warn "answer y or n" ;;
         esac
     done
 }
 
 ask_port() { # ask_port VAR "Prompt" default
-    local __var="$1" __prompt="$2" __default="$3" __ans=""
+    local __port_var="$1" __port_prompt="$2" __port_default="$3" __port_ans="" __port_reuse=""
     while true; do
-        ask __ans "$__prompt" "$__default"
-        if [[ "$__ans" =~ ^[0-9]+$ ]] && [ "$__ans" -ge 1 ] && [ "$__ans" -le 65535 ]; then
+        ask __port_ans "$__port_prompt" "$__port_default"
+        if [[ "$__port_ans" =~ ^[0-9]+$ ]] && [ "$__port_ans" -ge 1 ] && [ "$__port_ans" -le 65535 ]; then
             # A port already in use fails at `up` with an error nobody reads.
             #
             # "Something is already installed" is NOT proof the port is ours: a
@@ -359,36 +370,66 @@ ask_port() { # ask_port VAR "Prompt" default
             # the first exactly here. So ask instead of assuming — an operator
             # re-running the installer against their own stack answers yes, and
             # anyone else finds out now rather than after the config is written.
-            if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${__ans}\$"; then
-                warn "port ${__ans} is already in use on this server"
-                local __reuse=""
-                ask_yn __reuse "Use it anyway (only if it is this GuardRail holding it)?" n
-                [ "$__reuse" = "yes" ] || continue
+            if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${__port_ans}\$"; then
+                warn "port ${__port_ans} is already in use on this server"
+                ask_yn __port_reuse "Use it anyway (only if it is this GuardRail holding it)?" n
+                [ "$__port_reuse" = "yes" ] || continue
             fi
-            printf -v "$__var" '%s' "$__ans"; return 0
+            printf -v "$__port_var" '%s' "$__port_ans"; return 0
         fi
         warn "enter a port between 1 and 65535"
     done
 }
 
 ask_password() { # ask_password VAR
-    local __var="$1" a="" b=""
+    local __pw_var="$1" __pw_a="" __pw_b=""
     while true; do
-        read_secret a "  Admin password ${D}(min 12 chars)${R}: " || no_input
-        if [ "${#a}" -lt 12 ]; then
+        read_secret __pw_a "  Admin password ${D}(min 12 chars)${R}: " || no_input
+        if [ "${#__pw_a}" -lt 12 ]; then
             # Not an arbitrary rule: the API refuses to start if this is set and
             # shorter than 12, so accepting one here would produce an install
             # that fails at boot with a message the operator never sees.
             warn "too short — the server refuses to start with fewer than 12 characters"
             continue
         fi
-        read_secret b "  Confirm password: " || no_input
-        [ "$a" = "$b" ] && { printf -v "$__var" '%s' "$a"; return 0; }
+        read_secret __pw_b "  Confirm password: " || no_input
+        [ "$__pw_a" = "$__pw_b" ] && { printf -v "$__pw_var" '%s' "$__pw_a"; return 0; }
         warn "passwords did not match"
     done
 }
 
 secret() { openssl rand -base64 48 | tr -d '\n'; }
+
+# port_free reports whether nothing is listening on a port.
+port_free() {
+    ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${1}\$"
+}
+
+# free_port returns the preferred port, or the next free one above it.
+#
+# Postgres, Redis and guacd are published on loopback for psql, backups and
+# debugging — useful, and not something worth adding three prompts for. But the
+# defaults are fixed, so a SECOND instance on the same host collided on 5432
+# before it had started a single container, with a daemon error rather than
+# anything an operator could act on. Shifting quietly and saying so is better
+# than either failing or interrogating everyone about ports they do not care
+# about.
+free_port() {
+    local want="$1" p="$1" limit=$(( $1 + 50 ))
+    while [ "$p" -le "$limit" ]; do
+        if port_free "$p"; then printf '%s' "$p"; return 0; fi
+        p=$(( p + 1 ))
+    done
+    printf '%s' "$want"
+}
+
+# note_port reports a shift. Kept OUT of free_port deliberately: free_port's
+# stdout IS its return value, so anything it printed for a human was captured
+# into the variable instead — the .env ended up with the whole notice where the
+# port should be, and compose refused it as "invalid hostPort".
+note_port() {
+    [ "$2" = "$3" ] || info "$1 port $2 is taken; using ${B}$3${R} for this instance"
+}
 
 # ---------------------------------------------------------------------------
 # The DNS question, asked on install AND update
@@ -463,9 +504,11 @@ VERSION=${VERSION}
 GUARDRAIL_HTTPS_PORT=${HTTPS_PORT}
 GUARDRAIL_HTTP_PORT=${HTTP_PORT}
 POSTGRES_BIND_ADDR=127.0.0.1
-POSTGRES_PORT=5432
+POSTGRES_PORT=${PG_PORT}
 REDIS_BIND_ADDR=127.0.0.1
-REDIS_PORT=6379
+REDIS_PORT=${RD_PORT}
+GUACD_BIND_ADDR=127.0.0.1
+GUACD_PORT=${GUACD_PORT}
 
 # ---- HTTP ----
 GUARDRAIL_TRUST_PROXY_HEADERS=true
@@ -526,9 +569,18 @@ prepare_dirs() {
 
 profiles() {
     local p=()
-    [ "${DNS_ENABLED:-no}" = "yes" ] && p+=(--profile dns)
-    [ "${DESKTOP_ENABLED:-true}" = "true" ] && p+=(--profile desktop)
-    printf '%s\n' "${p[@]}"
+    # `if`, not `[ ] && ...`: under set -e a failing test as the whole statement
+    # is a failing command, and inside the process substitution below that exits
+    # the subshell silently.
+    if [ "${DNS_ENABLED:-no}" = "yes" ]; then p+=(--profile dns); fi
+    if [ "${DESKTOP_ENABLED:-true}" = "true" ]; then p+=(--profile desktop); fi
+    # Print nothing when there are none. `printf '%s\n' "${p[@]}"` on an EMPTY
+    # array still prints one blank line, which mapfile turns into a single
+    # empty-string element — and that reaches docker as an argument, giving
+    # `unknown docker command: "compose "`. An install with neither the DNS
+    # resolver nor desktop enabled hit this every time.
+    if [ ${#p[@]} -gt 0 ]; then printf '%s\n' "${p[@]}"; fi
+    return 0
 }
 
 start_stack() {
@@ -622,6 +674,11 @@ do_install() {
 
     configure_dns "tunnel.guardrail.lan" "yes"
 
+    # Loopback-published for psql/backups; shifted if something already holds them.
+    PG_PORT=$(free_port 5432);  note_port Postgres 5432 "$PG_PORT"
+    RD_PORT=$(free_port 6379);  note_port Redis 6379 "$RD_PORT"
+    GUACD_PORT=$(free_port 4822); note_port guacd 4822 "$GUACD_PORT"
+
     JWT_KEY=$(secret); MASTER_KEY=$(secret)
     PG_PASSWORD=$(secret | tr -d '/+=' | cut -c1-32)
     PG_APP_PASSWORD=$(secret | tr -d '/+=' | cut -c1-32)
@@ -706,6 +763,20 @@ do_remove() {
     step "Remove ${APP_NAME} completely"
     warn "this deletes the containers, the images, the DATABASE, the credential"
     warn "vault and every session recording. It cannot be undone."
+
+    # Anything else on this host under a different project name. Remove is scoped
+    # to THIS instance, and the shared bits below are only safe to delete when
+    # nothing else is using them.
+    local others=""
+    if have docker; then
+        others=$(docker ps -a --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null |
+            grep -E '^guardrail' | grep -vx "$PROJECT" | sort -u || true)
+    fi
+    if [ -n "$others" ]; then
+        echo
+        info "other GuardRail instances on this host will be left alone:"
+        printf '%s\n' "$others" | sed 's/^/      /'
+    fi
     echo
     local confirm=""
     read_input confirm "  Type ${B}REMOVE${R} to confirm: " || no_input
@@ -713,7 +784,8 @@ do_remove() {
 
     if [ -f "$COMPOSE_FILE" ]; then
         # -v takes the named volumes with it; without it the database survives and
-        # a later install silently adopts an old vault it has no key for.
+        # a later install silently adopts an old vault it has no key for. Volumes
+        # are project-scoped, so this only ever touches this instance's data.
         spin "removing containers and volumes" bash -c \
             "docker compose -p '$PROJECT' --env-file '$ENV_FILE' -f '$COMPOSE_FILE' --profile dns --profile desktop down -v --remove-orphans" \
             || true
@@ -722,14 +794,34 @@ do_remove() {
     if have docker; then
         local leftovers
         leftovers=$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null || true)
-        [ -n "$leftovers" ] && docker rm -f $leftovers >/dev/null 2>&1 || true
-        spin "removing images" bash -c \
-            "docker images --format '{{.Repository}}:{{.Tag}}' | grep -E 'guardrail' | xargs -r docker rmi -f" || true
+        if [ -n "$leftovers" ]; then
+            # shellcheck disable=SC2086 # deliberately word-split: a list of ids
+            docker rm -f $leftovers >/dev/null 2>&1 || true
+        fi
+        # Images are NOT removed.
+        #
+        # They are shared: `docker images | grep guardrail | xargs docker rmi -f`
+        # deletes the images every other instance on the host is running from, and
+        # a `grep guardrail` matches anything with that substring. Removing this
+        # instance must not leave another one unable to restart. Docker prunes
+        # unreferenced images on request; that is the operator's call, not ours.
+        info "images left in place — other instances may share them"
+        info "to reclaim that space: ${D}docker image prune -a${R}"
     fi
 
     rm -rf "$INSTALL_DIR"
-    rm -rf /var/lib/guardrail
-    ok "removed: containers, volumes, images, ${INSTALL_DIR} and /var/lib/guardrail"
+
+    # /var/lib/guardrail is a HOST path shared by every instance (guacd writes
+    # desktop recordings there), not a project-scoped volume. Deleting it while
+    # another instance is running removes the directory out from under its guacd,
+    # which then records nothing and says so only in a log line.
+    if [ -z "$others" ]; then
+        rm -rf /var/lib/guardrail
+        ok "removed: containers, volumes, ${INSTALL_DIR} and /var/lib/guardrail"
+    else
+        ok "removed: containers, volumes and ${INSTALL_DIR}"
+        info "left /var/lib/guardrail alone — another instance shares it"
+    fi
     info "Docker itself was left installed"
 }
 
