@@ -52,7 +52,7 @@ func TestGateway_InjectsBasicAuthServerSide(t *testing.T) {
 		fakeDeviceLookup{ep: access.Endpoint{
 			Protocol: access.ProtocolHTTP, BaseURL: target.URL, Host: "127.0.0.1", VerifyTLS: true,
 		}},
-		nil, nil, "test-node",
+		nil, nil, "test-node", "",
 	)
 
 	sess := &access.Session{ID: uuid.New(), OrganizationID: uuid.New(), UserID: uuid.New(), DeviceID: uuid.New()}
@@ -98,7 +98,7 @@ func TestGateway_FailsClosedWithoutCredential(t *testing.T) {
 	gw := NewHTTPGateway(fakeDeviceLookup{ep: access.Endpoint{
 		Protocol: access.ProtocolHTTP, BaseURL: target.URL, Host: "127.0.0.1", VerifyTLS: true,
 		AllowUnmanaged: false,
-	}}, nil, nil, "n")
+	}}, nil, nil, "n", "")
 	sess := &access.Session{ID: uuid.New()}
 	_, err := gw.Establish(context.Background(), sess, fakeResolver{err: access.ErrNoCredential})
 	if err == nil {
@@ -120,7 +120,7 @@ func TestGateway_BreakGlassAllowsUnmanaged(t *testing.T) {
 	gw := NewHTTPGateway(fakeDeviceLookup{ep: access.Endpoint{
 		Protocol: access.ProtocolHTTP, BaseURL: target.URL, Host: "127.0.0.1", VerifyTLS: true,
 		AllowUnmanaged: true,
-	}}, nil, nil, "n")
+	}}, nil, nil, "n", "")
 	sess := &access.Session{ID: uuid.New()}
 	live, err := gw.Establish(context.Background(), sess, fakeResolver{err: access.ErrNoCredential})
 	if err != nil {
@@ -141,7 +141,7 @@ func TestGateway_RejectsWrongToken(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer target.Close()
-	gw := NewHTTPGateway(fakeDeviceLookup{ep: access.Endpoint{Protocol: access.ProtocolHTTP, BaseURL: target.URL, Host: "127.0.0.1", VerifyTLS: true}}, nil, nil, "n")
+	gw := NewHTTPGateway(fakeDeviceLookup{ep: access.Endpoint{Protocol: access.ProtocolHTTP, BaseURL: target.URL, Host: "127.0.0.1", VerifyTLS: true}}, nil, nil, "n", "")
 	sess := &access.Session{ID: uuid.New()}
 	if _, err := gw.Establish(context.Background(), sess, fakeResolver{}); err != nil {
 		t.Fatalf("establish: %v", err)
@@ -155,7 +155,7 @@ func TestGateway_RejectsWrongToken(t *testing.T) {
 func TestGateway_RejectsAfterEnd(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer target.Close()
-	gw := NewHTTPGateway(fakeDeviceLookup{ep: access.Endpoint{Protocol: access.ProtocolHTTP, BaseURL: target.URL, Host: "127.0.0.1", VerifyTLS: true}}, nil, nil, "n")
+	gw := NewHTTPGateway(fakeDeviceLookup{ep: access.Endpoint{Protocol: access.ProtocolHTTP, BaseURL: target.URL, Host: "127.0.0.1", VerifyTLS: true}}, nil, nil, "n", "")
 	sess := &access.Session{ID: uuid.New()}
 	live, _ := gw.Establish(context.Background(), sess, fakeResolver{})
 	_ = gw.End(context.Background(), sess.ID)

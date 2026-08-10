@@ -186,7 +186,19 @@ type Session struct {
 	OrganizationID uuid.UUID
 	UserID         uuid.UUID
 	DeviceID       uuid.UUID
-	Protocol       Protocol
+	// DeviceName, DeviceType and DeviceAddress are the device's identity as it
+	// was at connect time, copied onto the session rather than looked up later.
+	//
+	// An audit record must not be rewritten by a later edit to what it refers to:
+	// renaming a firewall should not retitle last year's sessions, and deleting it
+	// should not erase them. Resolving the name by joining devices did exactly
+	// that — a deleted device left every session it ever served showing a bare
+	// UUID. Empty means a session older than the columns, or one whose device was
+	// already gone when they were added; callers fall back to the id.
+	DeviceName    string
+	DeviceType    string
+	DeviceAddress string
+	Protocol      Protocol
 	Status         Status
 	GrantedFrom    *time.Time
 	GrantedUntil   *time.Time
@@ -248,6 +260,12 @@ type LiveSession struct {
 	// ProxyToken binds the user's browser to this session (set as an HttpOnly
 	// cookie by the delivery layer); it is not a device credential.
 	ProxyToken string
+	// TunnelHost is the per-session hostname (<sid>.<tunnel-domain>) that serves
+	// this session at the root of its own origin, or "" when whole-host tunnel
+	// delivery is disabled. When set, the delivery layer prefers it over
+	// ProxyPath: it needs no HTML rewriting, so device SPAs that hard-navigate
+	// via window.location work unmodified.
+	TunnelHost string
 }
 
 // CredentialResolver returns, just-in-time and one-shot, the plaintext

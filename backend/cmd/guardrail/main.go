@@ -6,12 +6,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -161,6 +164,45 @@ func buildFederation(cfg config.FederationConfig, log *zap.Logger) (domiam.OIDCA
 
 // healthcheck performs an in-process HTTP GET against the liveness probe. Returns
 // a process exit code (0 healthy, 1 otherwise).
+// detectPrimaryIP returns the address the kernel would use as the source for the
+// default route — this host's primary LAN IP.
+//
+// The UDP "dial" sends no packet. It only asks the routing table which local
+// address a datagram to that destination would leave from, so this works with no
+// network reachable at all and with no DNS. The destination is TEST-NET-1, which
+// is reserved for documentation and is never routed anywhere.
+//
+// This is diagnostic only: it is logged so an operator knows what to point DNS
+// at, and nothing in the request path consults it. Every listener binds 0.0.0.0.
+func detectPrimaryIP() string {
+	c, err := net.Dial("udp", "192.0.2.1:9")
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = c.Close() }()
+	if a, ok := c.LocalAddr().(*net.UDPAddr); ok {
+		return a.IP.String()
+	}
+	return ""
+}
+
+// inContainer reports whether this process is running inside a container.
+//
+// It gates the DNS hint above: a container's primary address is its address on
+// the Docker bridge, which no machine on the LAN can reach. Printing it as the
+// answer for a wildcard record would be a confident, wrong instruction.
+func inContainer() bool {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	b, err := os.ReadFile("/proc/1/cgroup")
+	if err != nil {
+		return false
+	}
+	s := string(b)
+	return strings.Contains(s, "docker") || strings.Contains(s, "kubepods") || strings.Contains(s, "containerd")
+}
+
 func healthcheck() int {
 	addr := os.Getenv("GUARDRAIL_HTTP_ADDR")
 	if addr == "" {
@@ -260,6 +302,8 @@ func run() error {
 		OIDC:            oidcProvider,
 		LDAP:            ldapProvider,
 		FederationOrgID: fedOrgID,
+		// --- Machine tokens ---
+		APITokens: postgres.NewAPITokenRepo(pg),
 	})
 	// Primary super admin from the environment (GUARDRAIL_ADMIN_*). Idempotent:
 	// created once on first boot, a no-op thereafter. Fails closed on a weak
@@ -325,7 +369,7 @@ func run() error {
 	// reaper sees a busy session as busy whichever way it is being delivered.
 	activity := appaccess.NewActivityTracker(sessionRepo, nil, 30*time.Second)
 
-	proxyGateway := proxy.NewHTTPGateway(deviceLookup, eventRepo, activity, cfg.Telemetry.ServiceName)
+	proxyGateway := proxy.NewHTTPGateway(deviceLookup, eventRepo, activity, cfg.Telemetry.ServiceName, cfg.HTTP.TunnelDomain)
 	sessionServers := []v1.SessionServer{proxyGateway}
 	var isolatedGateways []domaccess.Gateway
 
@@ -341,6 +385,12 @@ func run() error {
 			"the console will report session recording as unavailable",
 			zap.Error(chromeErr))
 	}
+	// The terminal gateways borrow the browser gateway to record video, so it is
+	// declared out here. Left nil when isolation is off or Chromium is missing —
+	// and assigned ONLY inside the branch that builds a real one, because a typed
+	// nil in an interface is not nil, and the gateways test this for nil.
+	var terminalMirrors domaccess.TerminalMirrorFactory
+
 	if cfg.Browser.Enabled && chromeErr == nil {
 		bgw := browser.NewGateway(
 			browser.Config{
@@ -368,6 +418,7 @@ func run() error {
 				Log:        log,
 			},
 		)
+		terminalMirrors = bgw
 		isolatedGateways = append(isolatedGateways, bgw)
 		// Isolated first: it is the more specific owner, and the proxy declines
 		// ids it does not hold, so order only affects how many map lookups a
@@ -394,7 +445,11 @@ func run() error {
 		// connection, which is the correct default but useless in practice, so
 		// one is always wired here.
 		HostKeys: sshgw.TOFU{Store: postgres.NewHostKeyRepo(pg)},
-		Log:      log,
+		// Optional. A terminal device set to capture video needs a browser to
+		// render it into; without one the session still runs and is still
+		// transcribed, and the gateway logs the missing video.
+		Mirrors: terminalMirrors,
+		Log:     log,
 	})
 	sessionServers = append(sessionServers, sshGateway)
 
@@ -411,6 +466,7 @@ func run() error {
 		Recordings: recordingRepo,
 		Blobs:      blobStore,
 		Activity:   activity,
+		Mirrors:    terminalMirrors,
 		Log:        log,
 	})
 	// The two text protocols, which between them need no sidecar at all.
@@ -482,7 +538,40 @@ func run() error {
 		Config:           appaccess.DefaultConfig(),
 		Log:              log,
 	})
-	accessHandler := v1.NewAccessHandler(brokerSvc, sessionServer, cfg.IsProduction())
+	// The grant key signs the short-lived tokens that bootstrap a tunnel cookie
+	// onto a session's own origin. It is DERIVED from the JWT signing key rather
+	// than being that key: a leak of one must not hand over the other, and the
+	// vault KEK (GUARDRAIL_MASTER_KEY) is never involved in transport concerns.
+	grantSum := sha256.Sum256(append([]byte(cfg.Auth.JWTSigningKey), []byte("guardrail-tunnel-grant-v1")...))
+	accessHandler := v1.NewAccessHandler(brokerSvc, sessionServer, cfg.IsProduction(), v1.TunnelConfig{
+		Domain:   cfg.HTTP.TunnelDomain,
+		Gateway:  proxyGateway,
+		GrantKey: grantSum[:],
+	})
+	if cfg.HTTP.TunnelDomain != "" {
+		// Say once, at startup, exactly what DNS has to answer. The address is
+		// detected rather than configured — nothing in this stack hardcodes an IP,
+		// and a DHCP lease change must not need an edit.
+		//
+		// Under compose this process is in a container, where the detected address
+		// is this container's on the Docker bridge (172.x). That is not reachable
+		// from the LAN and is emphatically not what the wildcard should point at,
+		// so we say what we actually know rather than printing a plausible,
+		// unreachable address an operator would copy into their router.
+		fields := []zap.Field{zap.String("domain", cfg.HTTP.TunnelDomain)}
+		if ip := detectPrimaryIP(); ip != "" && !inContainer() {
+			fields = append(fields,
+				zap.String("detected_ip", ip),
+				zap.String("point_dns_at", "*."+cfg.HTTP.TunnelDomain+" -> "+ip))
+		} else {
+			fields = append(fields,
+				zap.String("point_dns_at", "*."+cfg.HTTP.TunnelDomain+" -> <this server's LAN IP>"),
+				zap.String("hint", "containerised: run `make install` or `hostname -I` on the host for the address"))
+		}
+		log.Info("whole-host tunnel delivery enabled", fields...)
+	} else {
+		log.Info("whole-host tunnel delivery disabled; proxy sessions serve under /proxy/<sid>/")
+	}
 
 	// --- Analytics: dashboard, search, audit log, reports (M8) ---
 	analyticsSvc := appanalytics.NewService(postgres.NewAnalyticsRepo(pg))
@@ -529,8 +618,11 @@ func run() error {
 		Notify:        notifyHandler,
 		Analytics:     analyticsHandler,
 		Authenticator: issuer,
-		WebDir:        cfg.HTTP.WebDir,
-		Version:       version,
+		// Long-lived machine tokens, verified on the same Authorization header as
+		// a user's JWT and told apart by their prefix.
+		APITokens: iamSvc,
+		WebDir:    cfg.HTTP.WebDir,
+		Version:   version,
 	})
 	if err != nil {
 		return err

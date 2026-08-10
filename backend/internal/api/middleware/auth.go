@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -16,19 +17,45 @@ type Authenticator interface {
 	Verify(token string) (iam.Claims, error)
 }
 
-// Authenticate extracts and validates the Bearer access token, storing the
+// APITokenVerifier resolves a long-lived machine token to a principal. Optional:
+// when nil, only JWTs are accepted and API tokens are simply not a thing this
+// deployment has.
+type APITokenVerifier interface {
+	VerifyAPIToken(ctx context.Context, raw string) (iam.Claims, error)
+}
+
+// Authenticate extracts and validates the Bearer credential, storing the
 // resulting claims in the request context. Unauthenticated requests are
 // rejected with 401.
-func Authenticate(a Authenticator) gin.HandlerFunc {
+//
+// Two credentials are accepted on the same header, told apart by prefix rather
+// than by trying one and falling back to the other. Fallback would make an
+// expired session token and a malformed API token produce the same log line, and
+// would run every machine token through a JWT parse first for no reason.
+func Authenticate(a Authenticator, tokens APITokenVerifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		h := c.GetHeader("Authorization")
 		token, ok := strings.CutPrefix(h, "Bearer ")
-		if !ok || strings.TrimSpace(token) == "" {
+		token = strings.TrimSpace(token)
+		if !ok || token == "" {
 			abortProblem(c, http.StatusUnauthorized, "Unauthorized", "missing bearer token")
 			return
 		}
-		claims, err := a.Verify(strings.TrimSpace(token))
+
+		var claims iam.Claims
+		var err error
+		if iam.LooksLikeAPIToken(token) {
+			if tokens == nil {
+				abortProblem(c, http.StatusUnauthorized, "Unauthorized", "API tokens are not enabled")
+				return
+			}
+			claims, err = tokens.VerifyAPIToken(c.Request.Context(), token)
+		} else {
+			claims, err = a.Verify(token)
+		}
 		if err != nil {
+			// One message for both paths: which credential was wrong, and why, is
+			// not something an unauthenticated caller gets to learn.
 			abortProblem(c, http.StatusUnauthorized, "Unauthorized", "invalid or expired token")
 			return
 		}

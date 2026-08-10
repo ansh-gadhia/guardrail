@@ -38,6 +38,10 @@ type DeviceInput struct {
 	CustomHeaders  map[string]string
 	Tags           []string
 	AllowUnmanaged bool
+	// RecordingKinds is what a recorded session captures. Nil leaves the stored
+	// set alone; an empty non-nil slice means "the protocol's default", which is
+	// what a client that knows nothing about kinds sends implicitly.
+	RecordingKinds *[]string
 	// RecordSessions is the device's recording policy. A nil pointer leaves it
 	// unchanged, which is what lets a caller edit a device without needing rights
 	// over recording.
@@ -102,6 +106,7 @@ func (s *Service) CreateDevice(ctx context.Context, actor iam.Claims, in DeviceI
 		Tags: in.Tags, Status: "active", AllowUnmanaged: in.AllowUnmanaged,
 		// Recording defaults on; an explicit choice at registration wins.
 		RecordSessions: record,
+		RecordingKinds: recordingKindsOrDefault(scheme, in.RecordingKinds),
 		DeliveryMode:   mode,
 		// An hour of inactivity ends the session unless the registrant says
 		// otherwise. A default of 0 would mean "never", which is not a posture to
@@ -139,6 +144,20 @@ func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UU
 		}
 		d.RecordSessions = *in.RecordSessions
 	}
+	// Changing WHAT is captured is the same class of decision as switching
+	// recording off — dropping the transcript from a device that had one removes
+	// evidence just as effectively — so it is gated by the same owner check.
+	if in.RecordingKinds != nil {
+		next := assets.NormalizeRecordingKinds(schemeOf(in.Scheme, d.Scheme), *in.RecordingKinds)
+		if !sameStrings(next, d.RecordingKinds) {
+			if !d.CanSetRecording(actor.UserID, actor.IsSuperAdmin) {
+				s.recordAsset(ctx, actor, "device.recording_denied", "device", d.ID,
+					map[string]any{"requested_kinds": next})
+				return nil, assets.ErrForbidden
+			}
+			d.RecordingKinds = next
+		}
+	}
 	if in.IdleTimeoutMinutes != nil {
 		d.IdleTimeoutMinutes = *in.IdleTimeoutMinutes
 	}
@@ -160,6 +179,12 @@ func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UU
 	d.Host, d.Port, d.Scheme = in.Host, portOrDefault(in.Port, scheme), scheme
 	d.VerifyTLS, d.CustomHeaders, d.Tags = in.VerifyTLS, in.CustomHeaders, in.Tags
 	d.AllowUnmanaged = in.AllowUnmanaged
+	// Re-settle the kinds against the scheme this request lands on. Switching an
+	// ssh device to https must not leave 'transcript' stored against a protocol
+	// that produces none — the CHECK would accept it and the console would show a
+	// capture that never happens. Empty here is fine: EffectiveRecordingKinds
+	// falls back to the new protocol's default.
+	d.RecordingKinds = assets.NormalizeRecordingKinds(scheme, d.RecordingKinds)
 	if err := s.devices.Update(ctx, scopeOf(actor), d); err != nil {
 		return nil, err
 	}
@@ -330,6 +355,44 @@ func schemeOrDefault(s string) (string, error) {
 		return "", fmt.Errorf("%w: unknown protocol %q (one of %v)", assets.ErrInvalid, s, assets.Schemes())
 	}
 	return s, nil
+}
+
+// schemeOf resolves which protocol a request settles on: the requested one when
+// given, otherwise the device's current one. Used where the answer is needed
+// before schemeOrDefault has validated it.
+func schemeOf(requested, current string) string {
+	if requested == "" {
+		return current
+	}
+	return requested
+}
+
+// recordingKindsOrDefault settles what a new device captures. A caller that says
+// nothing — or names only kinds this protocol cannot produce — gets the
+// protocol's default rather than an empty set, because "recorded" must never
+// resolve to "captures nothing".
+func recordingKindsOrDefault(scheme string, requested *[]string) []string {
+	if requested == nil {
+		return assets.DefaultRecordingKinds(scheme)
+	}
+	if k := assets.NormalizeRecordingKinds(scheme, *requested); len(k) > 0 {
+		return k
+	}
+	return assets.DefaultRecordingKinds(scheme)
+}
+
+// sameStrings reports set-and-order equality, used to tell a real policy change
+// from a request that merely restates the stored value.
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // portOrDefault fills in the protocol's conventional port when none was given.

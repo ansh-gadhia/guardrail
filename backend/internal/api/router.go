@@ -33,8 +33,11 @@ type Deps struct {
 	Notify        *v1.NotifyHandler        // notification-channel routes
 	Analytics     *v1.AnalyticsHandler     // dashboard, search, audit, reports
 	Authenticator middleware.Authenticator // verifies access tokens
-	Version       string                   // build version, surfaced at /api/v1/version
-	WebDir        string                   // if set, serve the SPA/console from this dir
+	// APITokens verifies long-lived machine tokens on the same Authorization
+	// header. Optional: nil means this deployment issues none.
+	APITokens middleware.APITokenVerifier
+	Version   string // build version, surfaced at /api/v1/version
+	WebDir    string // if set, serve the SPA/console from this dir
 }
 
 // New builds the fully-configured Gin engine for the public API listener.
@@ -53,9 +56,17 @@ func New(d Deps) (*gin.Engine, error) {
 	// metrics, and access logging.
 	r.Use(middleware.RequestID())
 	r.Use(middleware.Recovery(d.Logger))
-	r.Use(middleware.SecurityHeaders())
+	r.Use(middleware.SecurityHeaders(d.Config.HTTP.TunnelDomain))
 	r.Use(d.Metrics.Middleware())
 	r.Use(middleware.AccessLog(d.Logger))
+
+	// Whole-host tunnel dispatch, by Host header. Registered here — after the
+	// cross-cutting middleware so tunnel traffic is still logged, recovered and
+	// measured, but BEFORE any route exists — because Gin copies the middleware
+	// chain into each route as it is registered. Added later, this would not run
+	// for the API routes or for NoRoute, and a session request would be answered
+	// with the console SPA instead of the device.
+	d.Access.RegisterTunnel(r)
 
 	// Operational probes live at the root (not under /api/v1) so orchestrators
 	// and load balancers reach them independently of API versioning.
@@ -73,12 +84,17 @@ func New(d Deps) (*gin.Engine, error) {
 	// Feature routes. The authentication middleware is built once from the
 	// injected token verifier and shared by every protected module.
 	if d.Authenticator != nil {
-		authMW := middleware.Authenticate(d.Authenticator)
+		authMW := middleware.Authenticate(d.Authenticator, d.APITokens)
 		if d.IAM != nil {
 			d.IAM.Register(apiV1, authMW)
+			// Machine tokens: issued and revoked here, verified by authMW above.
+			d.IAM.RegisterAPITokens(apiV1, authMW)
 		}
 		if d.Assets != nil {
 			d.Assets.Register(apiV1, authMW)
+			// Device reachability for dashboards and external monitors. Same bearer
+			// auth and same device:read grant as the device list it summarises.
+			d.Assets.RegisterStatus(apiV1, authMW)
 		}
 		if d.Access != nil {
 			d.Access.Register(apiV1, authMW)

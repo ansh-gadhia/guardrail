@@ -15,6 +15,42 @@ export interface Column<T> {
   defaultHidden?: boolean;
 }
 
+type SortDir = "asc" | "desc";
+
+/**
+ * ServerMode hands paging, searching and sorting to the server.
+ *
+ * Without it the table does all three over whatever array it was given, which is
+ * correct only when that array is the whole result set. On a listing that is
+ * capped server-side it quietly becomes "of the rows we happened to fetch" —
+ * the row count, the page count and the search all narrow to the slab, and
+ * nothing on screen says so.
+ *
+ * `rows` in this mode is exactly one page; the table renders it as-is.
+ */
+export interface ServerMode<T> {
+  /** Total rows matching the current filter, across all pages. */
+  total: number;
+  /** Zero-based page index. */
+  page: number;
+  onPageChange: (page: number) => void;
+  pageSize: number;
+  onPageSizeChange?: (size: number) => void;
+  query: string;
+  onQueryChange: (q: string) => void;
+  sortKey: string | null;
+  sortDir: SortDir;
+  onSortChange: (key: string | null, dir: SortDir) => void;
+  /** Shows a busy hint while a page is in flight. */
+  loading?: boolean;
+  /**
+   * Supplies every matching row for CSV export. Without it the export button is
+   * hidden in server mode rather than silently writing a one-page file under a
+   * name that claims to be the whole table.
+   */
+  fetchAll?: () => Promise<T[]>;
+}
+
 interface DataTableProps<T> {
   columns: Column<T>[];
   rows: T[];
@@ -28,9 +64,11 @@ interface DataTableProps<T> {
   emptyMessage?: string;
   onRowClick?: (row: T) => void;
   toolbar?: ReactNode;
+  /** When set, the server owns paging/search/sort. */
+  server?: ServerMode<T>;
 }
 
-type SortDir = "asc" | "desc";
+const PAGE_SIZES = [12, 25, 50, 100];
 
 export function DataTable<T>({
   columns,
@@ -45,11 +83,21 @@ export function DataTable<T>({
   emptyMessage = "No results.",
   onRowClick,
   toolbar,
+  server,
 }: DataTableProps<T>) {
-  const [query, setQuery] = useState("");
-  const [sortKey, setSortKey] = useState<string | null>(null);
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const [page, setPage] = useState(0);
+  const [localQuery, setLocalQuery] = useState("");
+  const [localSortKey, setLocalSortKey] = useState<string | null>(null);
+  const [localSortDir, setLocalSortDir] = useState<SortDir>("asc");
+  const [localPage, setLocalPage] = useState(0);
+
+  // One set of names for both modes: everything below reads these, so the render
+  // path does not fork on whether the server or the browser is in charge.
+  const query = server ? server.query : localQuery;
+  const sortKey = server ? server.sortKey : localSortKey;
+  const sortDir = server ? server.sortDir : localSortDir;
+  const page = server ? server.page : localPage;
+  const effPageSize = server ? server.pageSize : pageSize;
+  const setPage = (p: number) => (server ? server.onPageChange(p) : setLocalPage(p));
   const [hidden, setHidden] = useState<Set<string>>(new Set(columns.filter((c) => c.defaultHidden).map((c) => c.key)));
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dense, setDense] = useState(false);
@@ -58,13 +106,15 @@ export function DataTable<T>({
   const cellText = (col: Column<T>, row: T) => (col.value ? col.value(row) : "");
 
   const filtered = useMemo(() => {
+    if (server) return rows; // already filtered by the query that produced this page
     const q = query.trim().toLowerCase();
     if (!q) return rows;
     return rows.filter((r) => columns.some((c) => String(cellText(c, r)).toLowerCase().includes(q)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, query, columns]);
+  }, [rows, query, columns, server]);
 
   const sorted = useMemo(() => {
+    if (server) return filtered; // already ordered by the database
     if (!sortKey) return filtered;
     const col = columns.find((c) => c.key === sortKey);
     if (!col?.value) return filtered;
@@ -76,22 +126,34 @@ export function DataTable<T>({
       return String(av).localeCompare(String(bv)) * dir;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtered, sortKey, sortDir, columns]);
+  }, [filtered, sortKey, sortDir, columns, server]);
 
-  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  // The row count the pager reports. In server mode it is the database's answer
+  // for the whole filter, not the length of the page we were handed.
+  const totalRows = server ? server.total : sorted.length;
+  const pageCount = Math.max(1, Math.ceil(totalRows / effPageSize));
   const clampedPage = Math.min(page, pageCount - 1);
-  const pageRows = sorted.slice(clampedPage * pageSize, clampedPage * pageSize + pageSize);
+  const pageRows = server ? sorted : sorted.slice(clampedPage * effPageSize, clampedPage * effPageSize + effPageSize);
+  const firstShown = totalRows === 0 ? 0 : clampedPage * effPageSize + 1;
+  const lastShown = server ? Math.min(totalRows, clampedPage * effPageSize + pageRows.length) : Math.min(totalRows, (clampedPage + 1) * effPageSize);
 
+  // Three-state cycle: unsorted → ascending → descending → unsorted.
   const toggleSort = (key: string) => {
-    if (sortKey !== key) {
-      setSortKey(key);
-      setSortDir("asc");
-    } else if (sortDir === "asc") {
-      setSortDir("desc");
-    } else {
-      setSortKey(null);
+    let nextKey: string | null = key;
+    let nextDir: SortDir = "asc";
+    if (sortKey === key) {
+      if (sortDir === "asc") nextDir = "desc";
+      else nextKey = null;
     }
+    if (server) {
+      server.onSortChange(nextKey, nextDir);
+      return;
+    }
+    setLocalSortKey(nextKey);
+    setLocalSortDir(nextDir);
   };
+
+  const setQuery = (q: string) => (server ? server.onQueryChange(q) : setLocalQuery(q));
 
   const clearSel = () => setSelected(new Set());
   const toggleRow = (id: string) =>
@@ -112,11 +174,12 @@ export function DataTable<T>({
 
   const selectedRows = rows.filter((r) => selected.has(rowKey(r)));
 
-  const exportCsv = () => {
+  const [exporting, setExporting] = useState(false);
+  const writeCsv = (data: T[]) => {
     const cols = visibleCols;
     const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
     const head = cols.map((c) => esc(c.header)).join(",");
-    const body = sorted.map((r) => cols.map((c) => esc(String(cellText(c, r)))).join(",")).join("\n");
+    const body = data.map((r) => cols.map((c) => esc(String(cellText(c, r)))).join(",")).join("\n");
     const blob = new Blob([head + "\n" + body], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -125,6 +188,25 @@ export function DataTable<T>({
     a.click();
     URL.revokeObjectURL(url);
   };
+  const exportCsv = async () => {
+    if (!server) {
+      writeCsv(sorted);
+      return;
+    }
+    // In server mode `sorted` is one page. Writing that to a file named after the
+    // whole table is the same lie the counters used to tell, so the rows are
+    // fetched first.
+    if (!server.fetchAll) return;
+    setExporting(true);
+    try {
+      writeCsv(await server.fetchAll());
+    } finally {
+      setExporting(false);
+    }
+  };
+  // Hidden rather than disabled when a server-mode table cannot produce the full
+  // set: a greyed button invites a click that will never work.
+  const canExport = !!exportName && (!server || !!server.fetchAll);
 
   return (
     <div className="space-y-3">
@@ -184,9 +266,9 @@ export function DataTable<T>({
               </div>
             )}
           </Menu>
-          {exportName && (
-            <Button size="sm" variant="ghost" icon={IconDownload} onClick={exportCsv}>
-              Export
+          {canExport && (
+            <Button size="sm" variant="ghost" icon={IconDownload} onClick={exportCsv} disabled={exporting}>
+              {exporting ? "Exporting…" : "Export"}
             </Button>
           )}
         </div>
@@ -279,30 +361,72 @@ export function DataTable<T>({
         </div>
 
         {/* Pagination */}
-        <div className="flex items-center justify-between gap-3 border-t border-line bg-surface-2/40 px-4 py-2.5 text-xs text-muted">
-          <span>
-            {sorted.length === 0 ? 0 : clampedPage * pageSize + 1}–{Math.min(sorted.length, (clampedPage + 1) * pageSize)} of {sorted.length}
-          </span>
-          <div className="flex items-center gap-1">
-            <button
-              className="rounded-md p-1.5 text-muted transition hover:bg-surface-2 hover:text-fg disabled:opacity-40"
-              disabled={clampedPage === 0}
-              onClick={() => setPage(clampedPage - 1)}
-              aria-label="Previous page"
-            >
-              <IconChevronLeft size={16} />
-            </button>
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-line bg-surface-2/40 px-4 py-2.5 text-xs text-muted">
+          <div className="flex items-center gap-3">
             <span className="tabular-nums">
-              {clampedPage + 1} / {pageCount}
+              {firstShown.toLocaleString()}–{lastShown.toLocaleString()} of {totalRows.toLocaleString()}
             </span>
-            <button
-              className="rounded-md p-1.5 text-muted transition hover:bg-surface-2 hover:text-fg disabled:opacity-40"
-              disabled={clampedPage >= pageCount - 1}
-              onClick={() => setPage(clampedPage + 1)}
-              aria-label="Next page"
-            >
-              <IconChevronRight size={16} />
-            </button>
+            {server?.loading && <span className="text-faint">Loading…</span>}
+          </div>
+          <div className="flex items-center gap-3">
+            {server?.onPageSizeChange && (
+              <label className="flex items-center gap-1.5">
+                <span className="text-faint">Rows</span>
+                <select
+                  className="rounded-md border border-line bg-surface px-1.5 py-1 text-xs text-fg"
+                  value={effPageSize}
+                  onChange={(e) => {
+                    // Back to the first page: page 7 of the old size is a
+                    // different set of rows at the new one.
+                    server.onPageSizeChange?.(Number(e.target.value));
+                    setPage(0);
+                  }}
+                >
+                  {PAGE_SIZES.map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <div className="flex items-center gap-1">
+              <button
+                className="rounded-md px-1.5 py-1 text-muted transition hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+                disabled={clampedPage === 0}
+                onClick={() => setPage(0)}
+                aria-label="First page"
+              >
+                ««
+              </button>
+              <button
+                className="rounded-md p-1.5 text-muted transition hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+                disabled={clampedPage === 0}
+                onClick={() => setPage(clampedPage - 1)}
+                aria-label="Previous page"
+              >
+                <IconChevronLeft size={16} />
+              </button>
+              <span className="tabular-nums">
+                {(clampedPage + 1).toLocaleString()} / {pageCount.toLocaleString()}
+              </span>
+              <button
+                className="rounded-md p-1.5 text-muted transition hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+                disabled={clampedPage >= pageCount - 1}
+                onClick={() => setPage(clampedPage + 1)}
+                aria-label="Next page"
+              >
+                <IconChevronRight size={16} />
+              </button>
+              <button
+                className="rounded-md px-1.5 py-1 text-muted transition hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+                disabled={clampedPage >= pageCount - 1}
+                onClick={() => setPage(pageCount - 1)}
+                aria-label="Last page"
+              >
+                »»
+              </button>
+            </div>
           </div>
         </div>
       </div>

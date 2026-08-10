@@ -67,6 +67,13 @@ type deviceRequest struct {
 	// the key leaves it alone: only the device's owner or a super admin may change
 	// it, and an ordinary edit must not have to send it at all.
 	RecordSessions *bool `json:"record_sessions"`
+	// RecordingKinds is what a recorded session captures: "transcript" and/or
+	// "video" for a terminal, "video" for an isolated web device, "desktop" for
+	// RDP/VNC. A pointer for the same reason as RecordSessions — changing it is
+	// an owner-only decision, and an ordinary edit need not send it. Kinds the
+	// protocol cannot produce are dropped rather than rejected, so switching a
+	// device's protocol does not fail on a setting it no longer has.
+	RecordingKinds *[]string `json:"recording_kinds"`
 	// DeliveryMode is "proxy" or "isolated". A pointer so that omitting the key
 	// leaves it alone. It is a separate choice from recording: an appliance whose
 	// UI is a real single-page app has to be isolated to work at all, regardless of
@@ -118,6 +125,7 @@ func (r deviceRequest) toInput(meta appassets.ReqMeta) (appassets.DeviceInput, e
 		Host: r.Host, Port: r.Port, Scheme: r.Scheme, VerifyTLS: verify,
 		CustomHeaders: r.CustomHeaders, Tags: r.Tags,
 		AllowUnmanaged: r.AllowUnmanaged, RecordSessions: r.RecordSessions,
+		RecordingKinds:     r.RecordingKinds,
 		DeliveryMode:       r.DeliveryMode,
 		IdleTimeoutMinutes: r.IdleTimeoutMinutes, Meta: meta,
 	}
@@ -150,9 +158,16 @@ func deviceDTO(d *domassets.Device, actor iam.Claims, hasCredential bool, cred *
 		"verify_tls": d.VerifyTLS, "custom_headers": d.CustomHeaders, "tags": d.Tags,
 		"status": d.Status, "url": d.BaseURL(),
 		"allow_unmanaged": d.AllowUnmanaged, "has_credential": hasCredential,
-		"record_sessions":      d.RecordSessions,
-		"delivery_mode":        d.DeliveryMode,
-		"idle_timeout_minutes": d.IdleTimeoutMinutes,
+		"record_sessions": d.RecordSessions,
+		// What this device actually captures, already resolved against its
+		// protocol — so the console renders the truth rather than re-deriving it
+		// from a stored set that may predate a protocol change.
+		"recording_kinds": d.EffectiveRecordingKinds(),
+		// Which kinds this protocol could capture, so the console can offer the
+		// right checkboxes without shipping its own copy of the rule.
+		"supported_recording_kinds": domassets.SupportedRecordingKinds(d.Scheme),
+		"delivery_mode":             d.DeliveryMode,
+		"idle_timeout_minutes":      d.IdleTimeoutMinutes,
 		// Whether this viewer may change the recording policy. The server decides
 		// and says so, rather than leaving the console to re-derive the rule and
 		// risk disagreeing with what the API will actually allow.

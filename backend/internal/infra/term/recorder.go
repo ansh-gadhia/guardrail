@@ -137,7 +137,10 @@ func (r *Recorder) Flush(
 		if err != nil {
 			return fmt.Errorf("term: marshal manifest: %w", err)
 		}
-		if err := putArtifact(ctx, blobs, store, rec, access.ArtifactManifest,
+		// ArtifactTranscriptIndex, not ArtifactManifest: a device capturing both a
+		// transcript and video puts two indexes on one recording, and the reader
+		// fetches by kind.
+		if err := putArtifact(ctx, blobs, store, rec, access.ArtifactTranscriptIndex,
 			prefix+"/manifest.json", "application/json", mb); err != nil {
 			return err
 		}

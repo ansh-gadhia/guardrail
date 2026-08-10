@@ -31,7 +31,7 @@ func newSpiedGateway(t *testing.T, spy *upstreamSpy) (*HTTPGateway, uuid.UUID, s
 	}))
 	t.Cleanup(srv.Close)
 
-	g := NewHTTPGateway(nil, nil, nil, "test")
+	g := NewHTTPGateway(nil, nil, nil, "test", "")
 	target, err := url.Parse(srv.URL)
 	if err != nil {
 		t.Fatal(err)

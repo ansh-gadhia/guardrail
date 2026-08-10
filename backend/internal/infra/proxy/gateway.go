@@ -29,11 +29,17 @@ import (
 
 // sessionCtx holds the live proxy state for one session (in-memory only).
 type sessionCtx struct {
-	target    *url.URL
-	proxy     *httputil.ReverseProxy
-	token     string // browser-binding token
-	headers   map[string]string
-	expiresAt time.Time
+	target *url.URL
+	// proxy serves the session under the path prefix /proxy/<sid>/, rewriting the
+	// device's HTML so a root-written UI survives the prefix (see rewrite.go).
+	proxy *httputil.ReverseProxy
+	// tunnelProxy serves the same session at the root of its own hostname,
+	// <sid>.<tunnel-domain>, with no rewriting at all (see tunnel.go). It is nil
+	// when no tunnel domain is configured.
+	tunnelProxy *httputil.ReverseProxy
+	token       string // browser-binding token
+	headers     map[string]string
+	expiresAt   time.Time
 }
 
 // HTTPGateway implements access.Gateway for http/https targets.
@@ -44,14 +50,20 @@ type HTTPGateway struct {
 	events   access.EventRecorder
 	activity access.ActivitySink
 	node     string
+	// tunnelDomain is the base domain for per-session hostnames, e.g.
+	// "tunnel.guardrail.lan". Empty disables whole-host delivery entirely and
+	// leaves every session on the path-prefix transport.
+	tunnelDomain string
 }
 
 // NewHTTPGateway constructs the gateway. activity may be nil, in which case
 // sessions are never marked as used and idle expiry does not apply to them.
-func NewHTTPGateway(devices access.DeviceLookup, events access.EventRecorder, activity access.ActivitySink, node string) *HTTPGateway {
+// tunnelDomain may be empty, which disables whole-host tunnel delivery.
+func NewHTTPGateway(devices access.DeviceLookup, events access.EventRecorder, activity access.ActivitySink, node, tunnelDomain string) *HTTPGateway {
 	return &HTTPGateway{
 		sessions: map[uuid.UUID]*sessionCtx{}, devices: devices,
 		events: events, activity: activity, node: node,
+		tunnelDomain: tunnelDomain,
 	}
 }
 
@@ -120,18 +132,39 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 		},
 	}
 
+	// Whole-host delivery, when a tunnel domain is configured. This is a second
+	// view onto the SAME session — same credential closure, same target, and
+	// deliberately the same *http.Transport value, so the device's verify_tls
+	// policy is shared rather than duplicated (two transports would mean two
+	// connection pools and two chances to get the TLS policy wrong).
+	var tunnelHost string
+	var tp *httputil.ReverseProxy
+	if g.tunnelDomain != "" {
+		tunnelHost = s.ID.String() + "." + g.tunnelDomain
+		tp = &httputil.ReverseProxy{
+			Director:       g.tunnelDirector(target, ep.CustomHeaders, cred, tunnelHost),
+			Transport:      rp.Transport,
+			ModifyResponse: modifyTunnelResponse(target, tunnelHost),
+			ErrorHandler:   rp.ErrorHandler,
+		}
+	}
+
 	token := randomToken()
 	until := time.Now().Add(time.Hour)
 	if s.GrantedUntil != nil {
 		until = *s.GrantedUntil
 	}
 	g.mu.Lock()
-	g.sessions[s.ID] = &sessionCtx{target: target, proxy: rp, token: token, headers: ep.CustomHeaders, expiresAt: until}
+	g.sessions[s.ID] = &sessionCtx{
+		target: target, proxy: rp, tunnelProxy: tp,
+		token: token, headers: ep.CustomHeaders, expiresAt: until,
+	}
 	g.mu.Unlock()
 
 	return access.LiveSession{
 		SessionID: s.ID, GatewayNode: g.node,
 		ProxyPath: "/proxy/" + s.ID.String() + "/", ProxyToken: token,
+		TunnelHost: tunnelHost,
 	}, nil
 }
 
@@ -257,6 +290,52 @@ func (g *HTTPGateway) Serve(w http.ResponseWriter, req *http.Request, sessionID 
 	proxied.RequestURI = ""
 	sc.proxy.ServeHTTP(w, proxied)
 	return true
+}
+
+// ServeTunnel proxies one whole-host request for a session. Unlike Serve it does
+// not rewrite the path: the browser is talking to <sid>.<tunnel-domain>, whose
+// root IS the device root, so the request line is already upstream-relative and
+// passes through untouched (query included — there is no path/query repacking to
+// get wrong here, which is the entire reason this transport exists).
+//
+// It returns false for an unknown, expired, tunnel-disabled or mis-authenticated
+// session so the caller can answer 410 without this having written anything.
+func (g *HTTPGateway) ServeTunnel(w http.ResponseWriter, req *http.Request, sessionID uuid.UUID, token string) bool {
+	g.mu.RLock()
+	sc, ok := g.sessions[sessionID]
+	g.mu.RUnlock()
+	if !ok || sc.tunnelProxy == nil || time.Now().After(sc.expiresAt) {
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(sc.token)) != 1 {
+		return false
+	}
+
+	// Touched after the token check, so an unauthorized caller cannot keep
+	// somebody else's session alive.
+	if g.activity != nil {
+		g.activity.Touch(sessionID)
+	}
+	if g.events != nil {
+		_ = g.events.RecordEvent(req.Context(), sessionID, "url_change",
+			map[string]any{"path": req.URL.Path, "method": req.Method})
+	}
+	sc.tunnelProxy.ServeHTTP(w, req)
+	return true
+}
+
+// TunnelCookieToken returns the session's browser-binding token so the delivery
+// layer can plant it as the tunnel cookie once a grant is redeemed. It reports
+// false when the session is unknown or has no tunnel. The token is a session
+// handle, never a device credential, and is never logged.
+func (g *HTTPGateway) TunnelCookieToken(sessionID uuid.UUID) (string, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	sc, ok := g.sessions[sessionID]
+	if !ok || sc.tunnelProxy == nil {
+		return "", false
+	}
+	return sc.token, true
 }
 
 // Console adapts the reverse proxy to the delivery layer's SessionServer: it

@@ -24,6 +24,34 @@ http:
       service: api
       tls: {}
 
+    # Whole-host session delivery. A proxied device is served at
+    # <session-id>.<tunnel-domain>, so the device UI sits at the root of its own
+    # origin and needs no HTML rewriting to survive a path prefix.
+    #
+    # The rule matches on the SHAPE of the hostname — a UUID label followed by
+    # any domain — not on the tunnel domain itself. That is deliberate: the
+    # domain is configured once in .env as GUARDRAIL_TUNNEL_DOMAIN, and Traefik's
+    # file provider does not interpolate environment variables, so naming it here
+    # would mean two places to change and a silent 404 whenever they drifted
+    # apart. The API knows the real domain and validates the Host against it.
+    #
+    # Consequence of matching on shape: a host that is UUID-shaped but under some
+    # OTHER domain also lands on the api service. The API declines to tunnel it
+    # (the suffix does not match) and serves it as an ordinary request, so /api
+    # and the probes answer normally — but the static console is served by the
+    # `web` container, not by api, so the SPA itself 404s on such a hostname.
+    # Reaching that state requires deliberately pointing a UUID-shaped DNS name
+    # at this server, which is not a thing that happens by accident.
+    #
+    # Priority 20 puts it above the console fallback. It is below nothing: a
+    # console path on a tunnel host is still a device request.
+    tunnel:
+      rule: "HostRegexp(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\..+$`)"
+      priority: 20
+      entryPoints: [websecure]
+      service: api
+      tls: {}
+
     # Everything else is the console. Lowest priority: it is the fallback.
     web:
       rule: "PathPrefix(`/`)"

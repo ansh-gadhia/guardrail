@@ -12,6 +12,13 @@ type SessionRepository interface {
 	Create(ctx context.Context, s Scope, sess *Session) error
 	GetByID(ctx context.Context, s Scope, id uuid.UUID) (*Session, error)
 	List(ctx context.Context, s Scope, filter SessionFilter) ([]Session, error)
+	// ListView returns one page of sessions enriched with display names, plus the
+	// total number of rows the filter matches. The total comes back with the page
+	// because a pager needs both and they must agree: counting separately lets a
+	// session end between the two queries and page the reviewer off the end.
+	ListView(ctx context.Context, s Scope, filter SessionFilter) ([]SessionView, int, error)
+	// Stats returns the live totals across every session in scope.
+	Stats(ctx context.Context, s Scope) (SessionStats, error)
 	// UpdateStatus transitions a session and stamps timing fields.
 	UpdateStatus(ctx context.Context, s Scope, id uuid.UUID, status Status, endReason string, at time.Time) error
 	// CountActive returns the number of active sessions in the tenant.
@@ -52,11 +59,62 @@ type ActivitySink interface {
 }
 
 // SessionFilter narrows a session listing.
+//
+// Search, Sort and Offset exist so that paging, searching and sorting all happen
+// where the rows are. The console used to pull a fixed slab of sessions and do
+// all three in the browser, which quietly turned every count into "or the slab
+// size, whichever is smaller" and made the search box mean "search the part we
+// happened to fetch". For an audit console that is worse than no search at all.
 type SessionFilter struct {
 	Status   Status
 	UserID   *uuid.UUID
 	DeviceID *uuid.UUID
 	Limit    int
+	Offset   int
+	// Search matches device name, client IP, protocol and status, and — only when
+	// the caller may read users — the operator's email. Case-insensitive substring.
+	Search string
+	// SearchEmail permits the email predicate. It is a separate flag rather than
+	// something derived here because the domain does not know the caller's
+	// permissions; the delivery layer sets it from session:read + user:read.
+	SearchEmail bool
+	// SortBy is a logical column name (see SessionSortColumns). Anything else
+	// falls back to newest-first, so an unknown value cannot become raw SQL.
+	SortBy   string
+	SortDesc bool
+}
+
+// SessionSortColumns are the sortable columns a client may name. The repository
+// maps these to SQL; a value outside this set is ignored rather than
+// interpolated.
+var SessionSortColumns = map[string]struct{}{
+	"created": {}, "started": {}, "duration": {}, "user": {},
+	"device": {}, "protocol": {}, "status": {}, "ip": {},
+}
+
+// SessionView is one session enriched with the display names a reviewer needs.
+//
+// A read model rather than fields on Session: the aggregate is what the broker
+// operates on, and it has no business carrying an email that belongs to another
+// bounded context. Mirrors iam.AuthSessionView, which exists for the same reason.
+type SessionView struct {
+	Session
+	// UserEmail is empty when the caller may not read users, or when the account
+	// has since been deleted. Callers must not treat empty as "no user".
+	UserEmail string
+	// The device's label is NOT here. It lives on Session, snapshotted at connect,
+	// precisely so that deleting the device cannot blank it — a join-supplied name
+	// would go empty the moment the device row went away, which is the bug this
+	// read model used to have.
+}
+
+// SessionStats are the live totals behind the console's counters. They are
+// computed over every session in scope, not over the page being displayed.
+type SessionStats struct {
+	Total   int
+	Active  int
+	Ended   int
+	Devices int
 }
 
 // EventRecorder appends timeline events for a session (URL changes, etc.), used
@@ -132,13 +190,110 @@ type RecordingStore interface {
 // they are not free-form.
 const (
 	ArtifactVideo      = "video"      // concatenated JPEG frames
-	ArtifactManifest   = "metadata"   // JSON index over the payload
+	ArtifactManifest   = "metadata"   // JSON index over the frames
 	ArtifactTranscript = "transcript" // terminal output bytes
+	// ArtifactTranscriptIndex is the transcript's chunk index.
+	//
+	// Distinct from ArtifactManifest because a terminal device can be set to
+	// capture a transcript AND video, and one recording would then hold two
+	// indexes under one kind — leaving the playback endpoint, which fetches a
+	// manifest by kind, to return whichever row came back first. Recordings
+	// written before this kind existed keep their index under ArtifactManifest,
+	// and the transcript lookup falls back to it.
+	ArtifactTranscriptIndex = "transcript_index"
 	// ArtifactDesktop is an RDP/VNC session as a Guacamole protocol dump, written
 	// by guacd. It carries its own timing, so unlike the frames it needs no
 	// separate manifest.
 	ArtifactDesktop = "desktop"
 )
+
+// TerminalMirror records a terminal session as video, alongside — never instead
+// of — whatever else that session captures.
+//
+// A transcript is evidence of what the device printed; video is evidence of what
+// the operator saw. Those diverge exactly where it matters most: a curses UI, a
+// progress bar redrawing in place, a screen cleared before the reviewer's eyes.
+// A device may be set to capture both, and this is the second one.
+//
+// Implementations MUST NOT block Write. It sits on the terminal's output path,
+// between the device and the operator's screen, and an implementation that waits
+// on a browser round trip there would make recording a device slower to type on
+// than not recording it — which is a tax on doing the right thing.
+type TerminalMirror interface {
+	// Write mirrors device output. Non-blocking.
+	Write(b []byte)
+	// Resize follows the operator's terminal geometry, so the recording wraps
+	// lines where the real session wrapped them.
+	Resize(cols, rows int)
+	// Close flushes what is pending and writes the video artifact. It takes its
+	// own context: teardown usually runs because the session's context is already
+	// cancelled, and a recording that dies with the session is no recording.
+	Close(ctx context.Context) error
+}
+
+// RecordsKind reports whether a resolved recording policy asks for a particular
+// capture. Kinds arrive from Endpoint.RecordingKinds already settled against the
+// device's protocol, so this is a membership test and nothing more.
+func RecordsKind(kinds []string, kind string) bool {
+	for _, k := range kinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// Captures reports whether this endpoint's policy asks for a given capture.
+//
+// Gateways must ask this rather than testing RecordingKinds directly, because an
+// endpoint can be recorded and name no kinds at all: one built before the column
+// existed, or by any caller that sets RecordSessions without settling the set.
+// A bare membership test answers "capture nothing" there, which turns a device
+// whose policy reads "recorded" into one that silently produces no evidence —
+// the exact failure this package exists to prevent. An unqualified set falls
+// back to the single capture the protocol always produced.
+func (e Endpoint) Captures(kind string) bool {
+	if !e.RecordSessions {
+		return false
+	}
+	if len(e.RecordingKinds) > 0 {
+		return RecordsKind(e.RecordingKinds, kind)
+	}
+	return kind == defaultCapture(e.Protocol)
+}
+
+// defaultCapture is what a protocol captured before the choice existed. It
+// mirrors assets.DefaultRecordingKinds; the two contexts keep their own protocol
+// vocabularies, and this is the access side of the same rule.
+func defaultCapture(p Protocol) string {
+	switch p {
+	case ProtocolSSH, ProtocolTelnet:
+		return ArtifactTranscript
+	case ProtocolRDP, ProtocolVNC:
+		return ArtifactDesktop
+	default:
+		return ArtifactVideo
+	}
+}
+
+// MirrorOptions parameterise a terminal mirror.
+type MirrorOptions struct {
+	// Cols and Rows are the terminal's geometry at open time. 0 means the
+	// conventional 80x24.
+	Cols, Rows int
+	// Watermark is the attribution composited into the captured frames.
+	Watermark string
+}
+
+// TerminalMirrorFactory opens mirrors for terminal gateways.
+//
+// Optional on every gateway that takes one: a deployment with no usable Chromium
+// still brokers and transcribes terminal sessions, it just cannot also film them.
+type TerminalMirrorFactory interface {
+	// OpenMirror starts recording video for a session. The returned mirror is
+	// owned by the caller and must be closed.
+	OpenMirror(ctx context.Context, rec *Recording, orgID uuid.UUID, o MirrorOptions) (TerminalMirror, error)
+}
 
 // Artifact is one stored object belonging to a recording.
 type Artifact struct {
@@ -178,12 +333,26 @@ type Endpoint struct {
 	Port          int
 	VerifyTLS     bool
 	CustomHeaders map[string]string
+	// Name and DeviceType are the device's labels, carried so the broker can
+	// snapshot them onto the session it creates. A session must record what it
+	// connected to at the time, or deleting the device rewrites the audit trail.
+	Name       string
+	DeviceType string
 	// AllowUnmanaged permits a brokered session with no bound credential
 	// (break-glass). When false (the default), Connect fails closed.
 	AllowUnmanaged bool
 	// RecordSessions is the device's recording policy. When false the broker
 	// creates no recording, and the gateway therefore captures no frames.
 	RecordSessions bool
+	// RecordingKinds is what a recorded session captures — the assets package's
+	// Record* values, already resolved against the protocol, so a gateway can
+	// take this at face value rather than re-deriving policy. Empty whenever
+	// RecordSessions is false.
+	//
+	// A terminal gateway reads this to decide whether the session needs a video
+	// mirror alongside the transcript; a gateway with only one capture to make
+	// can ignore it entirely.
+	RecordingKinds []string
 	// Isolate selects the isolated gateway (a browser on the server) over the
 	// reverse proxy.
 	//

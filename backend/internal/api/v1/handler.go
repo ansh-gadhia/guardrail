@@ -113,6 +113,17 @@ func queryLimit(c *gin.Context) int {
 	return 0
 }
 
+// queryOffset reads ?offset for paging. A negative or unparsable value is 0
+// rather than an error: a bad offset should show the first page, not a 400.
+func queryOffset(c *gin.Context) int {
+	if v := c.Query("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
 // setRefreshCookie writes the rotated refresh token as a hardened cookie scoped
 // to the auth endpoints only.
 func (h *Handler) setRefreshCookie(c *gin.Context, token string) {

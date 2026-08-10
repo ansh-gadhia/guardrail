@@ -129,6 +129,11 @@ type HTTPConfig struct {
 	WebDir      string // if set, the API also serves the web console from here
 	TLSCert     string // path to a PEM cert; if set with TLSKey, the API serves HTTPS
 	TLSKey      string // path to the matching PEM private key
+	// TunnelDomain is the base domain for whole-host session delivery: a proxy
+	// session is reachable at <session-id>.<TunnelDomain>, served at the root of
+	// its own origin so a device UI needs no HTML rewriting. Empty disables it and
+	// leaves every session on the /proxy/<sid>/ path transport.
+	TunnelDomain string
 
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
@@ -202,6 +207,7 @@ func Load() (*Config, error) {
 			Addr:            getEnv("GUARDRAIL_HTTP_ADDR", ":8080"),
 			MetricsAddr:     getEnv("GUARDRAIL_METRICS_ADDR", ":9090"),
 			WebDir:          getEnv("GUARDRAIL_WEB_DIR", ""),
+			TunnelDomain:    strings.ToLower(strings.Trim(getEnv("GUARDRAIL_TUNNEL_DOMAIN", "tunnel.guardrail.lan"), ". ")),
 			TLSCert:         getEnv("GUARDRAIL_TLS_CERT", ""),
 			TLSKey:          getEnv("GUARDRAIL_TLS_KEY", ""),
 			ReadTimeout:     getDuration("GUARDRAIL_HTTP_READ_TIMEOUT", 15*time.Second),

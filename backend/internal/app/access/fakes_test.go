@@ -28,6 +28,13 @@ type fakeSessions struct {
 	idleExpired []access.ExpiredSession
 	touched     []uuid.UUID
 	touchedAt   time.Time
+
+	// views is what ListView hands back; lastFilter records the filter it was
+	// called with, so a test can assert what the service passed down.
+	views      []access.SessionView
+	viewTotal  int
+	lastFilter access.SessionFilter
+	stats      access.SessionStats
 }
 
 type statusUpdate struct {
@@ -63,6 +70,20 @@ func (f *fakeSessions) GetByID(_ context.Context, _ access.Scope, id uuid.UUID) 
 
 func (f *fakeSessions) List(context.Context, access.Scope, access.SessionFilter) ([]access.Session, error) {
 	return nil, nil
+}
+
+func (f *fakeSessions) ListView(_ context.Context, _ access.Scope, flt access.SessionFilter) ([]access.SessionView, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastFilter = flt
+	// Copy so a caller mutating the result (the service redacts emails in place)
+	// cannot rewrite the fixture and hide that it did.
+	out := append([]access.SessionView(nil), f.views...)
+	return out, f.viewTotal, nil
+}
+
+func (f *fakeSessions) Stats(context.Context, access.Scope) (access.SessionStats, error) {
+	return f.stats, nil
 }
 
 func (f *fakeSessions) UpdateStatus(_ context.Context, _ access.Scope, id uuid.UUID, st access.Status, reason string, _ time.Time) error {
@@ -207,6 +228,10 @@ type fakeRecordings struct {
 	list    []access.Artifact
 	deleted []uuid.UUID
 	delErr  error
+	// byKind is what GetArtifact serves; kindsAsked records the kinds it was
+	// asked for, in order, so a test can assert the fallback actually fell back.
+	byKind     map[string]access.Artifact
+	kindsAsked []string
 }
 
 func newFakeRecordings() *fakeRecordings {
@@ -252,7 +277,15 @@ func (f *fakeRecordings) AddArtifact(_ context.Context, recordingID uuid.UUID, a
 	f.artifacts[recordingID.String()+"/"+a.Kind] = a
 	return nil
 }
-func (f *fakeRecordings) GetArtifact(context.Context, access.Scope, uuid.UUID, string) (*access.Artifact, error) {
+// byKind is what GetArtifact serves, keyed by artifact kind. Left nil by
+// default so the existing tests keep seeing ErrNotFound.
+func (f *fakeRecordings) GetArtifact(_ context.Context, _ access.Scope, _ uuid.UUID, kind string) (*access.Artifact, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.kindsAsked = append(f.kindsAsked, kind)
+	if a, ok := f.byKind[kind]; ok {
+		return &a, nil
+	}
 	return nil, access.ErrNotFound
 }
 
@@ -339,6 +372,7 @@ func newHarness(o opts) *harness {
 		Recordings: rec,
 		Devices: fakeDevices{ep: access.Endpoint{
 			Protocol: o.protocol, BaseURL: "https://10.0.0.1", Host: "10.0.0.1", Port: 443,
+			Name: "edge-firewall", DeviceType: "firewall",
 			AllowUnmanaged: o.allowUnmanaged, RecordSessions: !o.noRecording,
 			// This mirrors what adapters.go derives from the device row: recording
 			// forces isolated delivery, and isolated delivery is also selectable on

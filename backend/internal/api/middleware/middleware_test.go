@@ -48,7 +48,7 @@ func TestRequestID_EchoesValidInbound(t *testing.T) {
 
 func TestSecurityHeaders(t *testing.T) {
 	r := testEngine()
-	r.Use(SecurityHeaders())
+	r.Use(SecurityHeaders(""))
 	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	w := httptest.NewRecorder()
@@ -101,7 +101,7 @@ func TestAccessLog_DoesNotBreakChain(t *testing.T) {
 // to survive on this route class.
 func TestSecurityHeadersKeepsReferrerOnProxyRoutes(t *testing.T) {
 	r := testEngine()
-	r.Use(SecurityHeaders())
+	r.Use(SecurityHeaders(""))
 	r.GET("/proxy/:sid/*path", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	w := httptest.NewRecorder()
@@ -117,7 +117,7 @@ func TestSecurityHeadersKeepsReferrerOnProxyRoutes(t *testing.T) {
 // and only for same-origin requests.
 func TestSecurityHeadersKeepsNoReferrerOffProxyRoutes(t *testing.T) {
 	r := testEngine()
-	r.Use(SecurityHeaders())
+	r.Use(SecurityHeaders(""))
 	r.GET("/api/v1/devices", func(c *gin.Context) { c.Status(http.StatusOK) })
 	r.GET("/devices", func(c *gin.Context) { c.Status(http.StatusOK) })
 
@@ -127,5 +127,58 @@ func TestSecurityHeadersKeepsNoReferrerOffProxyRoutes(t *testing.T) {
 		if got := w.Header().Get("Referrer-Policy"); got != "no-referrer" {
 			t.Errorf("Referrer-Policy on %s = %q, want no-referrer", p, got)
 		}
+	}
+}
+
+// On a tunnel host the path is the DEVICE's path, so this route class cannot be
+// recognised by path the way /proxy/ can. Before the host check existed, a device
+// page at /ng/dashboard fell through to the console branch and was served
+// GuardRail's CSP and X-Frame-Options — which blocks the device's own scripts and
+// styles and breaks the UI the tunnel exists to make work.
+func TestSecurityHeadersLeavesDeviceHeadersAloneOnTunnelHost(t *testing.T) {
+	r := testEngine()
+	r.Use(SecurityHeaders("tunnel.guardrail.lan"))
+	r.GET("/ng/dashboard", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for _, host := range []string{
+		"11111111-1111-1111-1111-111111111111.tunnel.guardrail.lan",
+		"11111111-1111-1111-1111-111111111111.tunnel.guardrail.lan:8443",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/ng/dashboard", nil)
+		req.Host = host
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if got := w.Header().Get("Content-Security-Policy"); got != "" {
+			t.Errorf("host %s: CSP = %q, want none — the device ships its own", host, got)
+		}
+		if got := w.Header().Get("X-Frame-Options"); got != "" {
+			t.Errorf("host %s: X-Frame-Options = %q, want none", host, got)
+		}
+		// Appliances CSRF-check the Referer against themselves; same-origin keeps
+		// it within the session's own origin without ever reaching the console.
+		if got := w.Header().Get("Referrer-Policy"); got != "same-origin" {
+			t.Errorf("host %s: Referrer-Policy = %q, want same-origin", host, got)
+		}
+	}
+}
+
+// The same path on the console host keeps the console's policy. The host is the
+// only thing that distinguishes them.
+func TestSecurityHeadersKeepsConsolePolicyOffTunnelHost(t *testing.T) {
+	r := testEngine()
+	r.Use(SecurityHeaders("tunnel.guardrail.lan"))
+	r.GET("/ng/dashboard", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/ng/dashboard", nil)
+	req.Host = "guardrail.lan"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Security-Policy"); got == "" {
+		t.Error("console host lost its CSP")
+	}
+	if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options = %q, want DENY", got)
 	}
 }

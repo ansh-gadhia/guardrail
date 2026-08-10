@@ -145,6 +145,10 @@ services:
     restart: on-failure
 
   api:
+    # Published image by default; `docker compose build` still rebuilds it from
+    # source locally. Both keys together mean a server can `compose pull` without
+    # a checkout, while a developer's `compose up --build` keeps working.
+    image: ${GUARDRAIL_IMAGE_API:-ghcr.io/ansh-gadhia/guardrail-api}:${VERSION:-latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -186,6 +190,12 @@ services:
       # The console is served from the same origin as the API, so this only
       # matters if you point a separately-hosted UI at this server.
       GUARDRAIL_CORS_ALLOW_ORIGINS: ${GUARDRAIL_CORS_ALLOW_ORIGINS:-}
+      # Whole-host session delivery: proxied devices are served at
+      # <session-id>.<this-domain>, at the root of their own origin. Needs
+      # wildcard DNS for *.<domain> (see the `dns` profile below) and a cert
+      # naming it (bootstrap.sh generates one). Empty disables it and puts every
+      # session back on /proxy/<sid>/.
+      GUARDRAIL_TUNNEL_DOMAIN: ${GUARDRAIL_TUNNEL_DOMAIN-tunnel.guardrail.lan}
       # Session recording needs the isolation gateway: the reverse proxy never
       # sees pixels. Chromium and the recordings directory ship in the image.
       GUARDRAIL_BROWSER_ISOLATION: ${GUARDRAIL_BROWSER_ISOLATION:-true}
@@ -263,6 +273,7 @@ services:
   # Web console (React SPA served by nginx). Traefik routes everything that is
   # not /api or /proxy here.
   web:
+    image: ${GUARDRAIL_IMAGE_WEB:-ghcr.io/ansh-gadhia/guardrail-web}:${VERSION:-latest}
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -298,6 +309,45 @@ services:
     depends_on:
       - api
       - web
+    restart: unless-stopped
+
+  # Wildcard DNS for the session tunnel, for networks where you cannot add a
+  # record to the LAN resolver. It answers *.<tunnel-domain> with THIS host's
+  # current IP, detected at startup from the kernel routing table — so nothing
+  # here hardcodes an address and a DHCP lease change is picked up on restart.
+  #
+  # Opt-in, so `make install` never fails on a port bind:
+  #
+  #   docker compose --profile dns up -d
+  #
+  # Then point client machines' primary DNS at this server (keep their normal
+  # resolver as secondary). If you can add one record to the LAN router instead,
+  # prefer that and leave this off — see SETUP.md.
+  #
+  # It binds the host's LAN address SPECIFICALLY rather than 0.0.0.0. On a
+  # systemd-resolved host (most Ubuntu/Debian) the stub listener already holds
+  # 127.0.0.53:53, and a wildcard bind overlaps it and fails with EADDRINUSE.
+  # Taking just the LAN address sidesteps that entirely, so the host's own
+  # resolver keeps working untouched and nothing has to be disabled.
+  #
+  # Queries for the tunnel domain are answered locally; everything else is
+  # forwarded upstream, so a client can safely use this as its primary resolver.
+  dns:
+    profiles: [dns]
+    image: 4km3/dnsmasq:2.90-r3
+    network_mode: host
+    cap_add: [NET_ADMIN]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        DOMAIN="${GUARDRAIL_TUNNEL_DOMAIN-tunnel.guardrail.lan}";
+        IP=$$(ip -4 route get 1 2>/dev/null | awk '{print $$7; exit}');
+        [ -n "$$IP" ] || IP=$$(hostname -i 2>/dev/null | awk '{print $$1}');
+        echo "tunnel DNS: *.$$DOMAIN -> $$IP  (listening on $$IP:53)";
+        exec dnsmasq --no-daemon --log-facility=-
+        --bind-interfaces --listen-address=$$IP
+        --no-resolv --server=${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8} --server=${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}
+        --address=/$$DOMAIN/$$IP
     restart: unless-stopped
 
 volumes:

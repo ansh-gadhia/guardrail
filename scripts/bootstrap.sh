@@ -205,6 +205,10 @@ step "TLS certificate"
 # This host's own routable addresses — what someone types to reach the console.
 host_ips() { ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]}'; }
 
+# The tunnel's base domain, matching the API's own default (unset => the default,
+# explicitly empty => whole-host delivery is off and the cert needs no wildcard).
+TUNNEL_DOMAIN="${GUARDRAIL_TUNNEL_DOMAIN-tunnel.guardrail.lan}"
+
 # Which of them the existing certificate does NOT name.
 #
 # Existence is not the same as validity, and checking only for a file is what let
@@ -220,27 +224,40 @@ cert_missing_ips() {
     for ip in $(host_ips); do
         case "$sans" in *"IP Address:$ip"*) ;; *) missing="$missing $ip" ;; esac
     done
+    # The tunnel serves every session on its own subdomain, so the certificate has
+    # to carry the wildcard. Without it a browser rejects the session tab by name
+    # even though the console on the same server loads fine — which reads as "the
+    # tunnel is broken" rather than "the certificate predates it".
+    if [ -n "$TUNNEL_DOMAIN" ]; then
+        case "$sans" in *"DNS:*.$TUNNEL_DOMAIN"*) ;; *) missing="$missing *.$TUNNEL_DOMAIN" ;; esac
+    fi
     printf '%s' "${missing# }"
 }
 
 generate_cert() {
     mkdir -p deploy/tls
+    local tunnel_sans=""
+    [ -n "$TUNNEL_DOMAIN" ] && tunnel_sans=",DNS:*.$TUNNEL_DOMAIN,DNS:$TUNNEL_DOMAIN"
     openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
         -keyout deploy/tls/key.pem -out deploy/tls/cert.pem \
         -subj "/CN=guardrail" \
         -addext "subjectAltName=DNS:localhost,IP:127.0.0.1$(
             host_ips | awk '{printf ",IP:%s", $1}'
-        )" >/dev/null 2>&1 || die "openssl could not generate a certificate"
+        )$tunnel_sans" >/dev/null 2>&1 || die "openssl could not generate a certificate"
     chmod 600 deploy/tls/key.pem
 }
+
+# Set when this run replaces the certificate, so the edge can be told to reload it.
+CERT_REGENERATED=0
 
 if [ -f deploy/tls/cert.pem ] && [ -f deploy/tls/key.pem ]; then
     missing=$(cert_missing_ips)
     if [ -n "$missing" ]; then
-        warn "the certificate does not name this host's address(es):$missing"
+        warn "the certificate does not name:$missing"
         warn "regenerating — browsers that trusted the old one must accept the new one once"
         cp deploy/tls/cert.pem "deploy/tls/cert.pem.bak.$(date +%s)" 2>/dev/null || true
         generate_cert
+        CERT_REGENERATED=1
         info "regenerated for localhost + $(host_ips | tr '\n' ' ')"
     else
         exp=$(openssl x509 -enddate -noout -in deploy/tls/cert.pem 2>/dev/null | cut -d= -f2 || echo "?")
@@ -248,6 +265,7 @@ if [ -f deploy/tls/cert.pem ] && [ -f deploy/tls/key.pem ]; then
     fi
 else
     generate_cert
+    CERT_REGENERATED=1
     info "generated a self-signed certificate for localhost + this host's IPs"
     warn "browsers will warn on it; replace deploy/tls/*.pem with a real cert for production"
 fi
@@ -457,6 +475,16 @@ else
     else
         docker compose up -d --build >/dev/null 2>&1 || die "docker compose build/up failed. Try: docker compose up --build"
     fi
+
+    # A regenerated certificate needs the edge to pick it up. `up -d` will NOT do
+    # it: Traefik's config is unchanged, so the container is not recreated, and it
+    # keeps serving the certificate it loaded at startup from memory. The symptom
+    # is nasty — the file on disk has the right names, every check of it passes,
+    # and the browser still refuses the address that IS in that file.
+    if [ "$CERT_REGENERATED" -eq 1 ]; then
+        docker compose restart traefik >/dev/null 2>&1 ||
+            warn "could not restart traefik; run 'docker compose restart traefik' to load the new certificate"
+    fi
 fi
 
 # Poll the health endpoint rather than declaring success on exit status: a
@@ -496,3 +524,72 @@ ${B}${G}GuardRail is up.${N}
   ${D}The certificate is self-signed, so the browser will warn once.${N}
 
 EOF
+
+# --- session tunnel: the one thing that needs something outside this host ----
+#
+# Everything else here is self-contained. Whole-host session delivery is not: the
+# operator's BROWSER has to resolve *.<domain>, and this server cannot make that
+# happen on a machine it does not control. Say so explicitly, with the two ways
+# to fix it, rather than letting the first Connect fail with a DNS error that
+# names nothing in this project.
+if [ -n "$TUNNEL_DOMAIN" ]; then
+    resolved=""
+    probe="$(uuidgen 2>/dev/null || echo 00000000-0000-0000-0000-000000000000).${TUNNEL_DOMAIN}"
+    # Ask the bundled resolver directly when it is running, BEFORE falling back to
+    # the system resolver. The sidecar answers on this host's LAN address, which is
+    # almost never this host's own configured resolver — so asking the system
+    # resolver reports "not resolving" even when the zone is being served
+    # perfectly, and every re-run then prints a scary warning about a working
+    # setup.
+    if docker compose ps --status running --services 2>/dev/null | grep -qx dns; then
+        if command -v dig >/dev/null 2>&1; then
+            [ -n "$(dig +short +time=2 +tries=1 "@${host}" "$probe" A 2>/dev/null)" ] && resolved="local"
+        else
+            resolved="local"
+        fi
+    fi
+    [ -z "$resolved" ] && getent hosts "$probe" >/dev/null 2>&1 && resolved="system"
+    cat <<EOF
+${B}Session delivery (the tunnel)${N}
+
+  Proxied devices open at ${B}https://<session-id>.${TUNNEL_DOMAIN}/${N} — the device
+  UI at the root of its own origin, so appliance SPAs work unmodified.
+
+EOF
+    if [ "$resolved" = "local" ]; then
+        info "the bundled resolver is serving *.${TUNNEL_DOMAIN} -> ${host}"
+        info "${D}set operators' primary DNS to ${host}, then check from one of their machines:${N}"
+        info "${D}  nslookup ${probe}${N}"
+    elif [ -n "$resolved" ]; then
+        info "wildcard DNS for *.${TUNNEL_DOMAIN} already resolves from this host"
+        info "${D}operators' machines need it too — check from one before relying on it${N}"
+    else
+        warn "*.${TUNNEL_DOMAIN} does not resolve yet. Until it does, proxy sessions"
+        warn "still work under /proxy/<sid>/ — the tunnel tab is what will not open."
+        cat <<EOF
+
+  ${B}Pick one:${N}
+
+  ${B}1. Add one record to your LAN resolver${N} ${D}(preferred; nothing to run here)${N}
+     ${B}*.${TUNNEL_DOMAIN}  ->  ${host}${N}
+       dnsmasq / OpenWrt / Pi-hole:  address=/${TUNNEL_DOMAIN}/${host}
+       pfSense / OPNsense (Unbound), under Custom options:
+         server:
+           local-zone: "${TUNNEL_DOMAIN}" redirect
+           local-data: "${TUNNEL_DOMAIN} 3600 IN A ${host}"
+       Windows DNS:  new zone ${TUNNEL_DOMAIN}, host (A) record "*" -> ${host}
+       BIND:         *   IN  A   ${host}
+
+  ${B}2. Run the bundled resolver on this server${N} ${D}(no router access needed)${N}
+       ${B}docker compose --profile dns up -d${N}
+     then set operators' primary DNS to ${host}. It detects this host's IP
+     itself, so a DHCP lease change needs no edit. If it fails to bind :53,
+     systemd-resolved holds the port: set DNSStubListener=no in
+     /etc/systemd/resolved.conf and restart it.
+
+  ${D}To turn the tunnel off instead, set GUARDRAIL_TUNNEL_DOMAIN= (empty) in .env${N}
+  ${D}and re-run docker compose up -d.${N}
+
+EOF
+    fi
+fi

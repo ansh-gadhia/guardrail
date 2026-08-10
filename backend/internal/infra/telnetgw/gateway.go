@@ -80,7 +80,12 @@ type Deps struct {
 	Blobs      access.BlobStore
 	Activity   access.ActivitySink
 	Events     access.EventRecorder
-	Log        *zap.Logger
+	// Mirrors records terminal sessions as video, for devices whose policy asks
+	// for it alongside (never instead of) the transcript. Optional: without it a
+	// device set to capture video still gets its transcript, and the omission is
+	// logged rather than failing the session.
+	Mirrors access.TerminalMirrorFactory
+	Log     *zap.Logger
 }
 
 // Gateway is the telnet access.Gateway and v1.SessionServer.
@@ -146,6 +151,9 @@ type telnetSession struct {
 	// than starting a second.
 	rec       *term.Recorder
 	recording *access.Recording
+	// mirror renders the same output in a headless browser so the session is also
+	// captured as video. nil unless the device's policy asks for video.
+	mirror access.TerminalMirror
 
 	mu   sync.Mutex
 	conn *conn
@@ -203,7 +211,34 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		rec, rerr := g.deps.Recordings.FindBySessionSystem(ctx, s.ID)
 		if rerr == nil && rec != nil {
 			sess.recording = rec
-			sess.rec = term.NewRecorder(g.cfg.MaxRecordingBytes)
+			// Only when the policy asks for it. A device set to capture video
+			// alone must not also accumulate a transcript: the operator unticked
+			// it, and storing it anyway is the console lying about what it keeps.
+			if ep.Captures(access.ArtifactTranscript) {
+				sess.rec = term.NewRecorder(g.cfg.MaxRecordingBytes)
+			}
+		}
+	}
+
+	// Video, when the device's policy asks for it. Opened after the transcript so
+	// that a mirror failure can never cost the transcript: the transcript is the
+	// evidence of record, and video is the second, richer view of the same
+	// session. A device that asked for both and got one is degraded; a device
+	// that lost both because a browser would not start is broken.
+	if sess.recording != nil && g.deps.Mirrors != nil && ep.Captures(access.ArtifactVideo) {
+		m, merr := g.deps.Mirrors.OpenMirror(ctx, sess.recording, s.OrganizationID, access.MirrorOptions{
+			Cols: 80, Rows: 24, Watermark: s.WatermarkOr(),
+		})
+		if merr != nil {
+			// Not fatal. Refusing the session would mean a host short on memory
+			// could not be administered at all, which is precisely when someone
+			// needs to log in and fix it.
+			if g.deps.Log != nil {
+				g.deps.Log.Warn("telnetgw: no video mirror for this session; the transcript is unaffected",
+					zap.String("session_id", s.ID.String()), zap.Error(merr))
+			}
+		} else {
+			sess.mirror = m
 		}
 	}
 
@@ -297,9 +332,12 @@ func (g *Gateway) dial(ctx context.Context, s *telnetSession) error {
 	s.banner = trimBanner(banner, g.cfg.MaxBannerBytes)
 	s.mu.Unlock()
 
-	// The login output is the start of the session and belongs in the transcript.
+	// The login output is the start of the session and belongs in both captures.
 	if s.rec != nil {
 		s.rec.Write(banner)
+	}
+	if s.mirror != nil {
+		s.mirror.Write(banner)
 	}
 	return nil
 }
@@ -330,6 +368,17 @@ func (g *Gateway) teardown(s *telnetSession) error {
 
 	if c != nil {
 		_ = c.Close()
+	}
+	// The mirror is closed even when there is no transcript: the two captures are
+	// independent, and an early return here would leave a Chromium tab running for
+	// the life of the process on a video-only device.
+	if s.mirror != nil {
+		mctx, mcancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := s.mirror.Close(mctx); err != nil && g.deps.Log != nil {
+			g.deps.Log.Error("telnetgw: session video was not persisted",
+				zap.String("session_id", s.id.String()), zap.Error(err))
+		}
+		mcancel()
 	}
 	if s.rec == nil || s.recording == nil {
 		return nil

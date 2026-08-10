@@ -209,6 +209,9 @@ func (g *Gateway) dispatch(dev *conn, s *telnetSession, data []byte) error {
 		if s.rec != nil {
 			s.rec.Resize(m.Cols, m.Rows)
 		}
+		if s.mirror != nil {
+			s.mirror.Resize(m.Cols, m.Rows)
+		}
 		return dev.Resize(m.Cols, m.Rows)
 	}
 	return nil
@@ -218,6 +221,11 @@ func (g *Gateway) dispatch(dev *conn, s *telnetSession, data []byte) error {
 func (g *Gateway) emit(ctx context.Context, ws *websocket.Conn, s *telnetSession, b []byte) {
 	if s.rec != nil {
 		s.rec.Write(b)
+	}
+	// The mirror gets the same bytes. Its Write is non-blocking by contract, so
+	// the operator's output is never held up by how the recorder is coping.
+	if s.mirror != nil {
+		s.mirror.Write(b)
 	}
 	// Bound the write so a browser that has stopped reading cannot wedge the
 	// reader goroutine and, with it, the device session.

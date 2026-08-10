@@ -3,8 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, problemDetail } from "@/lib/api";
 import { plausibleDate } from "@/lib/dates";
-import type { Device, DeviceCredential, ConnectResult } from "@/lib/types";
-import { injectionMethodsFor, defaultInjectionFor } from "@/lib/types";
+import type { Device, DeviceCredential, ConnectResult, RecordingKind } from "@/lib/types";
+import { injectionMethodsFor, defaultInjectionFor, RECORDING_KIND_INFO } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import {
   PageHero,
@@ -123,8 +123,43 @@ interface DeviceForm {
   verify_tls: boolean;
   allow_unmanaged: boolean;
   record_sessions: boolean;
+  // What a recorded session captures. Seeded from the protocol and re-seeded
+  // whenever the protocol changes, so the form never posts a kind the chosen
+  // protocol cannot produce.
+  recording_kinds: RecordingKind[];
   delivery_mode: string;
   idle_timeout_minutes: string;
+}
+
+// supportedKindsFor mirrors the server's assets.SupportedRecordingKinds. Kept in
+// step with it: the API drops anything a protocol cannot capture, so offering a
+// box here that the server discards would silently ignore a deliberate choice.
+export function supportedKindsFor(scheme: string): RecordingKind[] {
+  switch (scheme) {
+    case "ssh":
+    case "telnet":
+      return ["transcript", "video"];
+    case "rdp":
+    case "vnc":
+      return ["desktop"];
+    default:
+      return ["video"];
+  }
+}
+
+// defaultKindsFor is the single capture each protocol took before the choice
+// existed, so a form left alone reproduces today's behaviour exactly.
+export function defaultKindsFor(scheme: string): RecordingKind[] {
+  switch (scheme) {
+    case "ssh":
+    case "telnet":
+      return ["transcript"];
+    case "rdp":
+    case "vnc":
+      return ["desktop"];
+    default:
+      return ["video"];
+  }
 }
 
 const EMPTY_FORM: DeviceForm = {
@@ -139,6 +174,7 @@ const EMPTY_FORM: DeviceForm = {
   // Recording on by default: it is the posture you should get without having to
   // ask for it. Turning it off is the deliberate act.
   record_sessions: true,
+  recording_kinds: ["video"],
   // Recording only exists under isolation, so the default follows from it.
   delivery_mode: "isolated",
   // An hour of inactivity ends the session. Kept as a string because it is a
@@ -158,6 +194,11 @@ export function DevicesPage() {
   const { data, isLoading, isError } = useQuery<Device[]>({
     queryKey: ["devices"],
     queryFn: async () => (await api.get<{ data: Device[] }>("/devices")).data.data,
+    // The status dot on each row is live reachability, repolled server-side every
+    // GUARDRAIL_HEALTH_POLL_INTERVAL. Without this the list froze at whatever it
+    // was when the page loaded, which makes an offline device look online for as
+    // long as nobody reloads — the opposite of what a status indicator is for.
+    refetchInterval: 30_000,
   });
 
   const connect = useMutation({
@@ -569,6 +610,7 @@ function CreateDeviceModal({ onClose, onCreated }: { onClose: () => void; onCrea
         verify_tls: f.verify_tls,
         allow_unmanaged: f.allow_unmanaged,
         record_sessions: f.record_sessions,
+        recording_kinds: f.recording_kinds,
         delivery_mode: f.delivery_mode,
         idle_timeout_minutes: Number(f.idle_timeout_minutes) || 0,
         group_ids: groupIDs,
@@ -658,6 +700,11 @@ function CreateDeviceModal({ onClose, onCreated }: { onClose: () => void; onCrea
                 // Isolation is a web-only mode; carrying it onto an SSH device
                 // would post a combination the server refuses.
                 delivery_mode: isWebScheme(next) ? s.delivery_mode : "proxy",
+                // Re-seed the captures for the new protocol. Keeping 'transcript'
+                // on a device just switched to HTTPS would post a kind that
+                // protocol cannot produce, which the server drops — leaving the
+                // form showing a choice that was silently discarded.
+                recording_kinds: defaultKindsFor(next),
               }));
               // Likewise the credential: HTTP Basic auth cannot log into SSH, so
               // carrying the old method across a protocol change would post one
@@ -757,6 +804,10 @@ function CreateDeviceModal({ onClose, onCreated }: { onClose: () => void; onCrea
             delivery_mode: v && isWebScheme(s.scheme) ? "isolated" : s.delivery_mode,
           }))
         }
+        scheme={f.scheme}
+        kinds={f.recording_kinds}
+        supportedKinds={supportedKindsFor(f.scheme)}
+        onKindsChange={(next) => setF((s) => ({ ...s, recording_kinds: next }))}
         hint="Only you or a super admin will be able to change this later."
       />
 
@@ -940,17 +991,31 @@ export function RecordingToggle({
   onChange,
   disabled,
   hint,
+  scheme = "https",
+  kinds,
+  supportedKinds,
+  onKindsChange,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   disabled?: boolean;
   hint?: string;
+  /** Governs the copy: a terminal is not "screen-recorded" and needs no browser. */
+  scheme?: string;
+  /** Selected capture kinds. Omit to hide the picker entirely. */
+  kinds?: RecordingKind[];
+  supportedKinds?: RecordingKind[];
+  onKindsChange?: (next: RecordingKind[]) => void;
 }) {
   const caps = useCapabilities();
   // Only claim the server cannot record once we know it: while the query is in
   // flight, data is undefined, and warning on that would flash a scary message
   // on every page load.
   const unavailable = caps.data?.session_recording === false;
+  const web = isWebScheme(scheme);
+  // A terminal's video comes from a mirror browser, so isolation has to be
+  // available for it — but its transcript does not, and neither does a desktop.
+  const wantsBrowser = web || (kinds ?? []).includes("video");
   return (
     <div
       className={cn(
@@ -966,30 +1031,102 @@ export function RecordingToggle({
           </div>
           <p className="mt-1 text-xs text-muted">
             {checked
-              ? "Every session to this device is screen-recorded and replayable from Recordings."
-              : "Sessions to this device are brokered and audited, but not screen-recorded."}
+              ? "Every session to this device is recorded and replayable from Recordings."
+              : "Sessions to this device are brokered and audited, but not recorded."}
           </p>
-          {/* Recording changes how the device is delivered, not just whether it
+          {/* Recording changes how a WEB device is delivered, not just whether it
               is captured. Say so on the control that causes it, rather than
-              letting an operator discover it when downloads stop working. */}
-          {checked && (
+              letting an operator discover it when downloads stop working. A
+              terminal keeps its own gateway and loses nothing. */}
+          {checked && web && (
             <p className="mt-1 text-2xs text-faint">
               Recorded sessions open in an isolated browser: the device is rendered on the server and streamed as
               pixels, so file transfer and clipboard are unavailable and the watermark cannot be removed.
             </p>
           )}
-          {checked && unavailable && (
+          {checked && unavailable && wantsBrowser && (
             <p className="mt-1.5 flex items-start gap-1.5 text-2xs text-warn">
               <IconAlert size={13} className="mt-px shrink-0" />
               <span>
-                This server has browser isolation switched off, so nothing will actually be recorded. Sessions stay
-                brokered and audited. Ask an administrator to enable isolation on the GuardRail server.
+                {web
+                  ? "This server has browser isolation switched off, so nothing will actually be recorded. Sessions stay brokered and audited. Ask an administrator to enable isolation on the GuardRail server."
+                  : "This server has browser isolation switched off, so no video will be captured. The transcript is unaffected. Ask an administrator to enable isolation on the GuardRail server."}
               </span>
             </p>
           )}
           {hint && <p className="mt-1 text-2xs text-faint">{hint}</p>}
         </div>
         <Switch checked={checked} onChange={onChange} disabled={disabled} label="Record sessions" />
+      </div>
+
+      {checked && kinds && supportedKinds && onKindsChange && (
+        <RecordingKindsPicker
+          value={kinds}
+          supported={supportedKinds}
+          disabled={disabled}
+          onChange={onKindsChange}
+        />
+      )}
+    </div>
+  );
+}
+
+/* Which captures a recorded session produces.
+   Rendered only when the protocol offers a real choice — a desktop or a web
+   device has exactly one capture, and a checkbox that cannot be unticked is
+   noise. Unticking the last one is refused here rather than server-side: a
+   device that is "recorded" but captures nothing is the state the whole feature
+   exists to prevent, and the honest control for it is the master switch above. */
+export function RecordingKindsPicker({
+  value,
+  supported,
+  disabled,
+  onChange,
+}: {
+  value: RecordingKind[];
+  supported: RecordingKind[];
+  disabled?: boolean;
+  onChange: (next: RecordingKind[]) => void;
+}) {
+  if (supported.length < 2) return null;
+  const toggle = (k: RecordingKind) => {
+    const next = value.includes(k) ? value.filter((v) => v !== k) : [...value, k];
+    if (next.length === 0) return;
+    // Canonical order, so the value sent matches what the server stores and the
+    // control does not reorder itself as boxes are ticked.
+    onChange(supported.filter((s) => next.includes(s)));
+  };
+  return (
+    <div className="mt-3 border-t border-line/70 pt-3">
+      <div className="text-2xs font-semibold uppercase tracking-wider text-faint">Capture</div>
+      <div className="mt-2 space-y-2">
+        {supported.map((k) => {
+          const on = value.includes(k);
+          const last = on && value.length === 1;
+          return (
+            <label
+              key={k}
+              className={cn(
+                "flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 transition-colors",
+                on ? "border-accent/25 bg-accent-soft/30" : "border-line bg-surface-2/30",
+                (disabled || last) && "cursor-not-allowed opacity-70",
+              )}
+              title={last ? "A recorded device has to capture something. Turn recording off instead." : undefined}
+            >
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={on}
+                disabled={disabled || last}
+                onChange={() => toggle(k)}
+              />
+              <span className="min-w-0">
+                <span className="block text-sm text-fg">{RECORDING_KIND_INFO[k].label}</span>
+                <span className="block text-2xs text-muted">{RECORDING_KIND_INFO[k].detail}</span>
+              </span>
+            </label>
+          );
+        })}
       </div>
     </div>
   );

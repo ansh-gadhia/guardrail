@@ -90,3 +90,32 @@ func TestIsolationMemoryDefaults(t *testing.T) {
 			c.Browser.SessionMemoryMB, c.Browser.HostReserveMB)
 	}
 }
+
+// The tunnel is on by default, and an EXPLICITLY empty value is the documented
+// way to turn it off — not a missing value that should fall back to the default.
+// Getting that backwards would make the fallback transport unreachable.
+func TestLoad_TunnelDomain(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"unset defaults on", nil, "tunnel.guardrail.lan"},
+		{"empty disables", map[string]string{"GUARDRAIL_TUNNEL_DOMAIN": ""}, ""},
+		{"custom domain", map[string]string{"GUARDRAIL_TUNNEL_DOMAIN": "tun.corp.example"}, "tun.corp.example"},
+		// Normalised so the suffix match is not defeated by how it was typed.
+		{"trailing dot and case", map[string]string{"GUARDRAIL_TUNNEL_DOMAIN": "Tun.Corp.Example."}, "tun.corp.example"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t, tc.env)
+			c, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if c.HTTP.TunnelDomain != tc.want {
+				t.Errorf("TunnelDomain = %q, want %q", c.HTTP.TunnelDomain, tc.want)
+			}
+		})
+	}
+}

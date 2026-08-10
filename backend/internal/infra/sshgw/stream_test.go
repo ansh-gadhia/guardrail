@@ -176,6 +176,15 @@ type liveHarness struct {
 
 func newLiveHarness(t *testing.T, record bool) *liveHarness {
 	t.Helper()
+	// Nil kinds exercises the fallback: a recorded endpoint that names nothing
+	// captures its protocol's default, which for SSH is the transcript.
+	return newLiveHarnessKinds(t, record, nil)
+}
+
+// newLiveHarnessKinds is newLiveHarness with an explicit capture policy, for the
+// cases where which captures are taken is the thing under test.
+func newLiveHarnessKinds(t *testing.T, record bool, kinds []string) *liveHarness {
+	t.Helper()
 	srv := newTestSSHServer(t, "pw", "banner-line\n")
 	host, port := srv.addr()
 
@@ -186,6 +195,7 @@ func newLiveHarness(t *testing.T, record bool) *liveHarness {
 	g := NewGateway(DefaultConfig(), Deps{
 		Devices: stubLookup{ep: access.Endpoint{
 			Protocol: access.ProtocolSSH, Host: host, Port: port, RecordSessions: record,
+			RecordingKinds: kinds,
 		}},
 		HostKeys:   InsecureIgnoreHostKey{},
 		Activity:   act,
@@ -355,7 +365,10 @@ func TestRecordedSessionWritesSearchableTranscript(t *testing.T) {
 
 	h.rec.mu.Lock()
 	_, hasTranscript := h.rec.artifacts[ArtifactTranscript]
-	_, hasManifest := h.rec.artifacts[access.ArtifactManifest]
+	// ArtifactTranscriptIndex, not ArtifactManifest: a terminal device set to
+	// capture both a transcript and video puts two indexes on one recording, and
+	// the playback endpoints fetch by kind, so they cannot share one.
+	_, hasManifest := h.rec.artifacts[access.ArtifactTranscriptIndex]
 	nFinal := len(h.rec.finalized)
 	starts := h.rec.startCalls
 	h.rec.mu.Unlock()

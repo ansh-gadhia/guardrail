@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, getAccessToken } from "@/lib/api";
 import { Button, Badge, cn } from "@/components/ui";
 import { toast } from "@/components/Toast";
-import { IconTrash, IconMaximize, IconMinimize, IconRefresh } from "@/components/icons";
+import { IconTrash, IconMaximize, IconMinimize, IconRefresh, IconExternal } from "@/components/icons";
 import { DesktopPlayer } from "@/components/DesktopPlayer";
 
 // SessionViewPage embeds the brokered device UI in a same-origin iframe. The
@@ -56,6 +56,48 @@ export function SessionViewPage() {
   // as SSH, and takes the iframe branch with it: the gateway serves an xterm
   // console at the session root.
   const isDesktop = status.data?.protocol === "rdp" || status.data?.protocol === "vnc";
+
+  // Whole-host delivery. A proxied device may be served at the root of its own
+  // hostname instead of under /proxy/<sid>/, which is what lets an appliance SPA
+  // that hard-navigates via window.location work at all. That is a different
+  // origin, so it cannot be framed by this page and has to be its own tab.
+  //
+  // This probe only answers "is this session tunnelled?" — 404 means it is not
+  // (the tunnel is off, or a terminal/desktop session owns it), and the iframe
+  // below is correct. The grant that actually opens the tab is minted fresh per
+  // open, because it expires in seconds and is not reusable.
+  const tunnel = useQuery<{ tunnel_url: string }>({
+    queryKey: ["session", id, "tunnel"],
+    queryFn: async () => (await api.get<{ tunnel_url: string }>(`/sessions/${id}/tunnel`)).data,
+    enabled: !!id && !!status.data && !isDesktop,
+    retry: false,
+    staleTime: Infinity,
+  });
+  const isTunnel = !!tunnel.data?.tunnel_url;
+
+  const openTunnel = useCallback(async () => {
+    try {
+      const { data } = await api.get<{ tunnel_url: string }>(`/sessions/${id}/tunnel`);
+      // noopener,noreferrer: the device tab gets no handle on this one and no
+      // referrer naming the console.
+      const w = window.open(data.tunnel_url, "_blank", "noopener,noreferrer");
+      if (!w) {
+        toast.error("Your browser blocked the session tab — allow pop-ups for this site, then press Open session.");
+      }
+    } catch {
+      toast.error("Could not open the session tab");
+    }
+  }, [id]);
+
+  // Try once automatically, so the common path is still one click (Connect).
+  // A blocked pop-up is not an error state: the launcher below is always there,
+  // and pressing it is a real user gesture that no browser blocks.
+  const autoOpened = useRef(false);
+  useEffect(() => {
+    if (!isTunnel || ended || autoOpened.current) return;
+    autoOpened.current = true;
+    void openTunnel();
+  }, [isTunnel, ended, openTunnel]);
 
   // Close the tab, close the session. `pagehide` fires on a real unload (tab
   // close, reload, external navigation) but NOT on in-app React Router
@@ -121,9 +163,13 @@ export function SessionViewPage() {
           </div>
           <p className="font-mono text-xs text-faint">session {id.slice(0, 8)}…</p>
         </div>
-        {/* No "open in new tab" affordance: a session opened outside this shell
-            loses the status polling and the close-tab-ends-session handler, and
-            the platform should not ship a one-click way to shed them. */}
+        {/* No "open in new tab" affordance for a framed session: opened outside
+            this shell it would lose the status polling and the
+            close-tab-ends-session handler, and the platform should not ship a
+            one-click way to shed them.
+            A tunnelled session is the deliberate exception, and does not shed
+            them: the device gets its own tab because it owns its own origin, but
+            THIS page stays open and keeps both guarantees for it. */}
         <div className="flex items-center gap-2">
           {/* Offered only while the session can actually be used. */}
           {!ended && (
@@ -163,8 +209,26 @@ export function SessionViewPage() {
       >
         {/* key is the reconnect: changing it remounts the child, which tears the
             old socket down and opens a new one. */}
-        {status.isLoading ? null : isDesktop ? (
+        {status.isLoading || (!isDesktop && tunnel.isLoading) ? null : isDesktop ? (
           <DesktopPlayer key={frameKey} sessionId={id} watermark={status.data?.watermark} />
+        ) : isTunnel ? (
+          <div className="flex h-full flex-col items-center justify-center gap-4 bg-surface px-6 text-center">
+            <span className="grid h-12 w-12 place-items-center rounded-2xl bg-accent/10 text-accent">
+              <IconExternal size={24} />
+            </span>
+            <div className="font-display text-lg font-semibold text-fg">Running in a separate tab</div>
+            <p className="max-w-md text-sm text-muted">
+              This device is served on its own address, so its interface behaves exactly as it would on the
+              device itself. The credential is still injected here — it never reaches your browser.
+            </p>
+            <Button variant="primary" icon={IconExternal} onClick={() => void openTunnel()}>
+              Open session
+            </Button>
+            <p className="max-w-md text-xs text-faint">
+              Keep this page open: it holds the session. Closing it ends the session and the device tab with
+              it.
+            </p>
+          </div>
         ) : (
           <iframe
             key={frameKey}

@@ -140,7 +140,11 @@ export function TranscriptPlayer({ sessionId }: { sessionId: string }) {
     (async () => {
       try {
         const [m, t] = await Promise.all([
-          api.get<TranscriptManifest>(`/sessions/${sessionId}/recording/manifest`),
+          // The transcript's own index, not /recording/manifest — that one is the
+          // screencast's, and a terminal session may now carry both. The server
+          // falls back to the old shared kind for transcripts recorded before
+          // they were told apart.
+          api.get<TranscriptManifest>(`/sessions/${sessionId}/recording/transcript/manifest`),
           // Fetched as bytes, not as a JSON/text response: the transcript is
           // whatever the device emitted, and axios must not try to parse it.
           api.get(`/sessions/${sessionId}/recording/transcript`, { responseType: "arraybuffer" }),

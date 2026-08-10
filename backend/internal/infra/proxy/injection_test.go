@@ -49,7 +49,7 @@ func webEndpoint() access.Endpoint {
 // never told, while the console still showed the credential as bound. Refusing is
 // the only honest option.
 func TestEstablishRefusesFormInjection(t *testing.T) {
-	g := NewHTTPGateway(fixedLookup{ep: webEndpoint()}, nil, nil, "test")
+	g := NewHTTPGateway(fixedLookup{ep: webEndpoint()}, nil, nil, "test", "")
 	creds := fixedCreds{cred: access.Credential{
 		Username: "admin", Secret: "s3cret", Injection: "form",
 	}}
@@ -63,7 +63,7 @@ func TestEstablishRefusesFormInjection(t *testing.T) {
 // The injections this gateway CAN apply server-side must still work.
 func TestEstablishAcceptsHeaderInjections(t *testing.T) {
 	for _, inj := range []string{"basic", "header", "none"} {
-		g := NewHTTPGateway(fixedLookup{ep: webEndpoint()}, nil, nil, "test")
+		g := NewHTTPGateway(fixedLookup{ep: webEndpoint()}, nil, nil, "test", "")
 		creds := fixedCreds{cred: access.Credential{
 			Username: "admin", Secret: "s3cret", Injection: inj,
 		}}

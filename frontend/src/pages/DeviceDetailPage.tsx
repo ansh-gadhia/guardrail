@@ -4,7 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, problemDetail } from "@/lib/api";
 import { plausibleDate } from "@/lib/dates";
-import type { AssetGroup, Device, Session, UserRow } from "@/lib/types";
+import type { AssetGroup, Device, Session, UserRow, RecordingKind } from "@/lib/types";
+import { RECORDING_KIND_INFO } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, Panel, Badge, StatusBadge, EmptyState, ErrorNote, Skeleton, cn } from "@/components/ui";
 import { DeviceStatusBadge } from "@/components/DeviceHealthDot";
@@ -114,11 +115,29 @@ function DeviceRecording({ device }: { device: Device }) {
     onError: (err) => toast.error(problemDetail(err, "Could not change the recording setting")),
   });
 
+  // Separate mutation from the master switch: this one changes what is captured,
+  // not whether. Sent on its own so a failure to change the captures cannot leave
+  // recording itself in a state nobody asked for.
+  const saveKinds = useMutation({
+    mutationFn: async (kinds: RecordingKind[]) =>
+      api.patch(`/devices/${device.id}`, { ...toDeviceBody(device), recording_kinds: kinds }),
+    onSuccess: (_d, kinds) => {
+      toast.success(`Now capturing ${kinds.map((k) => RECORDING_KIND_INFO[k].label.toLowerCase()).join(" and ")}`);
+      void qc.invalidateQueries({ queryKey: ["device", device.id] });
+      void qc.invalidateQueries({ queryKey: ["devices"] });
+    },
+    onError: (err) => toast.error(problemDetail(err, "Could not change what is captured")),
+  });
+
   return (
     <RecordingToggle
       checked={device.record_sessions}
-      disabled={!device.can_set_recording || save.isPending}
+      disabled={!device.can_set_recording || save.isPending || saveKinds.isPending}
       onChange={(v) => save.mutate(v)}
+      scheme={device.scheme}
+      kinds={device.recording_kinds}
+      supportedKinds={device.supported_recording_kinds}
+      onKindsChange={(next) => saveKinds.mutate(next)}
       hint={
         device.can_set_recording
           ? undefined
@@ -255,6 +274,11 @@ export function DeviceDetailPage() {
     queryKey: ["device", id],
     queryFn: async () => (await api.get<Device>(`/devices/${id}`)).data,
     enabled: !!id,
+    // Health is repolled server-side on GUARDRAIL_HEALTH_POLL_INTERVAL (60s by
+    // default); without a refetch the page kept showing whatever the device's
+    // reachability was when it was opened, so a box that went down while someone
+    // was looking at it stayed green until they reloaded.
+    refetchInterval: 30_000,
   });
   const sessions = useQuery<Session[]>({
     queryKey: ["sessions", "device", id],

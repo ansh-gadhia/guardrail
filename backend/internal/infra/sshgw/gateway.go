@@ -88,6 +88,10 @@ type Deps struct {
 	Activity access.ActivitySink
 	// Events records the session timeline alongside the transcript.
 	Events access.EventRecorder
+	// Mirrors records the session as video alongside the transcript, for devices
+	// whose policy asks for both. Optional: a deployment with no usable Chromium
+	// still brokers and transcribes terminal sessions, it just cannot film them.
+	Mirrors access.TerminalMirrorFactory
 	// HostKeys decides whether to trust a device's host key.
 	HostKeys HostKeyPolicy
 	// Log surfaces failures that nothing else would report. The broker discards
@@ -157,6 +161,10 @@ type sshSession struct {
 	// rec accumulates the transcript. nil when the device is not recorded.
 	rec       *term.Recorder
 	recording *access.Recording
+	// mirror renders the same output in a headless browser so the session is also
+	// captured as video. nil unless the device's policy asks for video and a
+	// browser was available to open one.
+	mirror access.TerminalMirror
 
 	// attached guards the socket: one terminal per session. A second viewer would
 	// share the PTY and interleave keystrokes, and the transcript would attribute
@@ -217,7 +225,10 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		rec, rerr := g.deps.Recordings.FindBySessionSystem(ctx, s.ID)
 		if rerr == nil && rec != nil {
 			sess.recording = rec
-			sess.rec = term.NewRecorder(g.cfg.MaxRecordingBytes)
+			if ep.Captures(access.ArtifactTranscript) {
+				sess.rec = term.NewRecorder(g.cfg.MaxRecordingBytes)
+			}
+			sess.mirror = g.openMirror(ctx, rec, s.OrganizationID, ep, sess.watermark)
 		}
 	}
 
@@ -341,6 +352,17 @@ func (g *Gateway) teardown(s *sshSession) error {
 	if s.client != nil {
 		_ = s.client.Close()
 	}
+	// The mirror is closed even when there is no transcript: the two captures are
+	// independent, and an early return here would leave a Chromium tab running for
+	// the life of the process on a video-only device.
+	if s.mirror != nil {
+		mctx, mcancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := s.mirror.Close(mctx); err != nil && g.deps.Log != nil {
+			g.deps.Log.Error("sshgw: session video was not persisted",
+				zap.String("session_id", s.id.String()), zap.Error(err))
+		}
+		mcancel()
+	}
 	if s.rec == nil || s.recording == nil {
 		return nil
 	}
@@ -423,4 +445,25 @@ func randomToken() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// openMirror starts video capture when the device asks for it, returning nil
+// when it does not or when no mirror could be opened.
+//
+// A failure to film is logged and swallowed. The session is already recorded as
+// a transcript, and refusing to broker a session because a headless browser
+// would not start would turn an evidence upgrade into an outage.
+func (g *Gateway) openMirror(ctx context.Context, rec *access.Recording, orgID uuid.UUID, ep access.Endpoint, watermark string) access.TerminalMirror {
+	if g.deps.Mirrors == nil || !ep.Captures(access.ArtifactVideo) {
+		return nil
+	}
+	m, err := g.deps.Mirrors.OpenMirror(ctx, rec, orgID, access.MirrorOptions{Watermark: watermark})
+	if err != nil {
+		if g.deps.Log != nil {
+			g.deps.Log.Warn("sshgw: no video for this session; transcript is unaffected",
+				zap.Error(err))
+		}
+		return nil
+	}
+	return m
 }

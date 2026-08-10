@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Re-publish the current main without pushing a commit — for when a build
+  # failed on something that had nothing to do with the code.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -139,21 +142,88 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
 
-  docker:
-    name: Docker build
+  # Builds both runtime images and, on main only, publishes them to GHCR.
+  #
+  # Publishing lives in the same workflow as the tests and behind `needs:` on
+  # purpose. A separate release workflow cannot depend on this one's jobs, so it
+  # would happily publish an image built from a commit whose tests had just gone
+  # red — and the first anyone would know is a server pulling it.
+  #
+  # A pull request still builds both images (that catches a broken Dockerfile
+  # before merge) but never logs in and never pushes.
+  publish:
+    name: Images (build; publish from main)
     runs-on: ubuntu-latest
     needs: [backend, frontend]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: api
+            context: ./backend
+          - component: web
+            context: ./frontend
     steps:
       - uses: actions/checkout@v4
-      - name: Build API image
+
+      - name: Resolve image name and version
+        id: meta
+        run: |
+          # GHCR rejects uppercase in a path; a GitHub owner may contain it.
+          # Derived rather than hardcoded so a fork publishes to its own
+          # namespace instead of failing on a package it cannot write.
+          owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/${owner}/guardrail-${{ matrix.component }}" >> "$GITHUB_OUTPUT"
+          # The VERSION file is the single source of truth for the tag, so
+          # bumping it is what cuts a release — no git tag involved.
+          echo "version=$(tr -d ' \n' < VERSION)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(echo '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ./backend
-          push: false
-          tags: guardrail/api:ci
-      - name: Build web image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          push: false
-          tags: guardrail/web:ci
+          context: ${{ matrix.context }}
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          # amd64 only. arm64 would need QEMU emulation, and the API image
+          # installs Chromium — emulated, that turns a three-minute build into a
+          # forty-minute one on every push to main. Add
+          # `platforms: linux/amd64,linux/arm64` here if you ever deploy to
+          # Graviton or a Pi and can live with the wait.
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.sha }}
+          # Registry cache, so a rebuild after an unrelated change does not
+          # redo the Go module graph and the Chromium install from scratch.
+          cache-from: type=registry,ref=${{ steps.meta.outputs.image }}:buildcache
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}:buildcache,mode=max', steps.meta.outputs.image) || '' }}
+          provenance: false
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Published \`${{ matrix.component }}\`"
+            echo ""
+            echo "| Tag | Meaning |"
+            echo "|---|---|"
+            echo "| \`${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}\` | current VERSION — moves with every push to main |"
+            echo "| \`${{ steps.meta.outputs.image }}:latest\` | newest main build |"
+            echo "| \`${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.sha }}\` | immutable, this commit |"
+          } >> "$GITHUB_STEP_SUMMARY"

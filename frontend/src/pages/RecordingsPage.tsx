@@ -1,12 +1,12 @@
-import { useMemo, useState, type ReactNode } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
 import { plausibleDate } from "@/lib/dates";
-import type { Session, SessionEvent, Device, UserRow, RecordingMeta } from "@/lib/types";
+import type { Session, SessionEvent, RecordingMeta, Paged, SessionStats } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, StatCluster, Panel, Badge, StatusBadge, Modal, EmptyState, ErrorNote, Skeleton, cn } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
-import { IconFilm, IconDevices, IconTrash, IconAlert } from "@/components/icons";
+import { IconFilm, IconDevices, IconTrash, IconAlert, IconDownload } from "@/components/icons";
 import { SessionPlayer } from "@/components/SessionPlayer";
 import { TranscriptPlayer } from "@/components/TranscriptPlayer";
 import { DesktopReplay } from "@/components/DesktopReplay";
@@ -43,50 +43,87 @@ function duration(start?: string, end?: string): string {
 }
 const startedOf = (s: Session) => s.started_at ?? s.created_at;
 
+/** The replays a recording can offer. One recording may hold more than one. */
+type ReplayView = "transcript" | "video" | "desktop";
+const VIEW_LABEL: Record<ReplayView, string> = {
+  transcript: "Transcript",
+  video: "Video",
+  desktop: "Desktop replay",
+};
+
+/** Column keys the server can sort on (see access.SessionSortColumns). */
+const SERVER_SORTABLE = new Set(["user", "device", "protocol", "status", "started", "duration", "ip"]);
+
+/** Debounces a value so typing in the search box does not fire a query per keystroke. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
+}
+
 export function RecordingsPage() {
-  const has = useAuth((s) => s.has);
   const [selected, setSelected] = useState<Session | null>(null);
 
-  const sessions = useQuery<Session[]>({
-    queryKey: ["sessions", "all"],
-    queryFn: async () => (await api.get<{ data: Session[] }>("/sessions", { params: { limit: 200 } })).data.data,
+  // Paging, search and sort live here and travel to the server. The table is
+  // handed exactly one page and told the real total.
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(12);
+  const [query, setQuery] = useState("");
+  const [sortKey, setSortKey] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const search = useDebounced(query.trim(), 300);
+
+  // Any change to what is being asked for restarts at page one — otherwise a
+  // search that narrows to three rows leaves you on page nine looking at
+  // nothing, which reads as "no results".
+  useEffect(() => setPage(0), [search, sortKey, sortDir]);
+
+  const listParams = useMemo(
+    () => ({
+      limit: pageSize,
+      offset: page * pageSize,
+      ...(search ? { q: search } : {}),
+      ...(sortKey && SERVER_SORTABLE.has(sortKey) ? { sort: sortKey, dir: sortDir } : {}),
+    }),
+    [pageSize, page, search, sortKey, sortDir],
+  );
+
+  const sessions = useQuery<Paged<Session>>({
+    queryKey: ["sessions", "page", listParams],
+    queryFn: async () => (await api.get<Paged<Session>>("/sessions", { params: listParams })).data,
+    refetchInterval: 10_000,
+    // Keeps the previous page on screen while the next one loads, so paging does
+    // not flash the empty state between requests.
+    placeholderData: keepPreviousData,
+  });
+
+  // Counters come from their own endpoint and describe every session in the
+  // tenant. They used to be computed from the fetched array, which meant they
+  // silently stopped counting past the fetch limit.
+  const stats = useQuery<SessionStats>({
+    queryKey: ["session-stats"],
+    queryFn: async () => (await api.get<SessionStats>("/sessions/stats")).data,
     refetchInterval: 10_000,
   });
-  const devices = useQuery<Device[]>({
-    queryKey: ["devices"],
-    queryFn: async () => (await api.get<{ data: Device[] }>("/devices")).data.data,
-  });
-  const users = useQuery<UserRow[]>({
-    queryKey: ["users"],
-    queryFn: async () => (await api.get<{ data: UserRow[] }>("/users")).data.data,
-    enabled: has("user:read"),
-  });
 
-  const deviceName = useMemo(() => {
-    const m = new Map<string, string>();
-    (devices.data ?? []).forEach((d) => m.set(d.id, d.name));
-    return m;
-  }, [devices.data]);
-  const userEmail = useMemo(() => {
-    const m = new Map<string, string>();
-    (users.data ?? []).forEach((u) => m.set(u.user_id, u.email));
-    return m;
-  }, [users.data]);
+  const rows = sessions.data?.data ?? [];
+  const total = sessions.data?.total ?? 0;
 
-  const rows = sessions.data ?? [];
-  const stats = useMemo(() => {
-    const active = rows.filter((r) => r.status === "active").length;
-    const devs = new Set(rows.map((r) => r.device_id)).size;
-    return { total: rows.length, active, ended: rows.filter((r) => r.status === "ended" || r.status === "expired").length, devs };
-  }, [rows]);
+  // Labels now ride along with each row, so this page no longer fetches every
+  // user and every device just to name a dozen sessions.
+  const deviceName = (s: Session) => s.device_name;
+  const userEmail = (s: Session) => s.user_email;
 
   const columns: Column<Session>[] = [
     {
       key: "user",
       header: "User",
-      value: (s) => userEmail.get(s.user_id ?? "") ?? s.user_id ?? "",
+      value: (s) => userEmail(s) ?? s.user_id ?? "",
       cell: (s) => {
-        const email = userEmail.get(s.user_id ?? "");
+        const email = userEmail(s);
         return (
           <div className="flex items-center gap-2">
             <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full accent-grad text-2xs font-semibold text-white ring-1 ring-white/20">
@@ -100,12 +137,18 @@ export function RecordingsPage() {
     {
       key: "device",
       header: "Device",
-      value: (s) => deviceName.get(s.device_id) ?? s.device_id,
+      value: (s) => deviceName(s) ?? s.device_address ?? s.device_id,
+      // The name is the one recorded at connect, so a session still names its
+      // device after that device has been deleted. The address underneath answers
+      // "which box was that" when the name has been reused or means nothing now.
       cell: (s) => (
-        <span className="inline-flex items-center gap-1.5 text-sm text-fg">
-          <IconDevices size={14} className="text-faint" />
-          {deviceName.get(s.device_id) ?? <span className="font-mono text-xs text-faint">{s.device_id.slice(0, 8)}</span>}
-        </span>
+        <div className="leading-tight">
+          <span className="inline-flex items-center gap-1.5 text-sm text-fg">
+            <IconDevices size={14} className="text-faint" />
+            {deviceName(s) ?? <span className="font-mono text-xs text-faint">{s.device_id.slice(0, 8)}</span>}
+          </span>
+          {s.device_address && <div className="pl-[22px] font-mono text-2xs text-faint">{s.device_address}</div>}
+        </div>
       ),
     },
     {
@@ -157,13 +200,13 @@ export function RecordingsPage() {
         title="Recordings"
         subtitle="Every brokered session — who reached which device, when, for how long, and what they did."
         stats={
-          rows.length > 0 ? (
+          stats.data ? (
             <StatCluster
               items={[
-                { label: "Sessions", value: stats.total },
-                { label: "Active now", value: stats.active, tone: stats.active > 0 ? "accent" : undefined },
-                { label: "Ended", value: stats.ended },
-                { label: "Devices", value: stats.devs },
+                { label: "Sessions", value: stats.data.total },
+                { label: "Active now", value: stats.data.active, tone: stats.data.active > 0 ? "accent" : undefined },
+                { label: "Ended", value: stats.data.ended },
+                { label: "Devices", value: stats.data.devices },
               ]}
             />
           ) : undefined
@@ -181,17 +224,42 @@ export function RecordingsPage() {
           <div className="p-4">
             <ErrorNote message="Couldn't load session recordings. Try reloading." />
           </div>
-        ) : rows.length === 0 ? (
+        ) : total === 0 && !search ? (
           <EmptyState icon={IconFilm} title="No sessions yet" message="Brokered device sessions and their activity will be recorded here." />
         ) : (
           <DataTable
             columns={columns}
             rows={rows}
             rowKey={(s) => s.id}
-            searchPlaceholder="Search by user, device, IP…"
-            pageSize={12}
+            searchPlaceholder="Search by user, device, IP, protocol…"
             exportName="session-recordings"
+            emptyMessage={search ? `No sessions match “${search}”.` : "No results."}
             onRowClick={setSelected}
+            server={{
+              total,
+              page,
+              onPageChange: setPage,
+              pageSize,
+              onPageSizeChange: setPageSize,
+              query,
+              onQueryChange: setQuery,
+              sortKey,
+              sortDir,
+              onSortChange: (k, d) => {
+                setSortKey(k);
+                setSortDir(d);
+              },
+              loading: sessions.isFetching,
+              // Export pulls the whole filtered set rather than the page on
+              // screen. Capped so a tenant with a very long history cannot turn
+              // one click into an unbounded response.
+              fetchAll: async () => {
+                const { data } = await api.get<Paged<Session>>("/sessions", {
+                  params: { ...listParams, limit: 5000, offset: 0 },
+                });
+                return data.data;
+              },
+            }}
           />
         )}
       </Panel>
@@ -199,8 +267,8 @@ export function RecordingsPage() {
       {selected && (
         <RecordingPopup
           session={selected}
-          deviceLabel={deviceName.get(selected.device_id)}
-          userLabel={userEmail.get(selected.user_id ?? "")}
+          deviceLabel={deviceName(selected)}
+          userLabel={userEmail(selected)}
           onClose={() => setSelected(null)}
         />
       )}
@@ -242,6 +310,23 @@ function RecordingPopup({
   const hasVideo = recording.data?.has_video ?? false;
   const hasTranscript = recording.data?.has_transcript ?? false;
   const hasDesktop = recording.data?.has_desktop ?? false;
+
+  // Which replays this recording actually holds, in the order they are offered.
+  // Transcript first: it loads instantly and is searchable, so it is the better
+  // landing view when a session has both.
+  const available = useMemo(() => {
+    const out: ReplayView[] = [];
+    if (hasTranscript) out.push("transcript");
+    if (hasVideo) out.push("video");
+    if (hasDesktop) out.push("desktop");
+    return out;
+  }, [hasTranscript, hasVideo, hasDesktop]);
+  const [picked, setPicked] = useState<ReplayView | null>(null);
+  // Falls back to the first available whenever the pick is not (or no longer)
+  // present — the artifacts arrive asynchronously, and a live session gains its
+  // video only once it ends.
+  const view = picked && available.includes(picked) ? picked : available[0];
+  const setView = setPicked;
 
   const has = useAuth((s) => s.has);
   const qc = useQueryClient();
@@ -291,9 +376,17 @@ function RecordingPopup({
                 </button>
               ))}
           </div>
-          <button className="btn-ghost" onClick={onClose}>
-            Close
-          </button>
+          <div className="flex items-center gap-2">
+            <ExportRecording
+              session={session}
+              deviceLabel={deviceLabel}
+              userLabel={userLabel}
+              available={available}
+            />
+            <button className="btn-ghost" onClick={onClose}>
+              Close
+            </button>
+          </div>
         </div>
       }
     >
@@ -316,17 +409,33 @@ function RecordingPopup({
                 captured.
               </p>
             </div>
-          ) : hasVideo ? (
-            <SessionPlayer sessionId={session.id} />
-          ) : hasTranscript ? (
-            // A terminal session was captured as text, not pixels. Same modal,
-            // different reader — which is what the recording itself reports.
-            <TranscriptPlayer sessionId={session.id} />
-          ) : hasDesktop ? (
-            // A desktop was captured as a Guacamole dump: neither frames nor
-            // text, and a third reader. Without this branch it fell through to
-            // "Nothing was captured" while its bytes sat in the blob store.
-            <DesktopReplay sessionId={session.id} />
+          ) : available.length > 0 ? (
+            <div className="space-y-3">
+              {/* A terminal device can be set to capture a transcript AND video,
+                  and they are different evidence: the transcript is exactly what
+                  the device printed, the video is what the operator saw. Picking
+                  one for the reviewer would hide the other, so both are offered
+                  whenever both exist. One capture renders no tabs at all. */}
+              {available.length > 1 && (
+                <div className="flex gap-1 rounded-lg border border-line bg-surface-2/40 p-1">
+                  {available.map((v) => (
+                    <button
+                      key={v}
+                      className={cn(
+                        "flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition",
+                        view === v ? "bg-accent-soft text-accent" : "text-muted hover:text-fg",
+                      )}
+                      onClick={() => setView(v)}
+                    >
+                      {VIEW_LABEL[v]}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {view === "video" && <SessionPlayer sessionId={session.id} />}
+              {view === "transcript" && <TranscriptPlayer sessionId={session.id} />}
+              {view === "desktop" && <DesktopReplay sessionId={session.id} />}
+            </div>
           ) : (
             <div className="flex h-72 flex-col items-center justify-center gap-2 rounded-xl border border-line bg-surface-2/40 px-6 text-center">
               <IconFilm size={22} className="text-faint" />
@@ -409,6 +518,135 @@ function ActivityTimeline({ events }: { events: SessionEvent[] }) {
         );
       })}
     </ol>
+  );
+}
+
+/* ---- Exporting the evidence off the platform -------------------------------
+   A recording is only useful as evidence if it can leave: attached to a ticket,
+   handed to an auditor, kept past the retention window. Everything here is a
+   read of artifacts the reviewer can already replay — the export adds no new
+   access, it just writes them to a file. */
+
+/** Strips ANSI/VT control sequences so an exported transcript is readable text.
+ *
+ *  The stored transcript is exactly what the device emitted, escape codes and
+ *  all, because that is what makes it faithful and replayable. A .txt full of
+ *  `ESC[1;32m` is faithful and unreadable, and the point of exporting is that
+ *  somebody outside GuardRail can read it — so the export strips them and the
+ *  original stays untouched in the blob store. */
+function stripAnsi(s: string): string {
+  return (
+    s
+      // OSC (window title and friends): ESC ] ... terminated by BEL or ST.
+      // Removed first, because its payload can contain bytes the CSI pattern
+      // below would otherwise chew into.
+      .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
+      // CSI: ESC [ params intermediates final. Covers colour, cursor moves and
+      // erase-line — the bulk of what a terminal session emits.
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+      // Remaining two-character escapes (ESC =, ESC >, charset selects).
+      .replace(/\x1b[@-Z\\-_]/g, "")
+      // A bare CR redraws the current line — progress bars, spinners. Kept as a
+      // newline so the export shows the successive states rather than one line
+      // overwritten into nonsense.
+      .replace(/\r(?!\n)/g, "\n")
+  );
+}
+
+/** A filename that identifies the session without needing the console open. */
+function exportBase(session: Session, deviceLabel?: string): string {
+  const name = (deviceLabel ?? session.device_name ?? "device").replace(/[^A-Za-z0-9._-]+/g, "-");
+  return `guardrail-${name}-${session.id.slice(0, 8)}`;
+}
+
+function download(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function ExportRecording({
+  session,
+  deviceLabel,
+  userLabel,
+  available,
+}: {
+  session: Session;
+  deviceLabel?: string;
+  userLabel?: string;
+  available: ReplayView[];
+}) {
+  const [busy, setBusy] = useState<ReplayView | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  if (available.length === 0) return null;
+
+  // The header names the device and the session id explicitly, so an exported
+  // file still says what it is after the device has been deleted from GuardRail.
+  // The stored session carries that identity; this just writes it down.
+  const header = [
+    "GuardRail session recording",
+    `Session ID   : ${session.id}`,
+    `Device       : ${deviceLabel ?? session.device_name ?? "(name not recorded)"}`,
+    `Device ID    : ${session.device_id}`,
+    `Device addr  : ${session.device_address ?? "-"}`,
+    `Device type  : ${session.device_type ?? "-"}`,
+    `Operator     : ${userLabel ?? session.user_email ?? session.user_id ?? "-"}`,
+    `Protocol     : ${session.protocol}`,
+    `Started (UTC): ${session.started_at ?? session.created_at ?? "-"}`,
+    `Ended (UTC)  : ${session.ended_at ?? "(still active)"}`,
+    `Client IP    : ${session.client_ip ?? "-"}`,
+    "",
+    "-".repeat(72),
+    "",
+  ].join("\n");
+
+  const run = async (v: ReplayView) => {
+    setBusy(v);
+    setErr(null);
+    try {
+      const base = exportBase(session, deviceLabel);
+      if (v === "transcript") {
+        const { data } = await api.get(`/sessions/${session.id}/recording/transcript`, {
+          responseType: "arraybuffer",
+        });
+        const text = new TextDecoder().decode(new Uint8Array(data as ArrayBuffer));
+        download(new Blob([header + stripAnsi(text)], { type: "text/plain;charset=utf-8" }), `${base}-transcript.txt`);
+      } else if (v === "desktop") {
+        // A Guacamole protocol dump. Exported as-is: it is replayable by
+        // guacamole tooling, and re-encoding it here would be inventing a format.
+        const { data } = await api.get(`/sessions/${session.id}/recording/desktop`, { responseType: "arraybuffer" });
+        download(new Blob([data as ArrayBuffer], { type: "application/octet-stream" }), `${base}-desktop.guac`);
+      } else {
+        // Frames plus the index that gives them their timing. Both are needed —
+        // the frames alone are a concatenated blob with no boundaries — so they
+        // are written as two files rather than one that cannot be replayed.
+        const [frames, manifest] = await Promise.all([
+          api.get(`/sessions/${session.id}/recording/frames`, { responseType: "arraybuffer" }),
+          api.get(`/sessions/${session.id}/recording/manifest`, { responseType: "arraybuffer" }),
+        ]);
+        download(new Blob([frames.data as ArrayBuffer], { type: "application/octet-stream" }), `${base}-frames.bin`);
+        download(new Blob([manifest.data as ArrayBuffer], { type: "application/json" }), `${base}-frames-manifest.json`);
+      }
+    } catch (e) {
+      setErr(problemDetail(e, "The recording could not be exported."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      {err && <span className="text-2xs text-danger">{err}</span>}
+      {available.map((v) => (
+        <button key={v} className="btn-ghost" disabled={busy !== null} onClick={() => void run(v)}>
+          <IconDownload size={15} />
+          {busy === v ? "Exporting…" : available.length > 1 ? `Export ${VIEW_LABEL[v].toLowerCase()}` : "Export recording"}
+        </button>
+      ))}
+    </div>
   );
 }
 

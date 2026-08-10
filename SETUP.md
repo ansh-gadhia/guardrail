@@ -97,6 +97,43 @@ is unset. **Only 443 and 80 are meant to be reachable from the LAN.**
 
 ---
 
+## 0. Quick install (recommended for servers)
+
+One script, no checkout, no build. It installs Docker if missing, asks for the
+few settings that cannot be guessed, pulls the published images from GHCR and
+starts everything under `/opt/guardrail`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ansh-gadhia/guardrail/main/scripts/install.sh -o install.sh
+sudo bash install.sh
+```
+
+It asks for: HTTPS port, HTTP port, admin email and password, whether to run the
+bundled DNS resolver for the session tunnel, and whether to enable desktop
+(RDP/VNC) access. Everything else — the JWT signing key, the vault master key
+and both database passwords — is generated.
+
+Run it again at any time to reach the same menu:
+
+| Option | What it does |
+|---|---|
+| **Install** | Fresh setup. Refuses to clobber an existing config without confirmation. |
+| **Update** | Pulls a newer version and **re-asks the DNS question**. Secrets, admin credentials and data are left alone. |
+| **Stop** | Stops the stack; all data kept. |
+| **Remove** | Deletes containers, images, volumes, `/opt/guardrail` and `/var/lib/guardrail`. Irreversible, and asks you to type `REMOVE`. |
+
+The stack restarts by itself after a server reboot: every service is
+`restart: unless-stopped` and the installer enables the Docker service at boot.
+
+> **Back up `/opt/guardrail/.env`.** `GUARDRAIL_MASTER_KEY` is the only thing that
+> can decrypt the credential vault. Lose that file and every stored device
+> credential is unrecoverable — restoring the database alone will not do it.
+
+The rest of this guide covers building from a checkout, which is what you want
+for development or an air-gapped install.
+
+---
+
 ## 1. Prerequisites
 
 For the standard (Docker Compose) deploy you need only:
@@ -219,6 +256,72 @@ binds `:8080` on the host.
 
 ---
 
+## 6b. Session delivery: wildcard DNS for the tunnel
+
+A proxied device opens at **`https://<session-id>.tunnel.guardrail.lan/`** — the
+device's own UI at the root of its own origin.
+
+**Why it works this way.** Served under a path prefix (`/proxy/<sid>/`), a device
+UI written for `/` needs every root-absolute URL rewritten, and `window.location`
+cannot be intercepted by any script — it is a non-configurable platform object.
+An appliance SPA that navigates with `window.location = "/ng/..."` therefore
+escapes the prefix and lands on the GuardRail console. On its own hostname there
+is no prefix to escape, so appliance SPAs work unmodified.
+
+This is the only part of GuardRail that needs something outside this server: the
+**operator's browser** must resolve `*.tunnel.guardrail.lan`. Pick one.
+
+**Option A — one record on your LAN resolver** (preferred; nothing to run here).
+`make install` prints your server's IP; point a wildcard at it:
+
+| Resolver | Record |
+| --- | --- |
+| dnsmasq / OpenWrt / Pi-hole | `address=/tunnel.guardrail.lan/<SERVER_IP>` |
+| pfSense / OPNsense (Unbound) | `local-zone: "tunnel.guardrail.lan" redirect` + `local-data: "tunnel.guardrail.lan 3600 IN A <SERVER_IP>"` |
+| Windows Server DNS | New zone `tunnel.guardrail.lan`, host (A) record `*` → `<SERVER_IP>` |
+| BIND | `*   IN  A   <SERVER_IP>` |
+
+**Option B — run the bundled resolver on this server** (no router access needed).
+Use this when clients get DNS from your ISP or a public resolver rather than from
+the router, so there is no router record to add:
+
+```bash
+docker compose --profile dns up -d
+docker compose logs dns      # prints the address it detected and is listening on
+```
+
+Then set client machines' **primary** DNS to this server, keeping their normal
+resolver as secondary.
+
+- It detects this host's current LAN IP itself, so a DHCP lease change needs no
+  edit — it re-detects on restart.
+- It binds **that address specifically**, not `0.0.0.0`, so it coexists with
+  `systemd-resolved` (which holds `127.0.0.53`). You do **not** need to disable
+  the stub listener, and the server's own DNS is unaffected.
+- Names under the tunnel domain are answered locally; everything else is
+  forwarded upstream, so clients can safely use it as their only resolver.
+  Upstreams default to `8.8.8.8` and `1.1.1.1` — override with
+  `GUARDRAIL_DNS_UPSTREAM` / `GUARDRAIL_DNS_UPSTREAM2` in `.env` to point at your
+  own resolvers (required if this network has no internet access).
+- `restart: unless-stopped` means it comes back after a reboot, and a plain
+  `docker compose up -d` will not stop it.
+
+> `/etc/hosts` **cannot** do this: it has no wildcards, and a session id is new
+> every time. You need a real resolver.
+
+**Certificate.** `make install` puts `*.tunnel.guardrail.lan` in the self-signed
+cert it generates, so the tunnel is trusted exactly as much as the console is (one
+click-through). Re-run `make install` after changing the domain — it detects the
+cert no longer names it and regenerates.
+
+**Changing or disabling it.** Set `GUARDRAIL_TUNNEL_DOMAIN` in `.env` (use a
+domain you own, or `.lan` / `.internal` — never `.local`, which collides with
+mDNS), then `docker compose up -d`. Setting it **empty** turns the tunnel off, and
+proxy sessions serve under `/proxy/<sid>/` as they did before. Never put an IP
+here; the server's address is auto-detected and is not part of this name.
+
+---
+
 ## 7. Verify
 
 ```bash
@@ -231,6 +334,91 @@ docker compose ps                             # every service Up / healthy
 
 Then follow the **[Usage guide](docs/USAGE.md)**: add a device → bind a credential
 → **Connect**.
+
+### API tokens (for scripts and dashboards)
+
+A user's access token expires after 15 minutes, and every login writes an audit
+event — so polling with one buries the audit trail. Machine integrations use an
+**API token** instead: no login, no expiry unless you set one, one audit event
+when it is issued and one when it is revoked.
+
+Issue one as a super admin:
+
+```bash
+ADMIN=$(curl -sk https://localhost/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@yourco.com","password":"..."}' | jq -r .access_token)
+
+curl -sk https://localhost/api/v1/api-tokens \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"name":"noc-dashboard","scopes":["device:read"]}' | jq
+```
+
+```json
+{
+  "id": "…", "name": "noc-dashboard", "prefix": "grt_4GFFtowG",
+  "scopes": ["device:read"], "revoked": false,
+  "token": "grt_4GFFtowG…",
+  "warning": "Copy this token now — it is not stored and cannot be shown again."
+}
+```
+
+**The `token` value is shown once.** Only its SHA-256 is stored, so a database
+backup is not a set of working credentials — and nothing, including a super
+admin, can print it again. Lost one? Revoke it and issue another.
+
+Then just use it, indefinitely:
+
+```bash
+curl -sk https://localhost/api/v1/status/devices -H "Authorization: Bearer $GR_TOKEN" | jq
+```
+
+| | |
+|---|---|
+| **Add an expiry** | `"expires_at": "2027-01-01T00:00:00Z"` (RFC3339). Omit for none. |
+| **List** | `GET /api/v1/api-tokens` — metadata and `last_used_at`, never the value |
+| **Revoke** | `DELETE /api/v1/api-tokens/{id}` — takes effect on the next request |
+
+**Scopes are read-only.** `device:read`, `session:read`, `recording:read`,
+`group:read`, `log:read`, `report:read`, `user:read`, `role:read`, `org:read` —
+anything else is refused at creation. That is deliberate: `access_sessions.user_id`
+is a foreign key to `users`, so a token cannot be the actor on a brokered session
+even in principle, and a never-expiring credential sitting in a config file that
+could open a session to a firewall is a much bigger decision than letting a
+dashboard see what is online.
+
+Issuing and revoking are **super-admin only**, and a token can never hold super
+admin itself.
+
+### Device status feed
+
+For a NOC board or an external monitor, `GET /api/v1/status/devices` returns just
+the device name, type, address and whether it answered its last health probe:
+
+```bash
+curl -sk https://localhost/api/v1/status/devices -H "Authorization: Bearer $GR_TOKEN" | jq
+```
+
+```json
+{
+  "data": [
+    { "id": "…", "name": "Edge Firewall", "device_type": "firewall",
+      "ip": "10.200.10.1", "port": 2443, "status": "online",
+      "checked_at": "2026-08-10T06:55:02Z", "latency_ms": 12 }
+  ],
+  "summary": { "total": 18, "online": 16, "offline": 1, "unknown": 1 }
+}
+```
+
+It needs the same bearer token and the same `device:read` permission as the
+device list, and is scoped to the caller's organization — a caller sees exactly
+the devices they could already list, and nothing beyond these four fields.
+
+`status` is `online`, `offline`, or `unknown` for a device that has never been
+probed. `unknown` is deliberately distinct: "we have not looked" is not the same
+claim as "we looked and it is down". Freshness is bounded by
+`GUARDRAIL_HEALTH_POLL_INTERVAL` (60s by default), which is why `checked_at` is
+returned alongside — poll faster than that and you will read the same answer.
 
 ---
 

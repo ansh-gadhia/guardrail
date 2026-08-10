@@ -46,7 +46,11 @@ func (a *DeviceLookupAdapter) Endpoint(ctx context.Context, s access.Scope, devi
 	return access.Endpoint{
 		Protocol: proto, BaseURL: d.BaseURL(), Host: d.Host, Port: d.Port,
 		VerifyTLS: d.VerifyTLS, CustomHeaders: d.CustomHeaders,
+		Name: d.Name, DeviceType: d.DeviceType,
 		AllowUnmanaged: d.AllowUnmanaged, RecordSessions: d.RecordSessions,
+		// Resolved here rather than in the gateway: what a device captures is a
+		// policy question about the device, and the gateway's job is to obey it.
+		RecordingKinds: d.EffectiveRecordingKinds(),
 		// A recorded web device still isolates even if its stored mode says
 		// otherwise: a row that predates delivery_mode, or one written by something
 		// that skipped the CHECK, must never be served by the proxy while its policy

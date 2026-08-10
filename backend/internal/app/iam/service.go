@@ -61,6 +61,10 @@ type Service struct {
 	ldap     iam.PasswordAuthenticator
 	fedOrgID iam.ID
 
+	// apiTokens is optional: without it, machine tokens are simply unavailable
+	// and every caller authenticates as a person.
+	apiTokens iam.APITokenRepository
+
 	// decoyHash is verified against for unknown users to blunt user-enumeration
 	// timing side channels. Computed once at construction.
 	decoyHash string
@@ -92,6 +96,9 @@ type Deps struct {
 	OIDC            iam.OIDCAuthenticator
 	LDAP            iam.PasswordAuthenticator
 	FederationOrgID iam.ID
+
+	// Optional machine-token wiring. Leave nil to disable API tokens entirely.
+	APITokens iam.APITokenRepository
 }
 
 // NewService constructs the IAM service, filling in a system clock if absent.
@@ -110,6 +117,7 @@ func NewService(d Deps) *Service {
 		throttle: d.Throttle, clock: clock, cfg: d.Config,
 		mfa: d.MFA, totp: d.TOTP, cipher: d.Cipher, mfaChal: d.MFAChal, mfaIssuer: issuer,
 		oidc: d.OIDC, ldap: d.LDAP, fedOrgID: d.FederationOrgID,
+		apiTokens: d.APITokens,
 	}
 	// Precompute a decoy hash so unknown-user logins still perform a real verify.
 	if h, err := d.Hasher.Hash("guardrail-decoy-" + iam.NewID().String()); err == nil {

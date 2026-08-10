@@ -102,6 +102,78 @@ func RecordingImpossible(scheme, mode string, record bool) bool {
 	return record && IsWebScheme(scheme) && mode != DeliveryIsolated
 }
 
+// Recording kinds: what a recorded session captures. These are the same strings
+// the recording_artifacts.kind column stores, because a device's policy and the
+// evidence it produces should not need a translation table between them.
+const (
+	// RecordTranscript is the terminal's output with millisecond offsets. Small,
+	// searchable, and exact about what the device printed.
+	RecordTranscript = "transcript"
+	// RecordVideo is screencast frames — the session as the operator saw it.
+	RecordVideo = "video"
+	// RecordDesktop is an RDP/VNC session as a Guacamole protocol dump.
+	RecordDesktop = "desktop"
+)
+
+// recordingKindsByScheme is what each protocol can actually capture.
+//
+// A terminal offers a genuine choice. A desktop does not: guacd writes one dump
+// and there is nothing else to take. A web device is recorded by the isolated
+// browser, which produces frames and no text.
+var recordingKindsByScheme = map[string][]string{
+	"ssh":    {RecordTranscript, RecordVideo},
+	"telnet": {RecordTranscript, RecordVideo},
+	"rdp":    {RecordDesktop},
+	"vnc":    {RecordDesktop},
+	"https":  {RecordVideo},
+	"http":   {RecordVideo},
+}
+
+// SupportedRecordingKinds returns the capture kinds a scheme can produce, in a
+// stable order. The console offers exactly these, and the API accepts no others:
+// a device must never store a policy promising evidence its gateway cannot take.
+func SupportedRecordingKinds(scheme string) []string {
+	return append([]string(nil), recordingKindsByScheme[scheme]...)
+}
+
+// DefaultRecordingKinds is what a newly recorded device captures when the caller
+// says "record this" without saying how. It is the single capture each protocol
+// took before the choice existed, so defaults never change behaviour silently.
+func DefaultRecordingKinds(scheme string) []string {
+	switch scheme {
+	case "ssh", "telnet":
+		return []string{RecordTranscript}
+	case "rdp", "vnc":
+		return []string{RecordDesktop}
+	case "https", "http":
+		return []string{RecordVideo}
+	}
+	return nil
+}
+
+// NormalizeRecordingKinds filters a requested set down to what the scheme
+// supports, removing duplicates and returning it in the canonical order.
+//
+// Filtering rather than erroring is deliberate for unsupported kinds: the set is
+// derived from a protocol, and changing a device from ssh to https must not fail
+// on a transcript setting the operator cannot even see any more. An empty result
+// from a non-empty request means every kind was inapplicable, which the caller
+// treats as "fall back to the default" rather than "record nothing".
+func NormalizeRecordingKinds(scheme string, kinds []string) []string {
+	allowed := recordingKindsByScheme[scheme]
+	seen := make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		seen[k] = true
+	}
+	out := make([]string, 0, len(allowed))
+	for _, a := range allowed {
+		if seen[a] {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // ErrForbidden is returned when the actor may edit a device but not make this
 // particular change — currently, changing the recording policy of a device they
 // did not register.
@@ -141,6 +213,11 @@ type Device struct {
 	// / the storage CHECK refuse the impossible combination rather than letting a
 	// device claim to be recorded while nothing is captured.
 	RecordSessions bool
+	// RecordingKinds is what a recorded session captures — see the Record*
+	// constants. Empty means "whatever this protocol captured before the choice
+	// existed", which EffectiveRecordingKinds resolves; it does NOT mean nothing,
+	// because that is what RecordSessions=false is for.
+	RecordingKinds []string
 	// DeliveryMode is how a session to this device reaches the operator:
 	// DeliveryProxy re-serves the device's own HTML under a session prefix, and
 	// DeliveryIsolated runs the device in a browser on the server and sends
@@ -178,6 +255,32 @@ func (d *Device) CanSetRecording(userID uuid.UUID, isSuperAdmin bool) bool {
 		return true
 	}
 	return d.CreatedBy != nil && *d.CreatedBy == userID
+}
+
+// EffectiveRecordingKinds is what this device's sessions actually capture.
+//
+// Nothing when recording is off. Otherwise the stored set, narrowed to what the
+// protocol supports — and if that leaves nothing (a device predating the column,
+// or one whose scheme changed under a stale setting), the protocol's default,
+// so a device whose policy says "recorded" always captures something.
+func (d *Device) EffectiveRecordingKinds() []string {
+	if !d.RecordSessions {
+		return nil
+	}
+	if k := NormalizeRecordingKinds(d.Scheme, d.RecordingKinds); len(k) > 0 {
+		return k
+	}
+	return DefaultRecordingKinds(d.Scheme)
+}
+
+// RecordsKind reports whether sessions to this device capture the given kind.
+func (d *Device) RecordsKind(kind string) bool {
+	for _, k := range d.EffectiveRecordingKinds() {
+		if k == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // HealthStatus is a device's reachability as of the last probe.

@@ -11,14 +11,21 @@ import (
 const (
 	defaultLimit = 50
 	maxLimit     = 200
+	// maxExportLimit bounds a paged listing that is being drained for export.
+	// Higher than maxLimit because the caller is deliberately asking for the
+	// whole filtered set, and bounded anyway because "whole" is not a promise a
+	// tenant with years of history should be able to extract in one response.
+	maxExportLimit = 5000
 )
 
-func normalizeLimit(l int) int {
+func normalizeLimit(l int) int { return normalizeLimitUpTo(l, maxLimit) }
+
+func normalizeLimitUpTo(l, max int) int {
 	switch {
 	case l <= 0:
 		return defaultLimit
-	case l > maxLimit:
-		return maxLimit
+	case l > max:
+		return max
 	default:
 		return l
 	}

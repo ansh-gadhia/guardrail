@@ -63,16 +63,56 @@ func (m SessionMux) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID
 // WebSocket (kept under the session prefix so the session cookie is sent).
 const wsSentinel = "__ws__"
 
+// TunnelServer serves a session at the root of its own hostname. Only the HTTP
+// reverse-proxy gateway implements it: a desktop or terminal session has no
+// device-authored web origin to stand in for, so there is nothing to tunnel.
+type TunnelServer interface {
+	// ServeTunnel proxies one request whose Host names this session. false => the
+	// session is unknown, expired, or the token does not match.
+	ServeTunnel(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token string) bool
+	// TunnelCookieToken returns the session's browser-binding token, and whether
+	// the session exists with a live tunnel.
+	TunnelCookieToken(sid uuid.UUID) (string, bool)
+}
+
+// TunnelConfig carries the whole-host delivery wiring. A zero value (empty
+// Domain) disables the tunnel and leaves every session on /proxy/<sid>/.
+type TunnelConfig struct {
+	// Domain is the base domain for per-session hostnames, e.g.
+	// "tunnel.guardrail.lan". Empty disables whole-host delivery.
+	Domain string
+	// Gateway is the HTTP proxy gateway that owns the tunnelled sessions.
+	Gateway TunnelServer
+	// GrantKey signs the short-lived one-time grant tokens that bootstrap a
+	// tunnel cookie onto the session's own origin. Derived from the JWT signing
+	// key; never the vault KEK.
+	GrantKey []byte
+}
+
 // AccessHandler exposes the connect/session routes and the proxy endpoint.
 type AccessHandler struct {
 	svc     *appaccess.Service
 	gateway SessionServer
 	secure  bool
+
+	tunnel       TunnelServer
+	tunnelDomain string
+	grantKey     []byte
 }
 
-// NewAccessHandler constructs an AccessHandler.
-func NewAccessHandler(svc *appaccess.Service, gw SessionServer, secure bool) *AccessHandler {
-	return &AccessHandler{svc: svc, gateway: gw, secure: secure}
+// NewAccessHandler constructs an AccessHandler. tun may be a zero TunnelConfig,
+// in which case whole-host delivery is off and sessions are served exactly as
+// they were before it existed.
+func NewAccessHandler(svc *appaccess.Service, gw SessionServer, secure bool, tun TunnelConfig) *AccessHandler {
+	h := &AccessHandler{svc: svc, gateway: gw, secure: secure}
+	// Both halves are required. A domain with no gateway would dispatch requests
+	// to a nil interface; a gateway with no domain has no host to match on.
+	if tun.Domain != "" && tun.Gateway != nil {
+		h.tunnel = tun.Gateway
+		h.tunnelDomain = strings.ToLower(strings.Trim(tun.Domain, "."))
+		h.grantKey = tun.GrantKey
+	}
+	return h
 }
 
 // Register mounts the connect + session API routes (auth + RBAC protected).
@@ -86,6 +126,9 @@ func (h *AccessHandler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 	{
 		s.GET("", middleware.RequirePermission("session:read"), h.list)
 		s.GET("/active", middleware.RequirePermission("session:read"), h.active)
+		// Counters for the console's header. Separate from the listing because they
+		// describe every session in the tenant, not the page being read.
+		s.GET("/stats", middleware.RequirePermission("session:read"), h.stats)
 		s.GET("/:id", middleware.RequirePermission("session:read"), h.get)
 		// Session playback timeline is a recording read, not just a session read.
 		s.GET("/:id/events", middleware.RequirePermission("recording:read"), h.events)
@@ -94,9 +137,15 @@ func (h *AccessHandler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 		s.GET("/:id/recording/manifest", middleware.RequirePermission("recording:read"), h.recordingManifest)
 		s.GET("/:id/recording/frames", middleware.RequirePermission("recording:read"), h.recordingFrames)
 		s.GET("/:id/recording/transcript", middleware.RequirePermission("recording:read"), h.recordingTranscript)
+		// The transcript's own index. Separate from /recording/manifest because a
+		// terminal device may capture both, and each player needs its own.
+		s.GET("/:id/recording/transcript/manifest", middleware.RequirePermission("recording:read"), h.recordingTranscriptManifest)
 		s.GET("/:id/recording/desktop", middleware.RequirePermission("recording:read"), h.recordingDesktop)
 		s.DELETE("/:id/recording", middleware.RequirePermission("recording:delete"), h.recordingDelete)
 		s.POST("/:id/terminate", middleware.RequirePermission("session:terminate"), h.terminate)
+		// Mints a fresh one-time grant so the console can (re)open the session's
+		// own tab. Reading it is a session read; it exposes no device credential.
+		s.GET("/:id/tunnel", middleware.RequirePermission("session:read"), h.tunnelURL)
 	}
 }
 
@@ -150,12 +199,19 @@ func (h *AccessHandler) writeConnected(c *gin.Context, res *appaccess.ConnectRes
 	}
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(proxyCookieName(sid), res.ProxyToken, maxAge, "/proxy/"+sid, "", h.secure, true)
-	c.JSON(http.StatusOK, gin.H{
+	body := gin.H{
 		"session_id":    sid,
 		"status":        string(res.Session.Status),
 		"proxy_url":     res.ProxyPath,
 		"granted_until": res.GrantedUntil.UTC().Format("2006-01-02T15:04:05Z07:00"),
-	})
+	}
+	// proxy_url is returned either way. When a tunnel is available the console
+	// prefers it, but the path transport stays live and reachable, so a deployment
+	// whose wildcard DNS is not in place yet still has a working session.
+	if res.TunnelHost != "" && h.TunnelEnabled() {
+		body["tunnel_url"] = h.tunnelURLFor(res.Session.ID)
+	}
+	c.JSON(http.StatusOK, body)
 }
 
 func (h *AccessHandler) proxy(c *gin.Context) {
@@ -189,16 +245,45 @@ func (h *AccessHandler) proxy(c *gin.Context) {
 
 func (h *AccessHandler) list(c *gin.Context) {
 	actor, _ := middleware.ClaimsFrom(c)
-	f := domaccess.SessionFilter{Status: domaccess.Status(c.Query("status")), Limit: queryLimit(c)}
+	f := domaccess.SessionFilter{
+		Status:   domaccess.Status(c.Query("status")),
+		Limit:    queryLimit(c),
+		Offset:   queryOffset(c),
+		Search:   c.Query("q"),
+		SortDesc: c.Query("dir") != "asc",
+	}
+	// Only a name the repository knows survives; anything else leaves SortBy empty
+	// and the listing falls back to newest-first.
+	if sort := c.Query("sort"); sort != "" {
+		if _, ok := domaccess.SessionSortColumns[sort]; ok {
+			f.SortBy = sort
+		}
+	}
 	if did, err := uuid.Parse(c.Query("device_id")); err == nil {
 		f.DeviceID = &did
 	}
-	sessions, err := h.svc.List(c.Request.Context(), actor, f)
+	sessions, total, err := h.svc.ListView(c.Request.Context(), actor, f)
 	if err != nil {
 		failAccess(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": sessionsDTO(sessions)})
+	c.JSON(http.StatusOK, gin.H{
+		"data": sessionViewsDTO(sessions), "total": total,
+		"limit": len(sessions), "offset": f.Offset,
+	})
+}
+
+// stats returns the live session counters.
+func (h *AccessHandler) stats(c *gin.Context) {
+	actor, _ := middleware.ClaimsFrom(c)
+	st, err := h.svc.Stats(c.Request.Context(), actor)
+	if err != nil {
+		failAccess(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"total": st.Total, "active": st.Active, "ended": st.Ended, "devices": st.Devices,
+	})
 }
 
 func (h *AccessHandler) active(c *gin.Context) {
@@ -316,6 +401,13 @@ func (h *AccessHandler) recordingDesktop(c *gin.Context) {
 	h.serveArtifact(c, domaccess.ArtifactDesktop)
 }
 
+// recordingTranscriptManifest serves the transcript's chunk index. The service
+// falls back to the old shared manifest kind for recordings that predate the
+// split, so transcripts captured before this release still replay.
+func (h *AccessHandler) recordingTranscriptManifest(c *gin.Context) {
+	h.serveArtifact(c, domaccess.ArtifactTranscriptIndex)
+}
+
 func (h *AccessHandler) serveArtifact(c *gin.Context, kind string) {
 	actor, _ := middleware.ClaimsFrom(c)
 	id, err := uuid.Parse(c.Param("id"))
@@ -369,6 +461,10 @@ func (h *AccessHandler) terminate(c *gin.Context) {
 func sessionDTO(s *domaccess.Session) gin.H {
 	dto := gin.H{
 		"id": s.ID.String(), "device_id": s.DeviceID.String(), "user_id": s.UserID.String(),
+		// The device as it was when this session ran, not as it is now. Present on
+		// every session read, including one whose device has since been deleted —
+		// that is the entire point of storing it.
+		"device_name": s.DeviceName, "device_type": s.DeviceType, "device_address": s.DeviceAddress,
 		"protocol": string(s.Protocol), "status": string(s.Status), "gateway_node": s.GatewayNode,
 		"client_ip": s.ClientIP, "user_agent": s.UserAgent,
 		"created_at": rfc3339UTC(s.CreatedAt),
@@ -393,6 +489,22 @@ func sessionDTO(s *domaccess.Session) gin.H {
 		dto["end_reason"] = s.EndReason
 	}
 	return dto
+}
+
+// sessionViewsDTO renders the enriched listing rows. The labels ride along with
+// the row so the console does not have to fetch every user and every device just
+// to put names on a page of sessions — and so a name is right even when the
+// device has since been renamed out from under the id.
+func sessionViewsDTO(views []domaccess.SessionView) []gin.H {
+	out := make([]gin.H, 0, len(views))
+	for i := range views {
+		dto := sessionDTO(&views[i].Session)
+		if views[i].UserEmail != "" {
+			dto["user_email"] = views[i].UserEmail
+		}
+		out = append(out, dto)
+	}
+	return out
 }
 
 func sessionsDTO(sessions []domaccess.Session) []gin.H {

@@ -7,6 +7,8 @@ package access
 import (
 	"context"
 	"errors"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -167,10 +169,13 @@ type ReqMeta struct{ IP, UserAgent string }
 // ConnectResult is returned to the caller after a Connect. The session is
 // established immediately and the proxy path/token are ready for use.
 type ConnectResult struct {
-	Session      *access.Session
-	Live         access.LiveSession
-	ProxyPath    string
-	ProxyToken   string
+	Session    *access.Session
+	Live       access.LiveSession
+	ProxyPath  string
+	ProxyToken string
+	// TunnelHost is the per-session hostname for whole-host delivery, or "" when
+	// the tunnel is disabled or this session is not served by the HTTP gateway.
+	TunnelHost   string
 	GrantedUntil time.Time
 }
 
@@ -248,6 +253,11 @@ func (s *Service) Connect(ctx context.Context, actor iam.Claims, deviceID uuid.U
 		ID: uuid.New(), OrganizationID: actor.OrganizationID, UserID: actor.UserID, DeviceID: deviceID,
 		Protocol: ep.Protocol, Status: access.StatusActive,
 		ClientIP: meta.IP, UserAgent: meta.UserAgent,
+		// Snapshot what is being connected to, now. Read back later this is what
+		// the device WAS — renaming or deleting it afterwards cannot rewrite the
+		// record of the session that reached it.
+		DeviceName: ep.Name, DeviceType: ep.DeviceType,
+		DeviceAddress: net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port)),
 	}
 	sess.Watermark = watermarkFor(actor, sess.ID)
 	until := now.Add(s.cfg.DefaultWindow)
@@ -315,7 +325,11 @@ func (s *Service) establish(ctx context.Context, actor iam.Claims, sess *access.
 	if sess.GrantedUntil != nil {
 		until = *sess.GrantedUntil
 	}
-	return &ConnectResult{Session: sess, Live: live, ProxyPath: live.ProxyPath, ProxyToken: live.ProxyToken, GrantedUntil: until}, nil
+	return &ConnectResult{
+		Session: sess, Live: live,
+		ProxyPath: live.ProxyPath, ProxyToken: live.ProxyToken,
+		TunnelHost: live.TunnelHost, GrantedUntil: until,
+	}, nil
 }
 
 // endOnAllGateways tears a session down on every gateway that could be holding
@@ -368,6 +382,32 @@ func (s *Service) Get(ctx context.Context, actor iam.Claims, id uuid.UUID) (*acc
 // List returns sessions matching the filter.
 func (s *Service) List(ctx context.Context, actor iam.Claims, f access.SessionFilter) ([]access.Session, error) {
 	return s.sessions.List(ctx, scopeOf(actor), f)
+}
+
+// ListView returns one page of sessions with display labels, plus the total the
+// filter matches, for the console's session listing.
+//
+// The email predicate and the email in each row are gated on user:read: holding
+// session:read means you may see that a session happened, not that you may put a
+// name to every operator in the tenant.
+func (s *Service) ListView(ctx context.Context, actor iam.Claims, f access.SessionFilter) ([]access.SessionView, int, error) {
+	mayReadUsers := actor.Has("user:read")
+	f.SearchEmail = mayReadUsers
+	views, total, err := s.sessions.ListView(ctx, scopeOf(actor), f)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !mayReadUsers {
+		for i := range views {
+			views[i].UserEmail = ""
+		}
+	}
+	return views, total, nil
+}
+
+// Stats returns the live session counters for the actor's organization.
+func (s *Service) Stats(ctx context.Context, actor iam.Claims) (access.SessionStats, error) {
+	return s.sessions.Stats(ctx, scopeOf(actor))
 }
 
 // ListActive returns the live sessions for the actor's organization.
@@ -436,6 +476,13 @@ func (s *Service) RecordingArtifact(ctx context.Context, actor iam.Claims, sessi
 		return nil, "", access.ErrNotFound
 	}
 	art, err := s.recordings.GetArtifact(ctx, scopeOf(actor), sessionID, kind)
+	// A transcript recorded before ArtifactTranscriptIndex existed filed its index
+	// under ArtifactManifest. Falling back keeps every one of those replayable;
+	// without it, upgrading would quietly break playback of the existing archive,
+	// which for an evidence store is indistinguishable from losing it.
+	if err != nil && kind == access.ArtifactTranscriptIndex && errors.Is(err, access.ErrNotFound) {
+		art, err = s.recordings.GetArtifact(ctx, scopeOf(actor), sessionID, access.ArtifactManifest)
+	}
 	if err != nil {
 		return nil, "", err
 	}
@@ -443,9 +490,10 @@ func (s *Service) RecordingArtifact(ctx context.Context, actor iam.Claims, sessi
 	if err != nil {
 		return nil, "", err
 	}
-	// Audit the viewing, not the byte-range: the manifest fetch is the moment a
-	// person opens a recording, and one event per playback is the useful record.
-	if kind == access.ArtifactManifest {
+	// Audit the viewing, not the byte-range: an index fetch is the moment a person
+	// opens a recording, and one event per playback is the useful record. Either
+	// index counts — a transcript replay is a viewing exactly as a video one is.
+	if kind == access.ArtifactManifest || kind == access.ArtifactTranscriptIndex {
 		s.recordAudit(ctx, actor, "recording.view",
 			&access.Session{ID: sessionID}, meta, audit.ResultSuccess)
 	}

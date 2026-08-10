@@ -186,6 +186,9 @@ func (g *Gateway) dispatch(sess *ssh.Session, stdin io.Writer, s *sshSession, da
 		if s.rec != nil {
 			s.rec.Resize(m.Cols, m.Rows)
 		}
+		if s.mirror != nil {
+			s.mirror.Resize(m.Cols, m.Rows)
+		}
 		return sess.WindowChange(m.Rows, m.Cols)
 	}
 	return nil
@@ -195,6 +198,11 @@ func (g *Gateway) dispatch(sess *ssh.Session, stdin io.Writer, s *sshSession, da
 func (g *Gateway) emit(ctx context.Context, c *websocket.Conn, s *sshSession, b []byte) {
 	if s.rec != nil {
 		s.rec.Write(b)
+	}
+	// Both captures get the same bytes. The mirror never blocks, so the operator's
+	// output is not gated on how a headless renderer is coping.
+	if s.mirror != nil {
+		s.mirror.Write(b)
 	}
 	// Bound the write so a browser that has stopped reading cannot wedge the
 	// reader goroutine and, with it, the device session.

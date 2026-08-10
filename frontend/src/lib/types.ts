@@ -31,6 +31,28 @@ export function isMFAChallenge(r: LoginResult): r is MFAChallenge {
   return (r as MFAChallenge).mfa_required === true;
 }
 
+// RecordingKind is what a recorded session captures. These match the backend's
+// assets.Record* constants and the recording_artifacts.kind column, so a policy
+// and the evidence it produces are named the same thing throughout.
+export type RecordingKind = "transcript" | "video" | "desktop";
+
+// Labels and rationale for each capture, so the console explains the choice
+// rather than showing three bare words.
+export const RECORDING_KIND_INFO: Record<RecordingKind, { label: string; detail: string }> = {
+  transcript: {
+    label: "Transcript",
+    detail: "The text the device printed, with the original timing. Small, searchable, and exact.",
+  },
+  video: {
+    label: "Video",
+    detail: "The session as the operator saw it, replayable frame by frame. Much larger than a transcript.",
+  },
+  desktop: {
+    label: "Desktop replay",
+    detail: "The desktop session as a Guacamole stream, replayed in the console.",
+  },
+};
+
 export interface Device {
   id: string;
   name: string;
@@ -48,8 +70,15 @@ export interface Device {
   has_credential: boolean;
   // Break-glass: allow connecting with no bound credential (no injection).
   allow_unmanaged: boolean;
-  // Whether sessions to this device are screen-recorded.
+  // Whether sessions to this device are recorded at all.
   record_sessions: boolean;
+  // What a recorded session captures, already resolved against the protocol:
+  // "transcript" (terminal output), "video" (screencast frames), "desktop" (a
+  // Guacamole dump). Empty when record_sessions is false.
+  recording_kinds: RecordingKind[];
+  // The kinds this device's protocol could capture. A terminal offers a real
+  // choice; a desktop or a web device has exactly one.
+  supported_recording_kinds: RecordingKind[];
   // How a session to this device is delivered: "proxy" re-serves the device's
   // own UI through GuardRail, "isolated" renders it in a browser on the server
   // and streams pixels. Recording only exists under "isolated".
@@ -222,13 +251,23 @@ export interface ConnectResult {
   status: string; // active
   session_id?: string;
   proxy_url?: string;
+  // Present when the session is delivered on its own hostname
+  // (<session-id>.<tunnel-domain>) rather than under /proxy/<sid>/. It carries a
+  // short-lived one-time grant, so it is not reusable — the session view mints a
+  // fresh one from GET /sessions/:id/tunnel each time it opens the tab.
+  tunnel_url?: string;
   granted_until?: string;
 }
 
 export interface Session {
   id: string;
   device_id: string;
+  // The device as it was when this session ran, snapshotted at connect. Present
+  // even when the device has since been deleted — that is why it is stored on the
+  // session rather than looked up from the device.
   device_name?: string;
+  device_type?: string;
+  device_address?: string;
   user_id?: string;
   user_email?: string;
   status: string;
@@ -242,6 +281,25 @@ export interface Session {
   created_at?: string;
   granted_until?: string;
   end_reason?: string;
+}
+
+// Paged is a listing that reports how many rows exist beyond the page returned.
+// `total` is the count for the whole filter, so a pager and a counter built from
+// it describe the table rather than the slab that happened to be fetched.
+export interface Paged<T> {
+  data: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// SessionStats are the live counters behind the Recordings header
+// (GET /sessions/stats), computed across every session in the tenant.
+export interface SessionStats {
+  total: number;
+  active: number;
+  ended: number;
+  devices: number;
 }
 
 // SessionEvent is one entry in a session's recorded activity timeline

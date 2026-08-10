@@ -140,6 +140,12 @@ export const IconMaximize = (p: IconProps) => (
   <svg {...base(p)}><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3" /></svg>
 );
 
+// Box with an arrow leaving it — "opens in its own tab". Used for a session
+// delivered on its own hostname, which cannot be framed by the console.
+export const IconExternal = (p: IconProps) => (
+  <svg {...base(p)}><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><path d="M15 3h6v6M10 14 21 3" /></svg>
+);
+
 export const IconMinimize = (p: IconProps) => (
   <svg {...base(p)}><path d="M8 3v3a2 2 0 0 1-2 2H3M16 3v3a2 2 0 0 0 2 2h3M16 21v-3a2 2 0 0 1 2-2h3M8 21v-3a2 2 0 0 0-2-2H3" /></svg>
 );

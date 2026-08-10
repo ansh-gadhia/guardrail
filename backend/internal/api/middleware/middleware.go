@@ -57,7 +57,17 @@ const apiCSP = "default-src 'none'; frame-ancestors 'none'"
 // is chosen per route class: strict for the JSON API, a same-origin policy for
 // the served SPA, and no GuardRail-imposed CSP/framing rules for the device proxy
 // (whose upstream UI ships and governs its own content).
-func SecurityHeaders() gin.HandlerFunc {
+//
+// tunnelDomain is the base domain for whole-host session delivery, or "" when it
+// is disabled. It has to be known here because that route class cannot be
+// identified by path: on a tunnel host the path is the DEVICE's path ("/ng/…"),
+// which is indistinguishable from a console route. Without this, a device page
+// would be served the console's CSP and X-Frame-Options and break.
+func SecurityHeaders(tunnelDomain string) gin.HandlerFunc {
+	tunnelSuffix := ""
+	if d := strings.ToLower(strings.Trim(tunnelDomain, ".")); d != "" {
+		tunnelSuffix = "." + d
+	}
 	return func(c *gin.Context) {
 		h := c.Writer.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
@@ -72,6 +82,15 @@ func SecurityHeaders() gin.HandlerFunc {
 
 		p := c.Request.URL.Path
 		switch {
+		case tunnelSuffix != "" && isTunnelHost(c.Request.Host, tunnelSuffix):
+			// Whole-host device delivery. Same rule as the /proxy class below, and
+			// for the same reasons: the device ships its own CSP and framing policy,
+			// and the referrer has to survive so appliances that CSRF-check it
+			// against themselves still work. "same-origin" is safe here precisely
+			// because the session owns this entire origin — the referrer cannot
+			// reach the console, and the proxy rewrites it to the device's origin
+			// before forwarding anyway.
+			h.Set("Referrer-Policy", "same-origin")
 		case p == "/proxy" || strings.HasPrefix(p, "/proxy/"):
 			// Brokered device UI: let the upstream's own security headers stand.
 			// Imposing default-src 'none' or X-Frame-Options here would break the
@@ -105,6 +124,15 @@ func SecurityHeaders() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// isTunnelHost reports whether the request's Host is a per-session tunnel host
+// under suffix (which includes the leading dot). Any port is ignored.
+func isTunnelHost(host, suffix string) bool {
+	if i := strings.LastIndexByte(host, ':'); i >= 0 && !strings.HasSuffix(host, "]") {
+		host = host[:i]
+	}
+	return strings.HasSuffix(strings.ToLower(strings.TrimSuffix(host, ".")), suffix)
 }
 
 // isAPIPath reports whether p is served by the JSON API or an operational probe
