@@ -33,7 +33,11 @@ VERSION="${GUARDRAIL_VERSION:-1.1.2}"
 # main is the default; set it to a tag or a commit to install a fixed point.
 REF="${GUARDRAIL_REF:-main}"
 INSTALL_DIR="${GUARDRAIL_DIR:-/opt/guardrail}"
-PROJECT="guardrail"
+# Compose project name. Everything — containers, network and NAMED VOLUMES — is
+# scoped by it, so overriding it gives a completely separate instance on the same
+# host. That is the supported way to try a build alongside a live deployment:
+#   GUARDRAIL_PROJECT=guardrail-test GUARDRAIL_DIR=/opt/guardrail-test ./install.sh
+PROJECT="${GUARDRAIL_PROJECT:-guardrail}"
 ENV_FILE="$INSTALL_DIR/.env"
 COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
 
@@ -210,6 +214,17 @@ detect() {
     fi
 }
 
+# data_volumes lists this project's persistent volumes that already exist.
+#
+# These outlive `compose down` and are scoped by project name, so a stack started
+# from a git checkout in ~/guardrail owns exactly the same volumes an install
+# under /opt/guardrail would adopt.
+data_volumes() {
+    have docker || return 0
+    docker volume ls --format '{{.Name}}' 2>/dev/null |
+        grep -E "^${PROJECT}_(pgdata|recordings|desktop-recordings|redisdata)$" || true
+}
+
 # ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------
@@ -337,15 +352,18 @@ ask_port() { # ask_port VAR "Prompt" default
     while true; do
         ask __ans "$__prompt" "$__default"
         if [[ "$__ans" =~ ^[0-9]+$ ]] && [ "$__ans" -ge 1 ] && [ "$__ans" -le 65535 ]; then
-            # A port already in use by something else fails at `up` with an error
-            # nobody reads; catching it here costs one line and saves the call.
+            # A port already in use fails at `up` with an error nobody reads.
+            #
+            # "Something is already installed" is NOT proof the port is ours: a
+            # second, isolated instance under a different project collides with
+            # the first exactly here. So ask instead of assuming — an operator
+            # re-running the installer against their own stack answers yes, and
+            # anyone else finds out now rather than after the config is written.
             if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${__ans}\$"; then
-                if [ "${DETECTED}" = "1" ]; then
-                    # Our own stack may well be holding it right now.
-                    printf -v "$__var" '%s' "$__ans"; return 0
-                fi
                 warn "port ${__ans} is already in use on this server"
-                continue
+                local __reuse=""
+                ask_yn __reuse "Use it anyway (only if it is this GuardRail holding it)?" n
+                [ "$__reuse" = "yes" ] || continue
             fi
             printf -v "$__var" '%s' "$__ans"; return 0
         fi
@@ -565,6 +583,33 @@ do_install() {
         warn "a configuration already exists at $ENV_FILE"
         ask_yn OVERWRITE "Reinstall and OVERWRITE it? Existing data volumes are kept" n
         [ "$OVERWRITE" = "yes" ] || { info "left alone"; return 0; }
+    fi
+
+    # Existing data + no config we wrote = a deployment that was set up some other
+    # way (a git checkout, an older installer, a restored backup). Installing over
+    # it would generate a NEW GUARDRAIL_MASTER_KEY and hand it a database whose
+    # credentials are encrypted under the OLD one — every vaulted device password
+    # becomes permanently unreadable, and nothing announces it until someone tries
+    # to connect. The Postgres password would not match the initialised volume
+    # either, so the stack would not even start.
+    #
+    # This is the one case where the installer stops rather than asks nicely.
+    local existing
+    [ "${DETECTED}" = "1" ] || true   # detection already reported what is here
+    existing=$(data_volumes)
+    if [ -n "$existing" ] && [ ! -f "$ENV_FILE" ]; then
+        step "Refusing to install over existing data"
+        err "these volumes already hold a GuardRail deployment under project '${PROJECT}':"
+        printf '%s\n' "$existing" | sed 's/^/      /' >&2
+        echo >&2
+        err "a fresh install mints a new vault master key, which CANNOT decrypt the"
+        err "credentials already in that database. Installing here would destroy them."
+        echo >&2
+        info "to upgrade that deployment instead, choose ${B}Update${R}"
+        info "to try this build alongside it, run a separate instance:"
+        printf '\n      %s\n\n' "GUARDRAIL_PROJECT=guardrail-test GUARDRAIL_DIR=/opt/guardrail-test \\"
+        printf '      %s\n\n' "  sudo -E bash $0     # then pick ports other than 443/80"
+        return 1
     fi
 
     step "Configuration"
