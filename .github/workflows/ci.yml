@@ -134,8 +134,14 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+      # Tag is v-prefixed. Pinned as `0.24.0` this resolved to nothing, and
+      # GitHub resolves every action in a job BEFORE running any step — so the
+      # whole security job died in "Prepare all required actions" after two
+      # seconds, having scanned nothing. A security gate that cannot start is
+      # worse than no gate: the check is red for a reason unrelated to the code,
+      # so it gets ignored.
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scanners: vuln,secret,misconfig
