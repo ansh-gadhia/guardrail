@@ -1,0 +1,50 @@
+# gitleaks configuration.
+#
+# The default ruleset is kept in full — this only carves out three things it
+# cannot know about, each named explicitly rather than by a blanket path rule.
+# Nothing here weakens detection of a real credential: every high-confidence
+# rule (AWS keys, GitHub tokens, private key blocks, and the rest) still applies
+# everywhere, including test files.
+
+title = "GuardRail"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Third-party bundles and named test fixtures"
+
+# Vendored third-party code. Neither of these is ours to edit, and both are the
+# kind of thing entropy heuristics trip over: `xterm.js` is a single minified
+# line where `t.FourKeyMap=void 0` scores as a high-entropy token, and
+# backend/vendor holds the entire Go dependency tree, test data and all.
+#
+# Excluded because a finding in them is never actionable — we cannot fix a
+# secret in someone else's release artefact by editing our copy, and the answer
+# to a real one would be to drop the dependency, which a scanner reporting it on
+# every push does not help with.
+#
+# The xterm pattern matches any gateway's `web/` directory, not just the current
+# one: the file has already moved once (sshgw/web -> term/web when the terminal
+# console was factored out), and a full-history scan still reads it at the old
+# path. A rule pinned to today's layout goes stale the next time something moves.
+paths = [
+    '''backend/vendor/''',
+    '''backend/internal/infra/[^/]+/web/''',
+]
+
+# Two password fixtures used across the IAM unit tests.
+#
+# Listed as exact literals, not as a `_test.go` path rule. That distinction is
+# the point: a real AWS key or GitHub token committed in a test still fails the
+# build, because only these two specific strings are exempt.
+#
+# They look like secrets because they have to. ValidatePassword rejects anything
+# under twelve characters or built around a common word (see
+# domain/iam/password.go), so a fixture spelled "test-password" fails the very
+# policy the tests exist to exercise. The strings are random, were never used
+# anywhere, and appear only in assertions about login and first-login flows.
+regexes = [
+    '''Kx7-mQ2vRn9t''',
+    '''Zt4-wLp8Bq3h''',
+]
