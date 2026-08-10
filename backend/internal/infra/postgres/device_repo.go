@@ -59,6 +59,14 @@ func scanDevice(row pgx.Row) (*assets.Device, error) {
 	return &d, nil
 }
 
+// An unset delivery mode means "not applicable / no isolation", which is what
+// the column's own DEFAULT says — but an explicit empty string overrides a
+// default, so it reaches the CHECK and the insert fails. Substituting here keeps
+// a Device built without the field (any direct repository caller, and every
+// integration test) from dying on a constraint instead of getting the sane
+// value. The service layer settles this properly via deliveryOrDefault; this is
+// the backstop for everything that does not go through it.
+//
 // Create inserts a device.
 func (r *DeviceRepo) Create(ctx context.Context, s assets.Scope, d *assets.Device) error {
 	headers := marshalHeaders(d.CustomHeaders)
@@ -69,7 +77,8 @@ func (r *DeviceRepo) Create(ctx context.Context, s assets.Scope, d *assets.Devic
 			INSERT INTO devices (id, organization_id, name, description, vendor, device_type,
 				host, port, scheme, verify_tls, custom_headers, tags, status, allow_unmanaged,
 				record_sessions, recording_kinds, delivery_mode, idle_timeout_minutes, created_by)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+				COALESCE(NULLIF($17,''), 'proxy'), $18, $19)`,
 			d.ID, d.OrganizationID, d.Name, d.Description, d.Vendor, d.DeviceType,
 			d.Host, d.Port, d.Scheme, d.VerifyTLS, headers, tags, d.Status, d.AllowUnmanaged,
 			d.RecordSessions, kinds, d.DeliveryMode, d.IdleTimeoutMinutes, d.CreatedBy)
@@ -86,8 +95,8 @@ func (r *DeviceRepo) Update(ctx context.Context, s assets.Scope, d *assets.Devic
 		ct, err := tx.Exec(ctx, `
 			UPDATE devices SET name=$2, description=$3, vendor=$4, device_type=$5, host=$6,
 				port=$7, scheme=$8, verify_tls=$9, custom_headers=$10, tags=$11, status=$12,
-				allow_unmanaged=$13, record_sessions=$14, recording_kinds=$15, delivery_mode=$16,
-				idle_timeout_minutes=$17
+				allow_unmanaged=$13, record_sessions=$14, recording_kinds=$15,
+				delivery_mode=COALESCE(NULLIF($16,''), 'proxy'), idle_timeout_minutes=$17
 			WHERE id=$1 AND deleted_at IS NULL`,
 			d.ID, d.Name, d.Description, d.Vendor, d.DeviceType, d.Host, d.Port, d.Scheme,
 			d.VerifyTLS, headers, tags, d.Status, d.AllowUnmanaged, d.RecordSessions, kinds,

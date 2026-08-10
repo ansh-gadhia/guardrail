@@ -175,7 +175,22 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 	// The viewer closing is not the session ending: the operator may reconnect,
 	// and the broker owns the session's lifecycle. Only tear guacd down when the
 	// connection itself is gone, which the read loop reports by returning.
-	if err := s.conn.SetReadDeadline(time.Now()); err != nil {
+	//
+	// Both goroutines above read from s.conn.r, so NOTHING here may touch it until
+	// the second one has actually stopped. Setting the deadline is what unblocks a
+	// read parked in ReadInstruction; the second <-done is what makes this
+	// goroutine the reader's only user again.
+	//
+	// Waiting for just one was a data race, and worse than a race. The common
+	// case — the viewer disconnects, so the browser->guacd goroutine returns
+	// first — left the guacd->browser goroutine still inside ReadInstruction
+	// while the Peek below ran on the same bufio.Reader. Two readers interleaving
+	// on one buffer can split a guacamole instruction, and half an instruction is
+	// exactly what makes the next viewer's tunnel close with "Incomplete
+	// instruction": the failure this framing was written to prevent.
+	deadlineErr := s.conn.SetReadDeadline(time.Now())
+	<-done
+	if deadlineErr != nil {
 		return true
 	}
 	// Peek, not Read: Read CONSUMES. If guacd had a byte waiting — which is likely,
