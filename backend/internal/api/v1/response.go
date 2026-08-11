@@ -43,6 +43,13 @@ func fail(c *gin.Context, err error) {
 		problem(c, http.StatusUnauthorized, "Session Expired", "please sign in again")
 	case errors.Is(err, iam.ErrPermissionDenied):
 		problem(c, http.StatusForbidden, "Forbidden", "permission denied")
+	// Named separately from ErrPermissionDenied: the caller is allowed to issue
+	// tokens, they just asked for a permission no token may carry. Saying
+	// "permission denied" would send them to check their own role, which is not
+	// the problem.
+	case errors.Is(err, iam.ErrTokenScope):
+		problem(c, http.StatusUnprocessableEntity, "Scope Not Allowed",
+			"API tokens may only carry read permissions")
 	case errors.Is(err, iam.ErrPasswordPolicy):
 		problem(c, http.StatusUnprocessableEntity, "Weak Password", "password does not meet policy (min 12 chars)")
 	case errors.Is(err, iam.ErrPasswordReuse):

@@ -4,14 +4,25 @@ import { api, problemDetail } from "@/lib/api";
 import type { Enrollment, MFAStatus } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, Spinner, ErrorNote, StatusBadge, Panel, Field, Badge, Tabs, Switch, Modal } from "@/components/ui";
-import { IconShield, IconLock, IconKey } from "@/components/icons";
+import { IconShield, IconLock, IconKey, IconPlug } from "@/components/icons";
 import { PasswordStrength, scorePassword, MIN_PASSWORD_LEN as MIN_LEN } from "@/components/PasswordStrength";
 import { QRCode } from "@/components/QRCode";
+import { ApiTokensTab } from "@/components/ApiTokens";
 import { toast } from "@/components/Toast";
 
 export function SecurityPage() {
   const principal = useAuth((s) => s.principal);
   const [tab, setTab] = useState("password");
+
+  // Issuing a machine credential is super-admin only on the server, so the tab
+  // is hidden for everyone else rather than shown and then failing with a 403.
+  const canIssueTokens = !!principal?.is_super_admin;
+
+  const tabs = [
+    { id: "password", label: "Password", icon: IconLock },
+    { id: "mfa", label: "Two-factor", icon: IconKey },
+    ...(canIssueTokens ? [{ id: "tokens", label: "API tokens", icon: IconPlug }] : []),
+  ];
 
   return (
     <div>
@@ -23,16 +34,11 @@ export function SecurityPage() {
         actions={<Badge tone={principal?.is_super_admin ? "accent" : "neutral"}>{principal?.is_super_admin ? "Super Admin" : principal?.roles.join(", ") || "Member"}</Badge>}
       />
       <div className="mb-5">
-        <Tabs
-          tabs={[
-            { id: "password", label: "Password", icon: IconLock },
-            { id: "mfa", label: "Two-factor", icon: IconKey },
-          ]}
-          active={tab}
-          onChange={setTab}
-        />
+        <Tabs tabs={tabs} active={tab} onChange={setTab} />
       </div>
-      {tab === "password" ? <PasswordTab /> : <MfaTab />}
+      {tab === "password" && <PasswordTab />}
+      {tab === "mfa" && <MfaTab />}
+      {tab === "tokens" && canIssueTokens && <ApiTokensTab />}
     </div>
   );
 }

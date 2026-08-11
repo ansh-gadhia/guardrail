@@ -29,13 +29,21 @@ func scanAPIToken(row pgx.Row) (*iam.APIToken, error) {
 }
 
 // Create stores a new token.
+//
+// created_at is RETURNED rather than left to the caller, because the column is
+// filled by a DEFAULT the caller cannot see. Without this the freshly created
+// token travels back to the console with a zero CreatedAt, which serialises as
+// "0001-01-01T00:00:00Z" and renders as the year 1 — on the create response,
+// which is the one response a person is looking at closely.
 func (r *APITokenRepo) Create(ctx context.Context, s iam.TenantScope, t *iam.APIToken) error {
 	return r.db.withScope(ctx, s, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `
+		err := tx.QueryRow(ctx, `
 			INSERT INTO api_tokens (id, organization_id, name, token_hash, prefix, scopes,
 				created_by, expires_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-			t.ID, t.OrganizationID, t.Name, t.Hash, t.Prefix, t.Scopes, t.CreatedBy, t.ExpiresAt)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			RETURNING created_at`,
+			t.ID, t.OrganizationID, t.Name, t.Hash, t.Prefix, t.Scopes, t.CreatedBy, t.ExpiresAt).
+			Scan(&t.CreatedAt)
 		return mapWriteErr(err)
 	})
 }

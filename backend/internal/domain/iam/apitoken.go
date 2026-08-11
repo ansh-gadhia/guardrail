@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -113,9 +114,14 @@ var AllowedTokenScopes = map[string]struct{}{
 // the caller's order. An empty request is an error rather than a token that can
 // read nothing: silently issuing a useless credential wastes somebody's
 // afternoon working out why their dashboard is empty.
+//
+// Both failures wrap a sentinel the delivery layer already maps. They used to be
+// bare errors, which fell through to the default case and answered 500 — so a
+// console asking for a scope that is simply not allowed was told the server had
+// broken, rather than told which scope to drop.
 func ValidateScopes(scopes []string) ([]string, error) {
 	if len(scopes) == 0 {
-		return nil, errors.New("iam: an API token needs at least one scope")
+		return nil, fmt.Errorf("%w: an API token needs at least one scope", ErrInvalidInput)
 	}
 	seen := make(map[string]bool, len(scopes))
 	out := make([]string, 0, len(scopes))
@@ -133,7 +139,7 @@ func ValidateScopes(scopes []string) ([]string, error) {
 		}
 	}
 	if len(out) == 0 {
-		return nil, errors.New("iam: an API token needs at least one scope")
+		return nil, fmt.Errorf("%w: an API token needs at least one scope", ErrInvalidInput)
 	}
 	return out, nil
 }

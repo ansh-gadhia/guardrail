@@ -44,9 +44,9 @@ COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
 # Colours, dropped when stdout is not a terminal so logs stay readable.
 if [ -t 1 ]; then
     R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
-    RED=$'\033[31m'; GRN=$'\033[32m'; YLW=$'\033[33m'; CYN=$'\033[36m'; MAG=$'\033[35m'
+    RED=$'\033[31m'; GRN=$'\033[32m'; YLW=$'\033[33m'; CYN=$'\033[36m'
 else
-    R=""; B=""; D=""; RED=""; GRN=""; YLW=""; CYN=""; MAG=""
+    R=""; B=""; D=""; RED=""; GRN=""; YLW=""; CYN=""
 fi
 
 info()  { printf '%s\n' "${CYN}  ▸${R} $*"; }
@@ -59,25 +59,89 @@ step()  { printf '\n%s\n' "${B}$*${R}"; }
 # ---------------------------------------------------------------------------
 # Banner
 # ---------------------------------------------------------------------------
+#
+# The wordmark is drawn with '#' rather than with block characters directly, and
+# translated at print time. Two reasons, both of which bit the previous version:
+#
+#   * `${#l}` and `${l:i:1}` count BYTES under a C/POSIX locale, and a block
+#     glyph is three bytes. Slicing one apart mid-character prints mojibake and
+#     throws the per-column gradient out of alignment — on exactly the kind of
+#     bare server this script is meant for, where no locale is set.
+#   * A terminal that cannot render U+2588 gets a clean ASCII wordmark instead of
+#     a field of question marks.
+#
+# It also makes a misspelling visible in review. The old art read GUARDAIL: five
+# rows of block glyphs, one missing letter, and nobody spotted it until it had
+# been printed on every install.
+GR_WORDMARK=(
+' #### #   #  ###  ####  ####  ####   ###  ##### #    '
+'#     #   # #   # #   # #   # #   # #   #   #   #    '
+'#  ## #   # ##### ####  #   # ####  #####   #   #    '
+'#   # #   # #   # #  #  #   # #  #  #   #   #   #    '
+' ####  ###  #   # #   # ####  #   # #   # ##### #####'
+)
+
+# True colour, only where the terminal says it has it.
+gr_truecolor() {
+    [ -t 1 ] || return 1
+    case "${COLORTERM:-}" in truecolor | 24bit) return 0 ;; esac
+    return 1
+}
+
 banner() {
-    local lines=(
-'   ██████  ██    ██  █████  ██████  ██████   █████  ██ ██      '
-'  ██       ██    ██ ██   ██ ██   ██ ██   ██ ██   ██ ██ ██      '
-'  ██   ███ ██    ██ ███████ ██████  ██   ██ ███████ ██ ██      '
-'  ██    ██ ██    ██ ██   ██ ██   ██ ██   ██ ██   ██ ██ ██      '
-'   ██████   ██████  ██   ██ ██   ██ ██████  ██   ██ ██ ███████ '
-    )
+    local block='#'
+    case "${LC_ALL:-}${LC_CTYPE:-}${LANG:-}" in
+        *UTF-8* | *utf-8* | *UTF8* | *utf8*) block=$'█' ;;
+    esac
+
     clear 2>/dev/null || true
     printf '\n'
-    # Animated only on a terminal: piped into a log, sleeping just makes the
-    # install look hung.
-    for l in "${lines[@]}"; do
-        printf '%s\n' "${CYN}${B}${l}${R}"
-        [ -t 1 ] && sleep 0.06
+
+    local w=${#GR_WORDMARK[0]} i ch line out
+    # Per-column colour ramp: teal through to indigo, the console's own accent
+    # sweeping left to right. Computed once, reused for all five rows, so the
+    # colour reads as a single vertical curtain rather than five stripes.
+    local -a ramp=()
+    if gr_truecolor; then
+        local r g b
+        for ((i = 0; i < w; i++)); do
+            r=$((45 + (129 - 45) * i / (w - 1)))
+            g=$((212 + (140 - 212) * i / (w - 1)))
+            b=$((191 + (248 - 191) * i / (w - 1)))
+            ramp[i]=$'\033[38;2;'"${r};${g};${b}"'m'
+        done
+    fi
+
+    for line in "${GR_WORDMARK[@]}"; do
+        out=""
+        for ((i = 0; i < ${#line}; i++)); do
+            ch=${line:i:1}
+            if [ "$ch" = " " ]; then
+                out+=" "
+            elif [ ${#ramp[@]} -gt 0 ]; then
+                out+="${ramp[i]}${block}"
+            else
+                out+="${CYN}${B}${block}"
+            fi
+        done
+        printf '   %s%s\n' "$out" "$R"
+        # Animated only on a terminal: piped into a log, sleeping just makes the
+        # install look hung.
+        [ -t 1 ] && sleep 0.05
     done
-    printf '\n'
-    printf '%s\n' "        ${MAG}${B}Privileged Access Management${R}${D} · broker, record, audit${R}"
-    printf '%s\n\n' "        ${D}v${VERSION} · ${REPO}${R}"
+
+    # A hairline the exact width of the wordmark, carrying the tagline. The rule
+    # is the only decoration; the colour ramp is the one indulgence.
+    #
+    # Separators follow the same ASCII/UTF-8 fork as the wordmark. A middot is
+    # multibyte too, so hardcoding one would reintroduce the mojibake the block
+    # character was just spared.
+    local rule="" dash="-" dot="-"
+    if [ "$block" != "#" ]; then dash=$'─' dot=$'·'; fi
+    for ((i = 0; i < w; i++)); do rule+="$dash"; done
+    printf '   %s\n' "${D}${rule}${R}"
+    printf '   %s\n' "${B}Privileged Access Management${R}${D}  ${dot}  broker ${dot} record ${dot} audit${R}"
+    printf '   %s\n\n' "${D}v${VERSION} ${dot} ${REPO}${R}"
     [ -t 1 ] && sleep 0.15
     return 0
 }
@@ -611,16 +675,110 @@ wait_healthy() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# Bootstrap API token
+# ---------------------------------------------------------------------------
+#
+# A fresh install ends with a working machine credential in hand, so a monitoring
+# box can start polling without anyone first having to log in, find the console,
+# and mint one by hand.
+#
+# Read-only, and narrower than the full set the console offers: the estate scopes
+# a status board actually needs, without user:read / role:read / org:read. "What
+# is on the network" and "who works here" are different questions, and an
+# unattended credential in a config file should only be able to answer the first.
+BOOTSTRAP_TOKEN=""
+BOOTSTRAP_TOKEN_NAME="installer-bootstrap"
+BOOTSTRAP_TOKEN_SCOPES='["device:read","session:read","recording:read","group:read","log:read","report:read"]'
+
+# Minimal JSON string escaping, for values we interpolate into a request body.
+# An admin password is free text: one embedded quote or backslash would otherwise
+# produce a malformed body and a login failure nobody could explain.
+json_escape() {
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    printf '%s' "$s"
+}
+
+# json_str KEY CHARCLASS — pull one string value out of a JSON response.
+#
+# Narrow by design rather than a general parser: the class is the exact alphabet
+# the wanted value can contain, so a match cannot run off the end of the field
+# into a neighbouring one. Avoids a hard dependency on jq, which is not installed
+# on the bare servers this script targets.
+json_str() {
+    grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"$2+\"" | head -n1 | sed -E 's/.*:[[:space:]]*"(.*)"$/\1/'
+}
+
+mint_api_token() {
+    BOOTSTRAP_TOKEN=""
+    local base="https://127.0.0.1:${HTTPS_PORT}/api/v1"
+    local login jwt created tries=3
+
+    local body
+    body=$(printf '{"email":"%s","password":"%s"}' \
+        "$(json_escape "$ADMIN_EMAIL")" "$(json_escape "$ADMIN_PASSWORD")")
+
+    # healthz answering means the process is up; the bootstrap admin is created
+    # during start-up and is normally there already, but a slow first migration
+    # can land it a second or two later. Retry rather than race it.
+    while [ "$tries" -gt 0 ]; do
+        login=$(curl -sk --max-time 15 -X POST "$base/auth/login" \
+            -H 'Content-Type: application/json' -d "$body" 2>/dev/null) || true
+        jwt=$(printf '%s' "$login" | json_str access_token '[A-Za-z0-9._-]')
+        [ -n "$jwt" ] && break
+        tries=$((tries - 1))
+        [ "$tries" -gt 0 ] && sleep 2
+    done
+
+    if [ -z "$jwt" ]; then
+        warn "could not sign in as ${ADMIN_EMAIL} to mint an API token"
+        info "mint one from the console instead: Account → API tokens"
+        return 0
+    fi
+
+    created=$(curl -sk --max-time 15 -X POST "$base/api-tokens" \
+        -H "Authorization: Bearer ${jwt}" -H 'Content-Type: application/json' \
+        -d "{\"name\":\"${BOOTSTRAP_TOKEN_NAME}\",\"scopes\":${BOOTSTRAP_TOKEN_SCOPES}}" 2>/dev/null) || true
+    BOOTSTRAP_TOKEN=$(printf '%s' "$created" | json_str token 'grt_[A-Za-z0-9_-]')
+
+    if [ -z "$BOOTSTRAP_TOKEN" ]; then
+        warn "signed in, but could not mint an API token"
+        info "mint one from the console instead: Account → API tokens"
+    fi
+    return 0
+}
+
 summary() {
     local ip; ip=$(host_ip)
+    local url="https://${ip:-127.0.0.1}${HTTPS_PORT:+:$HTTPS_PORT}"
     step "${APP_NAME} is running"
     printf '\n'
-    printf '    %s  %s\n' "${B}Console${R}" "https://${ip:-127.0.0.1}${HTTPS_PORT:+:$HTTPS_PORT}"
+    printf '    %s  %s\n' "${B}Console${R}" "$url"
     printf '    %s    %s\n' "${B}Admin${R}" "${ADMIN_EMAIL:-$(grep -E '^GUARDRAIL_ADMIN_EMAIL=' "$ENV_FILE" | cut -d= -f2-)}"
     printf '    %s   %s\n' "${B}Config${R}" "$ENV_FILE"
     if [ "${DNS_ENABLED:-no}" = "yes" ]; then
         printf '    %s      %s\n' "${B}DNS${R}" "point clients at ${ip} for *.${TUNNEL_DOMAIN}"
     fi
+
+    if [ -n "$BOOTSTRAP_TOKEN" ]; then
+        printf '\n'
+        printf '  %s\n' "${B}API token${R} ${D}(${BOOTSTRAP_TOKEN_NAME} · read-only)${R}"
+        printf '\n'
+        printf '    %s\n' "${GRN}${B}${BOOTSTRAP_TOKEN}${R}"
+        printf '\n'
+        # Said here because it is true and because the alternative — someone
+        # assuming they can scroll back for it next week — ends in a support
+        # question with no answer.
+        printf '  %s\n' "${YLW}Copy it now. Only its hash is stored; this is the only time it is shown.${R}"
+        printf '  %s\n' "${D}It does not expire. Revoke or replace it in the console: Account → API tokens.${R}"
+        printf '\n'
+        printf '  %s\n' "${D}Try it:${R}"
+        printf '    %s\n' "${D}curl -sk ${url}/api/v1/status/devices \\${R}"
+        printf '    %s\n' "${D}     -H \"Authorization: Bearer ${BOOTSTRAP_TOKEN}\"${R}"
+    fi
+
     printf '\n'
     printf '  %s\n' "${D}The certificate is self-signed: your browser will warn once.${R}"
     printf '  %s\n' "${D}Change the admin password after first sign-in (Account → Password).${R}"
@@ -691,6 +849,7 @@ do_install() {
     generate_cert
     start_stack
     wait_healthy
+    mint_api_token
     summary
 }
 

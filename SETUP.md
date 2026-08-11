@@ -342,6 +342,31 @@ event — so polling with one buries the audit trail. Machine integrations use a
 **API token** instead: no login, no expiry unless you set one, one audit event
 when it is issued and one when it is revoked.
 
+**You already have one.** The installer mints a read-only token at the end of a
+fresh install and prints it once, so a monitoring box can start polling without
+anyone signing in first. It is named `installer-bootstrap` and carries
+`device:read`, `session:read`, `recording:read`, `group:read`, `log:read` and
+`report:read` — not `user:read` / `role:read` / `org:read`, because "what is on
+the network" and "who works here" are different questions and an unattended
+credential should only answer the first.
+
+**In the console:** *Account → API tokens* (super admins only) lists every token
+with its prefix, scopes, and when it was last used, and has buttons to issue and
+revoke. That is the easiest route; the API below is for scripting it.
+
+#### Does a token survive a password change or turning on MFA?
+
+Yes. Both. A token is not a session and is not tied to the account that issued
+it: it is verified by hashing the presented value and looking it up, then
+checking only whether it has been revoked or has expired. Changing your password
+signs out your browser sessions and leaves tokens working; enrolling in MFA adds
+a factor to *login*, which a token never performs. Deleting the issuing user
+leaves it working too — `created_by` simply becomes null.
+
+The consequence is worth stating plainly: **rotating your password is not a way
+to cut off a leaked token.** Revoke it, in the console or with `DELETE`, which
+takes effect on its next request.
+
 Issue one as a super admin:
 
 ```bash

@@ -433,3 +433,55 @@ export interface Enrollment {
   secret: string;
   provisioning_uri: string;
 }
+
+/* ---- API tokens -------------------------------------------------------------
+ *
+ * Machine credentials: they authenticate directly, with no login and no refresh,
+ * so a monitoring board polling the status feed does not mint a session and an
+ * audit event every thirty seconds.
+ */
+
+/** A token's metadata. The value itself is never in this shape — the server
+ * stores only a SHA-256 of it and has nothing to return. */
+export interface APIToken {
+  id: string;
+  name: string;
+  /** Leading characters of the value, kept in clear so a person can tell which
+   * row is which when deciding what to revoke. */
+  prefix: string;
+  scopes: string[];
+  revoked: boolean;
+  created_at: string;
+  created_by?: string;
+  expires_at?: string;
+  last_used_at?: string;
+  revoked_at?: string;
+}
+
+/** What POST /api-tokens returns: the metadata plus the one and only look at the
+ * value. Nothing else, ever, carries `token`. */
+export interface NewAPIToken extends APIToken {
+  token: string;
+  warning: string;
+}
+
+/** Scopes a machine token may carry.
+ *
+ * Mirrors iam.AllowedTokenScopes on the server, which is the authority — the
+ * server rejects anything outside it, so a drift here shows up as a failed
+ * create rather than as a token with powers it should not have.
+ *
+ * Reads only, and that is deliberate: access_sessions.user_id is a foreign key
+ * to users, so a token cannot be the actor on a brokered session even if we
+ * wanted it to be. */
+export const TOKEN_SCOPES: { key: string; label: string; blurb: string }[] = [
+  { key: "device:read", label: "Devices", blurb: "Names, addresses, types and online status" },
+  { key: "session:read", label: "Sessions", blurb: "Session history — who connected to what, and when" },
+  { key: "recording:read", label: "Recordings", blurb: "Recorded sessions, transcripts and their metadata" },
+  { key: "group:read", label: "Groups", blurb: "Device and user group membership" },
+  { key: "log:read", label: "Access log", blurb: "Access decisions and their reasons" },
+  { key: "report:read", label: "Reports", blurb: "Aggregates behind the dashboard" },
+  { key: "user:read", label: "Users", blurb: "Accounts, emails and role assignments" },
+  { key: "role:read", label: "Roles", blurb: "Roles and the permissions they carry" },
+  { key: "org:read", label: "Organization", blurb: "Organization name and settings" },
+];
