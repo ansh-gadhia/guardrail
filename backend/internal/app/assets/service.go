@@ -59,6 +59,17 @@ type DeviceInput struct {
 	// activity. A nil pointer leaves it unchanged; 0 disables idle expiry for the
 	// device.
 	IdleTimeoutMinutes *int
+	// CredentialMode is "shared" or "per_user". A nil pointer leaves it
+	// unchanged. Switching to per_user does not migrate the shared credential to
+	// anybody: it stops being resolvable, which is the safe direction — the
+	// alternative would silently hand one person's session the shared admin
+	// login it was just decided they should not use.
+	CredentialMode *string
+	// RequiresApproval gates connecting behind a decision. A nil pointer leaves
+	// it unchanged.
+	RequiresApproval *bool
+	// MinApprovals is how many approvals a gated connect needs. Nil leaves it.
+	MinApprovals *int
 	// GroupIDs, when non-nil, replaces the device's asset-group membership. A nil
 	// pointer leaves membership untouched (so callers that don't manage groups can
 	// omit it); a non-nil empty slice clears all memberships.
@@ -77,6 +88,27 @@ func idleOrDefault(v *int) int {
 		return defaultIdleTimeout
 	}
 	return *v
+}
+
+// credentialModeOrDefault resolves the mode when the caller says nothing.
+func credentialModeOrDefault(m *string) string {
+	if m == nil || *m == "" {
+		return assets.CredentialShared
+	}
+	return *m
+}
+
+// minApprovalsOrDefault clamps the two-person rule into the range the column
+// accepts. A stored zero would gate a device and then require nothing to open
+// it, which is worse than not gating it at all.
+func minApprovalsOrDefault(n *int) int {
+	if n == nil || *n < 1 {
+		return 1
+	}
+	if *n > 5 {
+		return 5
+	}
+	return *n
 }
 
 // ReqMeta carries request metadata for auditing.
@@ -112,7 +144,17 @@ func (s *Service) CreateDevice(ctx context.Context, actor iam.Claims, in DeviceI
 		// otherwise. A default of 0 would mean "never", which is not a posture to
 		// arrive at by saying nothing.
 		IdleTimeoutMinutes: idleOrDefault(in.IdleTimeoutMinutes),
-		CreatedBy:          &owner,
+		// Access policy, settled at registration. All three default to today's
+		// behaviour when the caller says nothing: one shared login, no approval
+		// gate, one approval if the gate is later turned on.
+		CredentialMode:   credentialModeOrDefault(in.CredentialMode),
+		RequiresApproval: in.RequiresApproval != nil && *in.RequiresApproval,
+		MinApprovals:     minApprovalsOrDefault(in.MinApprovals),
+		CreatedBy:        &owner,
+	}
+	if !assets.ValidCredentialMode(d.CredentialMode) {
+		return nil, fmt.Errorf("%w: credential mode %q is not one of shared, per_user",
+			assets.ErrInvalid, d.CredentialMode)
 	}
 	if err := s.devices.Create(ctx, scopeOf(actor), d); err != nil {
 		return nil, err
@@ -160,6 +202,19 @@ func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UU
 	}
 	if in.IdleTimeoutMinutes != nil {
 		d.IdleTimeoutMinutes = *in.IdleTimeoutMinutes
+	}
+	if in.CredentialMode != nil {
+		if !assets.ValidCredentialMode(*in.CredentialMode) {
+			return nil, fmt.Errorf("%w: credential mode %q is not one of shared, per_user",
+				assets.ErrInvalid, *in.CredentialMode)
+		}
+		d.CredentialMode = credentialModeOrDefault(in.CredentialMode)
+	}
+	if in.RequiresApproval != nil {
+		d.RequiresApproval = *in.RequiresApproval
+	}
+	if in.MinApprovals != nil {
+		d.MinApprovals = minApprovalsOrDefault(in.MinApprovals)
 	}
 	scheme, err := schemeOrDefault(in.Scheme)
 	if err != nil {

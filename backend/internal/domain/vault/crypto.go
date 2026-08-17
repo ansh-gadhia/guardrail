@@ -16,6 +16,10 @@ var ErrInjectionMismatch = errors.New("vault: injection method cannot authentica
 // without any secret material to seal.
 var ErrSecretRequired = errors.New("vault: secret is required")
 
+// ErrInvalid is returned when a vault request is malformed — a per-user account
+// that names neither a device nor a group, say.
+var ErrInvalid = errors.New("vault: invalid")
+
 // KeyProvider supplies Key-Encryption-Keys (KEKs). The env-backed provider ships
 // first; KMS / HashiCorp Vault / CyberArk providers implement the same port
 // later without touching callers.

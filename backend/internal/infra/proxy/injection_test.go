@@ -21,7 +21,7 @@ type fixedCreds struct{ cred access.Credential }
 func (f fixedCreds) Resolve(context.Context, *access.Session) (access.Credential, error) {
 	return f.cred, nil
 }
-func (f fixedCreds) HasCredential(context.Context, access.Scope, uuid.UUID) (bool, error) {
+func (f fixedCreds) HasCredential(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
 	return true, nil
 }
 
@@ -71,4 +71,8 @@ func TestEstablishAcceptsHeaderInjections(t *testing.T) {
 			t.Errorf("Establish(%s): %v", inj, err)
 		}
 	}
+}
+
+func (f fixedCreds) CredentialInherited(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
 }

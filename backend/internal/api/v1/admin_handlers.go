@@ -2,6 +2,7 @@ package v1
 
 import (
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -189,6 +190,7 @@ func (h *Handler) listRoles(c *gin.Context) {
 		out = append(out, gin.H{
 			"id": r.ID.String(), "name": r.Name, "description": r.Description,
 			"is_system": r.IsSystem, "permissions": r.Permissions, "device_scope": scope,
+			"approval_level": r.ApprovalLevel,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"data": out})
@@ -299,4 +301,51 @@ func parseIDs(raw []string) ([]iam.ID, error) {
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+// setRoleApprovalLevel changes a role's rank in the approval hierarchy.
+func (h *Handler) setRoleApprovalLevel(c *gin.Context) {
+	actor, _ := middleware.ClaimsFrom(c)
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		badRequest(c, "invalid role id")
+		return
+	}
+	var body struct {
+		Level *int `json:"approval_level" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Level == nil {
+		badRequest(c, "approval_level is required")
+		return
+	}
+	if err := h.svc.SetRoleApprovalLevel(c.Request.Context(), actor, id, *body.Level, metaFrom(c)); err != nil {
+		fail(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// approvalCoverage reports, for each rank held by an active user, how many
+// people could approve a request made at it.
+//
+// The console uses it to refuse to gate a device nobody can be approved onto —
+// a check worth making when the setting is saved rather than at 3am, by
+// somebody whose request can only ever expire.
+func (h *Handler) approvalCoverage(c *gin.Context) {
+	actor, _ := middleware.ClaimsFrom(c)
+	cov, err := h.svc.ApprovalCoverage(c.Request.Context(), actor)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	out := make([]gin.H, 0, len(cov))
+	gaps := 0
+	for level, n := range cov {
+		out = append(out, gin.H{"level": level, "approvers": n})
+		if n == 0 {
+			gaps++
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i]["level"].(int) < out[j]["level"].(int) })
+	c.JSON(http.StatusOK, gin.H{"coverage": out, "gaps": gaps})
 }

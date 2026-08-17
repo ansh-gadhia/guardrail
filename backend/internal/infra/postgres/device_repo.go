@@ -23,7 +23,8 @@ func NewDeviceRepo(db *DB) *DeviceRepo { return &DeviceRepo{db: db} }
 // device_health, which shares no column names but is clearer read this way.
 const deviceCols = `d.id, d.organization_id, d.name, d.description, d.vendor, d.device_type, d.host, d.port,
 	d.scheme, d.verify_tls, d.custom_headers, d.tags, d.status, d.allow_unmanaged,
-	d.record_sessions, d.recording_kinds, d.delivery_mode, d.idle_timeout_minutes, d.created_by, d.created_at, d.updated_at,
+	d.record_sessions, d.recording_kinds, d.delivery_mode, d.idle_timeout_minutes, d.credential_mode,
+	d.requires_approval, d.min_approvals, d.created_by, d.created_at, d.updated_at,
 	h.status, h.checked_at, h.latency_ms, h.consecutive_failures, h.last_error`
 
 // deviceFrom is the shared read source: a device plus its liveness, which is
@@ -39,7 +40,8 @@ func scanDevice(row pgx.Row) (*assets.Device, error) {
 	var hLatency, hFailures *int
 	if err := row.Scan(&d.ID, &d.OrganizationID, &d.Name, &d.Description, &d.Vendor, &d.DeviceType,
 		&d.Host, &d.Port, &d.Scheme, &d.VerifyTLS, &headers, &d.Tags, &d.Status,
-		&d.AllowUnmanaged, &d.RecordSessions, &d.RecordingKinds, &d.DeliveryMode, &d.IdleTimeoutMinutes, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
+		&d.AllowUnmanaged, &d.RecordSessions, &d.RecordingKinds, &d.DeliveryMode, &d.IdleTimeoutMinutes,
+		&d.CredentialMode, &d.RequiresApproval, &d.MinApprovals, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
 		&hStatus, &hCheckedAt, &hLatency, &hFailures, &hLastError); err != nil {
 		return nil, err
 	}
@@ -76,12 +78,15 @@ func (r *DeviceRepo) Create(ctx context.Context, s assets.Scope, d *assets.Devic
 		_, err := tx.Exec(ctx, `
 			INSERT INTO devices (id, organization_id, name, description, vendor, device_type,
 				host, port, scheme, verify_tls, custom_headers, tags, status, allow_unmanaged,
-				record_sessions, recording_kinds, delivery_mode, idle_timeout_minutes, created_by)
+				record_sessions, recording_kinds, delivery_mode, idle_timeout_minutes,
+				credential_mode, requires_approval, min_approvals, created_by)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-				COALESCE(NULLIF($17,''), 'proxy'), $18, $19)`,
+				COALESCE(NULLIF($17,''), 'proxy'), $18,
+				COALESCE(NULLIF($19,''), 'shared'), $20, GREATEST($21, 1), $22)`,
 			d.ID, d.OrganizationID, d.Name, d.Description, d.Vendor, d.DeviceType,
 			d.Host, d.Port, d.Scheme, d.VerifyTLS, headers, tags, d.Status, d.AllowUnmanaged,
-			d.RecordSessions, kinds, d.DeliveryMode, d.IdleTimeoutMinutes, d.CreatedBy)
+			d.RecordSessions, kinds, d.DeliveryMode, d.IdleTimeoutMinutes,
+			d.CredentialMode, d.RequiresApproval, d.MinApprovals, d.CreatedBy)
 		return mapWriteErr(err)
 	})
 }
@@ -96,11 +101,14 @@ func (r *DeviceRepo) Update(ctx context.Context, s assets.Scope, d *assets.Devic
 			UPDATE devices SET name=$2, description=$3, vendor=$4, device_type=$5, host=$6,
 				port=$7, scheme=$8, verify_tls=$9, custom_headers=$10, tags=$11, status=$12,
 				allow_unmanaged=$13, record_sessions=$14, recording_kinds=$15,
-				delivery_mode=COALESCE(NULLIF($16,''), 'proxy'), idle_timeout_minutes=$17
+				delivery_mode=COALESCE(NULLIF($16,''), 'proxy'), idle_timeout_minutes=$17,
+				credential_mode=COALESCE(NULLIF($18,''), 'shared'),
+				requires_approval=$19, min_approvals=GREATEST($20, 1)
 			WHERE id=$1 AND deleted_at IS NULL`,
 			d.ID, d.Name, d.Description, d.Vendor, d.DeviceType, d.Host, d.Port, d.Scheme,
 			d.VerifyTLS, headers, tags, d.Status, d.AllowUnmanaged, d.RecordSessions, kinds,
-			d.DeliveryMode, d.IdleTimeoutMinutes)
+			d.DeliveryMode, d.IdleTimeoutMinutes,
+			d.CredentialMode, d.RequiresApproval, d.MinApprovals)
 		if err != nil {
 			return mapWriteErr(err)
 		}

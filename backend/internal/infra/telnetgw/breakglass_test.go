@@ -28,7 +28,7 @@ type fakeResolver struct {
 func (f fakeResolver) Resolve(context.Context, *access.Session) (access.Credential, error) {
 	return f.cred, f.err
 }
-func (f fakeResolver) HasCredential(context.Context, access.Scope, uuid.UUID) (bool, error) {
+func (f fakeResolver) HasCredential(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
 	return f.err == nil, nil
 }
 
@@ -139,4 +139,8 @@ func TestWrongProtocolIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("an SSH endpoint was accepted by the telnet gateway")
 	}
+}
+
+func (f fakeResolver) CredentialInherited(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
 }

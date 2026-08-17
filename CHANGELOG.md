@@ -11,6 +11,55 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 `GET /api/v1/version`, `GET /healthz`, and in the web UI footer.
 
 ## [Unreleased]
+### Added
+- **Approvals.** A device can require a decision before anybody connects to it.
+  Rank comes from roles (`roles.approval_level`, seeded Super Admin 100 →
+  Organization Admin 50 → Operator 10), and **an approver must outrank the
+  requester strictly** — which is also what makes self-approval and
+  peer-approval impossible without a separate rule. An approver gets *allow
+  once*, *allow all time* and *deny*, and may shorten the window the requester
+  asked for; the granted window then governs the session rather than the org
+  default. Allow-all-time writes a **standing grant** with its own list and
+  revoke path, because access that only accumulates and can never be enumerated
+  is how a privileged-access deployment rots — and revoking one ends any session
+  it is holding open. Optional **two-person rule** per device, counting distinct
+  people in the database. Unanswered requests escalate one rank after 30 minutes
+  and expire after another 30; an approved-but-unused request expires too.
+  **Emergency access** connects immediately, notifies every approver, and lands
+  in a review queue for after-the-fact sign-off — without a deliberate door,
+  people route around approvals by sharing the break-glass credential. New
+  permissions `approval:read`, `approval:decide` and `approval:bypass`; bypass
+  exempts the holder's own connects and says nothing about deciding other
+  people's. New console page **Approvals**, and a device-side **Access policy**
+  panel. Migrations `0027`, `0028`.
+
+  This restores a workflow that `0008_drop_approvals` removed in favour of
+  role-based device entitlement; the README's M6 claim had been false since then.
+
+- **Per-user accounts.** A device can inject each person's own named account on
+  the target (`jsmith-admin`) instead of one shared login, so the device's own
+  logs record who was actually there. Accounts bind to a device or — the part
+  that makes it survive scale — to an **asset group**, covering everything in its
+  subtree with the nearest ancestor winning. A per-user device **never falls back
+  to the shared credential**: falling back would log somebody in as the shared
+  admin account when they were supposed to appear under their own name, which is
+  the whole thing the mode exists to prevent. CSV bulk import, an "ageing
+  secrets" view driven by `credentials.rotated_at`, offboarding that retires a
+  departed person's accounts, and a **whoami** endpoint that answers "which
+  account will I connect as" before the click. `credential.use` audit events now
+  carry the account name, so GuardRail's trail can be joined to the target's own
+  logs. Migration `0026`.
+
+### Fixed
+- The device credential pre-flight asked a device-wide question while resolution
+  asks a per-person one. On a per-user device that let a connect pass on somebody
+  else's account, create the session, emit the audit event, and only fail when
+  the gateway asked for the secret — mid-connect, with a session row already
+  written. Both now branch on `credential_mode` in the same query.
+- `device_credentials.is_default` is dropped. With an owner column present it
+  could no longer be answered ("default for whom?"), and a flag that cannot be
+  answered is a second, contradictory source of truth for resolution.
+
 
 ## [1.0.0] - 2026-07-16 — First stable release
 ### Added

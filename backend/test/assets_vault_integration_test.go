@@ -82,24 +82,30 @@ func TestIntegration_VaultEnvelopeAndDeviceBinding(t *testing.T) {
 	if err := creds.Create(ctx, vScope, cred); err != nil {
 		t.Fatalf("create credential: %v", err)
 	}
-	if err := creds.BindToDevice(ctx, vScope, dev.ID, cred.ID, true); err != nil {
+	// A nil owner binds the device's SHARED credential — the only kind that
+	// existed before per-user accounts, and what this device (in the default
+	// 'shared' mode) resolves for everybody entitled to it.
+	if err := creds.BindToDevice(ctx, vScope, dev.ID, cred.ID, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
 	// Resolve for the device (as the gateway would) and decrypt.
-	resolved, err := creds.ResolveForDevice(ctx, vScope, dev.ID)
+	resolved, err := creds.ResolveForDevice(ctx, vScope, dev.ID, uuid.New())
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	plaintext, err := enc.Open(resolved.Sealed)
+	plaintext, err := enc.Open(resolved.Credential.Sealed)
 	if err != nil {
 		t.Fatalf("open resolved: %v", err)
 	}
 	if string(plaintext) != password {
 		t.Fatalf("decrypted secret mismatch: %q", plaintext)
 	}
-	if resolved.Username != "admin" {
-		t.Fatalf("username = %q", resolved.Username)
+	if resolved.Credential.Username != "admin" {
+		t.Fatalf("username = %q", resolved.Credential.Username)
+	}
+	if resolved.PerUser || resolved.Inherited {
+		t.Fatal("a shared credential is neither per-user nor inherited")
 	}
 
 	// The read path (GetByID) returns metadata; the stored ciphertext is not the

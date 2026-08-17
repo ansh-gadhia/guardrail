@@ -95,6 +95,12 @@ func (h *Handler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 		roles.GET("/permissions", middleware.RequirePermission("role:read"), h.listPermissions)
 		roles.GET("/roles/:id/device-access", middleware.RequirePermission("role:read"), h.getRoleDeviceAccess)
 		roles.PUT("/roles/:id/device-access", middleware.RequirePermission("role:write"), h.setRoleDeviceAccess)
+		// Rank in the approval hierarchy. Writing it is a role:write act — it
+		// decides who can sign off whose access.
+		roles.PUT("/roles/:id/approval-level", middleware.RequirePermission("role:write"), h.setRoleApprovalLevel)
+		// Who can approve whom, so the device form can refuse to gate a device
+		// that nobody could ever be approved onto.
+		roles.GET("/approval-coverage", middleware.RequirePermission("role:read"), h.approvalCoverage)
 	}
 }
 

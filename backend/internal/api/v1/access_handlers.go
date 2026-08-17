@@ -172,6 +172,19 @@ func (h *AccessHandler) RegisterProxy(e *gin.Engine) {
 
 func proxyCookieName(sid string) string { return "guardrail_proxy_" + sid }
 
+// connectBody is what the console sends when a device is approval-gated. Every
+// field is optional so an ungated device keeps connecting with an empty body,
+// exactly as it always has.
+type connectBody struct {
+	// Reason is why access is needed. Mandatory on a gated device — an approver
+	// deciding without one is guessing.
+	Reason string `json:"reason"`
+	// Minutes is the window being asked for.
+	Minutes int `json:"minutes"`
+	// Emergency takes access now and submits it for review afterwards.
+	Emergency bool `json:"emergency"`
+}
+
 func (h *AccessHandler) connect(c *gin.Context) {
 	actor, _ := middleware.ClaimsFrom(c)
 	deviceID, err := uuid.Parse(c.Param("id"))
@@ -179,10 +192,27 @@ func (h *AccessHandler) connect(c *gin.Context) {
 		badRequest(c, "invalid device id")
 		return
 	}
-	res, err := h.svc.Connect(c.Request.Context(), actor, deviceID,
-		accessMeta(c))
+	// A body is optional: an ungated device is connected to with no payload at
+	// all, and a malformed one must not turn into a 400 for the common path.
+	var body connectBody
+	_ = c.ShouldBindJSON(&body)
+
+	res, err := h.svc.ConnectWith(c.Request.Context(), actor, deviceID, accessMeta(c),
+		appaccess.ConnectOptions{
+			Reason: body.Reason, Minutes: body.Minutes, Emergency: body.Emergency,
+		})
 	if err != nil {
 		failAccess(c, err)
+		return
+	}
+	// 202: the device is gated and a request is now waiting on somebody. Not an
+	// error — nothing went wrong, the answer just is not in yet — so the console
+	// polls the returned request rather than showing a failure.
+	if res.Pending != nil {
+		c.JSON(http.StatusAccepted, gin.H{
+			"status":  "pending_approval",
+			"request": requestView(res.Pending),
+		})
 		return
 	}
 	h.writeConnected(c, res)

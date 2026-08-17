@@ -235,14 +235,62 @@ type Device struct {
 	// credential-injected door held open for the remaining hour and fifty-five.
 	// 0 opts the device out.
 	IdleTimeoutMinutes int
+	// CredentialMode decides whose credential gets injected. CredentialShared is
+	// one vaulted login for everyone entitled; CredentialPerUser gives each
+	// person their own named account on the target, so the device's own logs
+	// record who was actually there.
+	CredentialMode string
+	// RequiresApproval gates connecting on a decision by somebody who outranks
+	// the requester. Off by default: turning it on is a deliberate act.
+	RequiresApproval bool
+	// MinApprovals is the two-person rule. One approval is right for a lab
+	// switch and wrong for a core firewall, and that is a property of the
+	// device rather than of the organization.
+	MinApprovals int
 	// CreatedBy is who registered the device. It governs who may change the
-	// recording policy; nil when the creator's account has since been removed.
+	// recording policy and exempts its owner from that device's approval gate;
+	// nil when the creator's account has since been removed.
 	CreatedBy *uuid.UUID
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	// Health is the device's last observed liveness, maintained by the health
 	// poller. Nil when the device has never been probed.
 	Health *Health
+}
+
+// Credential modes. See Device.CredentialMode.
+const (
+	CredentialShared  = "shared"
+	CredentialPerUser = "per_user"
+)
+
+// ValidCredentialMode reports whether m is a mode this platform knows.
+func ValidCredentialMode(m string) bool {
+	return m == "" || m == CredentialShared || m == CredentialPerUser
+}
+
+// IsPerUser reports whether each person connecting to this device is injected
+// with their own named account.
+func (d *Device) IsPerUser() bool { return d.CredentialMode == CredentialPerUser }
+
+// EffectiveMinApprovals is how many decisions this device needs, never below one.
+// A stored zero (a row predating the column) must not mean "approval required
+// but nobody has to approve it", which would gate a device and then open it.
+func (d *Device) EffectiveMinApprovals() int {
+	if d.MinApprovals < 1 {
+		return 1
+	}
+	return d.MinApprovals
+}
+
+// IsOwner reports whether the given user registered this device.
+//
+// Ownership exempts somebody from their own device's approval gate: waiting for
+// permission to reach a device you registered yourself is friction with no
+// control behind it. The exemption is deliberately NOT unconditional — see
+// CanBypassApprovalFor, which stops it at credentials the owner never supplied.
+func (d *Device) IsOwner(userID uuid.UUID) bool {
+	return d.CreatedBy != nil && *d.CreatedBy == userID
 }
 
 // CanSetRecording reports whether the given user may change this device's

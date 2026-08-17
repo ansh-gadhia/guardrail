@@ -34,6 +34,9 @@ type guardrailClaims struct {
 	SuperAdmin  bool     `json:"sadmin"`
 	Roles       []string `json:"roles"`
 	Permissions []string `json:"perms"`
+	// Level is the approval rank. Carried in the token so the connect path can
+	// judge a request without re-reading the role graph on every attempt.
+	Level int `json:"lvl,omitempty"`
 }
 
 // Issue signs an access token for the given claims and returns it with its
@@ -54,6 +57,7 @@ func (j *JWTIssuer) Issue(c iam.Claims, now time.Time) (string, time.Time, error
 		SuperAdmin:  c.IsSuperAdmin,
 		Roles:       c.Roles,
 		Permissions: c.Permissions,
+		Level:       c.ApprovalLevel,
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := tok.SignedString(j.key)
@@ -98,5 +102,6 @@ func (j *JWTIssuer) Verify(token string) (iam.Claims, error) {
 		IsSuperAdmin:   claims.SuperAdmin,
 		Roles:          claims.Roles,
 		Permissions:    claims.Permissions,
+		ApprovalLevel:  claims.Level,
 	}, nil
 }

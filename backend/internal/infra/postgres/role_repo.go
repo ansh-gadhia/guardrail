@@ -23,6 +23,7 @@ func (r *RoleRepo) List(ctx context.Context, s iam.TenantScope, page iam.Page) (
 	err := r.db.withScope(ctx, s, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT r.id, r.organization_id, r.name, r.description, r.is_system, r.device_scope,
+				r.approval_level,
 				COALESCE(array_agg(p.key) FILTER (WHERE p.key IS NOT NULL), '{}') AS perms
 			FROM roles r
 			LEFT JOIN role_permissions rp ON rp.role_id = r.id
@@ -52,6 +53,7 @@ func (r *RoleRepo) GetByID(ctx context.Context, s iam.TenantScope, id iam.ID) (*
 	err := r.db.withScope(ctx, s, func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `
 			SELECT r.id, r.organization_id, r.name, r.description, r.is_system, r.device_scope,
+				r.approval_level,
 				COALESCE(array_agg(p.key) FILTER (WHERE p.key IS NOT NULL), '{}') AS perms
 			FROM roles r
 			LEFT JOIN role_permissions rp ON rp.role_id = r.id
@@ -71,8 +73,9 @@ func (r *RoleRepo) GetByID(ctx context.Context, s iam.TenantScope, id iam.ID) (*
 // Create inserts a custom (non-system) role in the tenant.
 func (r *RoleRepo) Create(ctx context.Context, s iam.TenantScope, role *iam.Role) error {
 	return r.db.withScope(ctx, s, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO roles (id, organization_id, name, description, is_system)
-			VALUES ($1,$2,$3,$4,false)`, role.ID, role.OrganizationID, role.Name, role.Description)
+		_, err := tx.Exec(ctx, `INSERT INTO roles (id, organization_id, name, description, is_system, approval_level)
+			VALUES ($1,$2,$3,$4,false,$5)`, role.ID, role.OrganizationID, role.Name, role.Description,
+			role.ApprovalLevel)
 		return mapWriteErr(err)
 	})
 }
@@ -212,10 +215,99 @@ func scanRole(row pgx.Row) (*iam.Role, error) {
 	var role iam.Role
 	var orgID *iam.ID
 	var scope string
-	if err := row.Scan(&role.ID, &orgID, &role.Name, &role.Description, &role.IsSystem, &scope, &role.Permissions); err != nil {
+	if err := row.Scan(&role.ID, &orgID, &role.Name, &role.Description, &role.IsSystem, &scope,
+		&role.ApprovalLevel, &role.Permissions); err != nil {
 		return nil, err
 	}
 	role.OrganizationID = orgID
 	role.DeviceScope = iam.DeviceScope(scope)
 	return &role, nil
+}
+
+// SetApprovalLevel sets a role's rank in the approval hierarchy.
+func (r *RoleRepo) SetApprovalLevel(ctx context.Context, s iam.TenantScope, roleID iam.ID, level int) error {
+	return r.db.withScope(ctx, s, func(tx pgx.Tx) error {
+		ct, err := tx.Exec(ctx, `UPDATE roles SET approval_level=$2 WHERE id=$1`, roleID, level)
+		if err != nil {
+			return mapWriteErr(err)
+		}
+		if ct.RowsAffected() == 0 {
+			return iam.ErrNotFound
+		}
+		return nil
+	})
+}
+
+// MaxApprovalLevel returns the highest rank across a user's roles.
+//
+// COALESCE covers a user with no roles at all: that is level 0, not an error —
+// they can still ask for access, they simply cannot decide anybody else's.
+func (r *RoleRepo) MaxApprovalLevel(ctx context.Context, s iam.TenantScope, userID iam.ID) (int, error) {
+	var level int
+	err := r.db.withScope(ctx, s, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT COALESCE(MAX(r.approval_level), 0)
+			FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+			WHERE ur.user_id = $1`, userID).Scan(&level)
+	})
+	return level, err
+}
+
+// ApproverCountAbove counts active users who could decide a request made at the
+// given level: they hold approval:decide and they outrank it strictly.
+//
+// Super admins are counted regardless of their explicit grants, because they
+// hold every permission by definition and sit above every configurable rank.
+func (r *RoleRepo) ApproverCountAbove(ctx context.Context, s iam.TenantScope, level int) (int, error) {
+	var n int
+	err := r.db.withScope(ctx, s, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT COUNT(*) FROM users u
+			WHERE u.deleted_at IS NULL AND u.status = 'active' AND (
+				u.is_super_admin
+				OR (
+					EXISTS (
+						SELECT 1 FROM user_roles ur
+						JOIN roles r ON r.id = ur.role_id
+						JOIN role_permissions rp ON rp.role_id = r.id
+						JOIN permissions p ON p.id = rp.permission_id
+						WHERE ur.user_id = u.id AND p.key = 'approval:decide'
+					)
+					AND (
+						SELECT COALESCE(MAX(r2.approval_level), 0)
+						FROM user_roles ur2 JOIN roles r2 ON r2.id = ur2.role_id
+						WHERE ur2.user_id = u.id
+					) > $1
+				)
+			)`, level).Scan(&n)
+	})
+	return n, err
+}
+
+// LevelsInUse returns the distinct ranks held by active, non-super-admin users.
+func (r *RoleRepo) LevelsInUse(ctx context.Context, s iam.TenantScope) ([]int, error) {
+	var out []int
+	err := r.db.withScope(ctx, s, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT DISTINCT COALESCE(MAX(r.approval_level), 0) AS lvl
+			FROM users u
+			LEFT JOIN user_roles ur ON ur.user_id = u.id
+			LEFT JOIN roles r ON r.id = ur.role_id
+			WHERE u.deleted_at IS NULL AND u.status = 'active' AND NOT u.is_super_admin
+			GROUP BY u.id
+			ORDER BY lvl`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var l int
+			if e := rows.Scan(&l); e != nil {
+				return e
+			}
+			out = append(out, l)
+		}
+		return rows.Err()
+	})
+	return out, err
 }

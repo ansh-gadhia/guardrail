@@ -11,8 +11,9 @@ import { PageHero, Panel, Badge, StatusBadge, EmptyState, ErrorNote, Skeleton, c
 import { DeviceStatusBadge } from "@/components/DeviceHealthDot";
 import { GroupPicker } from "@/components/GroupPicker";
 import { toast } from "@/components/Toast";
+import { DeviceAccessPolicy } from "@/components/DeviceAccessPolicy";
 import { deviceTypeLabel, RecordingToggle, DeliveryModeField, isWebScheme } from "./DevicesPage";
-import { IconDevices, IconSessions, IconAudit, IconClock, IconGlobe, IconChevronRight, IconFilm } from "@/components/icons";
+import { IconDevices, IconSessions, IconAudit, IconClock, IconGlobe, IconChevronRight, IconFilm, IconKey } from "@/components/icons";
 
 interface DeviceAuditRow {
   ts: string;
@@ -376,6 +377,14 @@ export function DeviceDetailPage() {
           >
             <DeviceDelivery device={d} canEdit={has("device:write")} />
             <DeviceRecording device={d} />
+          </Panel>
+
+          <Panel
+            title="Access policy"
+            icon={IconKey}
+            subtitle="Which account this device authenticates as, and who has to say yes before you reach it"
+          >
+            <DeviceAccessPolicy device={d} canEdit={has("device:write")} toBody={toDeviceBody} />
           </Panel>
 
           <Panel title="Access history" icon={IconSessions} subtitle="Every brokered session to this device" bodyClassName="p-0">

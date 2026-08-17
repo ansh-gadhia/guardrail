@@ -118,6 +118,48 @@ type Credential struct {
 	UpdatedAt      time.Time
 }
 
+// Binding is a credential attached to a device or to an asset group, optionally
+// owned by one person. It carries no secret material — it is the projection the
+// console lists and the provenance the broker reasons about.
+type Binding struct {
+	CredentialID uuid.UUID
+	// Exactly one of DeviceID / GroupID is set: a binding either names one
+	// device or the subtree under one asset group.
+	DeviceID *uuid.UUID
+	GroupID  *uuid.UUID
+	// UserID is the person this credential logs in as. Nil is the device's
+	// shared credential — the only kind that existed before per-user accounts.
+	UserID         *uuid.UUID
+	CredentialName string
+	Username       string
+	Injection      InjectionMethod
+	RotatedAt      *time.Time
+	CreatedAt      time.Time
+	// UserEmail and GroupName are denormalized for display so the console does
+	// not have to issue a lookup per row.
+	UserEmail string
+	GroupName string
+}
+
+// Resolution is a credential together with where it came from.
+//
+// Provenance is not decoration. The approval gate exempts a device's owner from
+// asking permission on their own device, and that exemption has to stop at
+// credentials the owner never supplied: a device dropped into the right asset
+// group inherits secrets its creator has never seen, and an unqualified owner
+// bypass would turn "register a device" into an ungated path to the vault.
+type Resolution struct {
+	Credential *Credential
+	// Inherited reports that the credential came from an asset group rather
+	// than from the device itself.
+	Inherited bool
+	// PerUser reports that the credential belongs to the connecting user rather
+	// than being the device's shared login.
+	PerUser bool
+	// GroupID names the group a binding was inherited from, when Inherited.
+	GroupID *uuid.UUID
+}
+
 // CredentialRepository persists sealed credentials (tenant-scoped).
 type CredentialRepository interface {
 	Create(ctx context.Context, scope Scope, c *Credential) error
@@ -125,18 +167,62 @@ type CredentialRepository interface {
 	GetByID(ctx context.Context, scope Scope, id uuid.UUID) (*Credential, error)
 	List(ctx context.Context, scope Scope, limit int) ([]Credential, error)
 	SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error
-	// BindToDevice associates a credential with a device.
-	BindToDevice(ctx context.Context, scope Scope, deviceID, credentialID uuid.UUID, isDefault bool) error
-	// ResolveForDevice returns the default (or first) credential bound to a
-	// device, for just-in-time injection by the gateway.
-	ResolveForDevice(ctx context.Context, scope Scope, deviceID uuid.UUID) (*Credential, error)
-	// HasCredentialForDevice reports whether a device has at least one bound,
-	// non-deleted credential. It performs no decryption and emits no audit event,
-	// so it is safe to call as a fail-closed pre-flight before a connect.
-	HasCredentialForDevice(ctx context.Context, scope Scope, deviceID uuid.UUID) (bool, error)
-	// DeviceIDsWithCredential returns the subset of the given device IDs that have
-	// at least one bound, non-deleted credential (for list projections).
-	DeviceIDsWithCredential(ctx context.Context, scope Scope, deviceIDs []uuid.UUID) (map[uuid.UUID]bool, error)
+
+	// BindToDevice attaches a credential to a device. A nil userID makes it the
+	// device's shared credential; a non-nil one makes it that person's account.
+	BindToDevice(ctx context.Context, scope Scope, deviceID, credentialID uuid.UUID, userID *uuid.UUID) error
+	// UnbindFromDevice removes a binding. A nil userID removes the shared one.
+	UnbindFromDevice(ctx context.Context, scope Scope, deviceID uuid.UUID, userID *uuid.UUID) error
+	// BindToGroup attaches a person's credential to every device in an asset
+	// group's subtree. Group bindings are always owned: "this secret works on
+	// everything under here, for everyone" is a much larger claim and is
+	// deliberately not expressible.
+	BindToGroup(ctx context.Context, scope Scope, groupID, credentialID, userID uuid.UUID) error
+	// UnbindFromGroup removes a person's binding from a group.
+	UnbindFromGroup(ctx context.Context, scope Scope, groupID, userID uuid.UUID) error
+
+	// ResolveForDevice returns the credential to inject for this user on this
+	// device, honouring the device's credential_mode.
+	//
+	// The mode is applied HERE, in one query, rather than by each caller. A
+	// caller that forgot it would pass a per-user device's fail-closed check on
+	// the strength of somebody else's credential, create the session, emit the
+	// audit event, and only fail at injection time — in front of the user, with
+	// a session row already written.
+	ResolveForDevice(ctx context.Context, scope Scope, deviceID, userID uuid.UUID) (*Resolution, error)
+	// HasCredentialForDevice reports whether this user would get a credential on
+	// this device. It performs no decryption and emits no audit event, so it is
+	// safe as a fail-closed pre-flight before a connect. It applies
+	// credential_mode for the same reason ResolveForDevice does.
+	HasCredentialForDevice(ctx context.Context, scope Scope, deviceID, userID uuid.UUID) (bool, error)
+	// DeviceIDsProvisioned returns the subset of the given device IDs that
+	// SOMEBODY can connect to — a shared credential, or at least one per-user
+	// account.
+	//
+	// Deliberately not the same question as HasCredentialForDevice. An estate
+	// listing asks "is this device set up", and answering it per viewer would
+	// paint forty properly-provisioned per-user devices as unconfigured for the
+	// administrator who happens not to hold an account on any of them. Who *you*
+	// connect as is answered by ResolveForDevice.
+	DeviceIDsProvisioned(ctx context.Context, scope Scope, deviceIDs []uuid.UUID) (map[uuid.UUID]bool, error)
+
+	// ListDeviceBindings returns every binding attached directly to a device.
+	ListDeviceBindings(ctx context.Context, scope Scope, deviceID uuid.UUID) ([]Binding, error)
+	// ListInheritedBindings returns the group bindings a device inherits,
+	// nearest ancestor first.
+	ListInheritedBindings(ctx context.Context, scope Scope, deviceID uuid.UUID) ([]Binding, error)
+	// ListGroupBindings returns every binding attached to an asset group.
+	ListGroupBindings(ctx context.Context, scope Scope, groupID uuid.UUID) ([]Binding, error)
+	// ListUserBindings returns every binding owned by one person, for
+	// offboarding and for the per-user account listing.
+	ListUserBindings(ctx context.Context, scope Scope, userID uuid.UUID) ([]Binding, error)
+	// CredentialIDsForUser returns the credentials owned by one person, used to
+	// retire them when the account is deactivated.
+	CredentialIDsForUser(ctx context.Context, scope Scope, userID uuid.UUID) ([]uuid.UUID, error)
+	// StaleCredentials returns credentials whose secret has not been rotated
+	// since `before`, for the rotation-age surface.
+	StaleCredentials(ctx context.Context, scope Scope, before time.Time, limit int) ([]Credential, error)
+
 	// ListByKEK returns credentials sealed under a given KEK (for rotation).
 	ListByKEK(ctx context.Context, kekID string, limit int) ([]Credential, error)
 }

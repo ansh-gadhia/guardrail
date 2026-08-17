@@ -28,7 +28,7 @@ func (f fakeResolver) Resolve(context.Context, *access.Session) (access.Credenti
 	return f.cred, f.err
 }
 
-func (f fakeResolver) HasCredential(context.Context, access.Scope, uuid.UUID) (bool, error) {
+func (f fakeResolver) HasCredential(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
 	return f.err == nil, f.err
 }
 
@@ -162,4 +162,8 @@ func TestGateway_RejectsAfterEnd(t *testing.T) {
 	if gw.Serve(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), sess.ID, live.ProxyToken, "/") {
 		t.Fatal("Serve must reject after the session is ended")
 	}
+}
+
+func (f fakeResolver) CredentialInherited(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
 }

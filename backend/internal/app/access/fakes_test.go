@@ -152,7 +152,7 @@ type fakeCreds struct{ has bool }
 func (f fakeCreds) Resolve(context.Context, *access.Session) (access.Credential, error) {
 	return access.Credential{Username: "admin", Secret: "s3cret", Injection: "basic"}, nil
 }
-func (f fakeCreds) HasCredential(context.Context, access.Scope, uuid.UUID) (bool, error) {
+func (f fakeCreds) HasCredential(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
 	return f.has, nil
 }
 
@@ -454,4 +454,8 @@ func (f *fakeBlobs) Delete(_ context.Context, key string) error {
 	delete(f.objects, key)
 	f.deleted = append(f.deleted, key)
 	return nil
+}
+
+func (f fakeCreds) CredentialInherited(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
 }

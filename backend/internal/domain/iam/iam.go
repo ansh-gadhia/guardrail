@@ -109,6 +109,9 @@ func (u *User) Permissions() []string {
 	return out
 }
 
+// ApprovalLevel is the user's rank: the highest of their roles'.
+func (u *User) ApprovalLevel() int { return EffectiveApprovalLevel(u.Roles) }
+
 // RoleNames returns the names of the user's roles.
 func (u *User) RoleNames() []string {
 	out := make([]string, 0, len(u.Roles))
@@ -158,6 +161,44 @@ type Role struct {
 	IsSystem       bool
 	Permissions    []string    // permission keys, e.g. "device:connect"
 	DeviceScope    DeviceScope // 'all' or 'scoped' — resource-level device reach
+	// ApprovalLevel ranks this role for the approval gate. An approver must
+	// outrank the requester STRICTLY, which is also what makes self-approval
+	// impossible without a separate rule: your own level is never greater than
+	// itself, and neither is a peer's.
+	ApprovalLevel int
+}
+
+// EffectiveApprovalLevel is a person's rank: the highest of their roles'.
+//
+// MAX rather than sum or minimum, matching how device scope already unions
+// across roles — one rule for "what do this person's roles add up to". Taking
+// the minimum would let an administrator be demoted by also holding Read-only,
+// which is how a rank system stops meaning anything.
+func EffectiveApprovalLevel(roles []Role) int {
+	level := 0
+	for i := range roles {
+		if roles[i].ApprovalLevel > level {
+			level = roles[i].ApprovalLevel
+		}
+	}
+	return level
+}
+
+// SuperAdminLevel is the rank a super admin is treated as holding. Above every
+// seeded role, so nobody can be configured into outranking them.
+const SuperAdminLevel = 1000
+
+// CanDecide reports whether an approver may decide a request made at
+// requesterLevel.
+//
+// Strictly greater, deliberately. Equal ranks approving each other is not a
+// hierarchy — it is two operators signing each other's work, which is the
+// realistic failure here rather than literal self-approval.
+func CanDecide(approverLevel, requesterLevel int, isSuperAdmin bool) bool {
+	if isSuperAdmin {
+		return true
+	}
+	return approverLevel > requesterLevel
 }
 
 // Permission is a single granular capability in the catalogue.

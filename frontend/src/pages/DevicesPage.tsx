@@ -37,6 +37,7 @@ import {
 } from "@/components/icons";
 import { useCapabilities } from "@/hooks/useCapabilities";
 import { toast } from "@/components/Toast";
+import { RequestAccessModal, connectDevice } from "@/components/RequestAccess";
 
 // The protocols a device can be reached over, with the port each answers on by
 // convention.
@@ -201,16 +202,25 @@ export function DevicesPage() {
     refetchInterval: 30_000,
   });
 
+  // Where a gated device sends the operator: the request dialog, not an error.
+  const [requesting, setRequesting] = useState<Device | null>(null);
+
+  const openSession = (sessionID: string, dev: Device) => {
+    void qc.invalidateQueries({ queryKey: ["sessions", "active"] });
+    navigate(`/sessions/${sessionID}/view?name=${encodeURIComponent(dev.name)}`);
+  };
+
   const connect = useMutation({
-    mutationFn: async (dev: Device) => {
-      const res = (await api.post<ConnectResult>(`/devices/${dev.id}/connect`, {})).data;
-      return { res, dev };
-    },
-    onSuccess: ({ res, dev }) => {
-      if (res.session_id) {
-        void qc.invalidateQueries({ queryKey: ["sessions", "active"] });
-        navigate(`/sessions/${res.session_id}/view?name=${encodeURIComponent(dev.name)}`);
+    mutationFn: async (dev: Device) => ({ out: await connectDevice(dev.id), dev }),
+    onSuccess: ({ out, dev }) => {
+      // 202 rather than a session: the device is approval-gated and a request
+      // is now waiting on somebody. Hand over to the request dialog, which
+      // already knows how to wait, escalate and redeem.
+      if (out.kind === "pending") {
+        setRequesting(dev);
+        return;
       }
+      if (out.result.session_id) openSession(out.result.session_id, dev);
     },
     onError: (err) => toast.error(problemDetail(err, "Connect failed")),
   });
@@ -380,6 +390,17 @@ export function DevicesPage() {
           onSaved={(msg) => {
             setCredentialFor(null);
             toast.success(msg);
+          }}
+        />
+      )}
+      {requesting && (
+        <RequestAccessModal
+          device={requesting}
+          onClose={() => setRequesting(null)}
+          onConnected={(res) => {
+            const dev = requesting;
+            setRequesting(null);
+            if (res.session_id && dev) openSession(res.session_id, dev);
           }}
         />
       )}

@@ -37,7 +37,7 @@ Current version: **1.0.0** (see [`CHANGELOG.md`](CHANGELOG.md)).
 | M3 | MFA (TOTP + recovery codes), OIDC (PKCE), LDAP/AD, SAML stub | ✅ |
 | M4 | Assets + credential vault (envelope encryption) | ✅ |
 | M5 | Access broker + credential-injecting proxy + recording | ✅ |
-| M6 | Approvals, live monitoring, notifications (outbox) | ✅ |
+| M6 | Approvals (rank-based, with standing grants), live monitoring, notifications (outbox) | ✅ |
 | M7 | React + TypeScript web console | ✅ |
 | M8 | Dashboard, global search, audit read API, CSV reports | ✅ |
 | M9 | Hardening, OpenAPI, deployment & usage docs | ✅ |
@@ -123,6 +123,14 @@ See **[SETUP.md](SETUP.md)** for the architecture diagram and the default port m
 
 - **Credentials never reach the user** — resolved just-in-time, held in memory,
   injected server-side by the proxy, and audited as `credential.use`.
+- **Per-user accounts** — a device can inject each person's own named account on
+  the target (`jsmith-admin`) instead of one shared login, so the target's own
+  logs record who was actually there. Bind per device or per asset group; a
+  per-user device never falls back to the shared credential.
+- **Approvals** — a device can require a decision from somebody who *strictly*
+  outranks the requester. Allow once, allow all time (a listable, revocable
+  standing grant that also ends sessions when withdrawn), or deny; optional
+  two-person rule, and an emergency path reviewed after the fact.
 - **Two-layer tenant isolation** — application `TenantScope` **and** PostgreSQL
   Row-Level Security; the API connects as a **non-superuser** role so RLS cannot
   be bypassed.

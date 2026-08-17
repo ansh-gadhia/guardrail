@@ -14,8 +14,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: "http://localhost:8080", changeOrigin: true },
-      "/proxy": { target: "http://localhost:8080", changeOrigin: true },
+      "/api": { target: process.env.GR_API ?? "http://localhost:8080", changeOrigin: true },
+      "/proxy": { target: process.env.GR_API ?? "http://localhost:8080", changeOrigin: true },
     },
   },
   build: {

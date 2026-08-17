@@ -292,3 +292,12 @@ func (nopThrottle) Reset(context.Context, string) error { return nil }
 type fixedClock struct{ t time.Time }
 
 func (c fixedClock) Now() time.Time { return c.t }
+
+func (fakeRoleRepo) SetApprovalLevel(context.Context, iam.TenantScope, iam.ID, int) error { return nil }
+func (fakeRoleRepo) MaxApprovalLevel(context.Context, iam.TenantScope, iam.ID) (int, error) {
+	return 0, nil
+}
+func (fakeRoleRepo) ApproverCountAbove(context.Context, iam.TenantScope, int) (int, error) {
+	return 0, nil
+}
+func (fakeRoleRepo) LevelsInUse(context.Context, iam.TenantScope) ([]int, error) { return nil, nil }

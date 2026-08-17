@@ -72,6 +72,18 @@ type RoleRepository interface {
 	// SetDeviceAccess replaces a role's device scope and its granted device types
 	// and asset groups.
 	SetDeviceAccess(ctx context.Context, s TenantScope, roleID ID, access RoleDeviceAccess) error
+	// SetApprovalLevel sets a role's rank in the approval hierarchy.
+	SetApprovalLevel(ctx context.Context, s TenantScope, roleID ID, level int) error
+	// MaxApprovalLevel returns the highest rank across a user's roles.
+	MaxApprovalLevel(ctx context.Context, s TenantScope, userID ID) (int, error)
+	// ApproverCountAbove counts active users who hold approval:decide and
+	// outrank the given level. It answers "can anybody actually approve this?"
+	// at configuration time, rather than leaving it to be discovered at 3am by
+	// somebody whose request can only expire.
+	ApproverCountAbove(ctx context.Context, s TenantScope, level int) (int, error)
+	// LevelsInUse returns the distinct ranks held by active users, so the
+	// console can warn about a device nobody can be approved onto.
+	LevelsInUse(ctx context.Context, s TenantScope) ([]int, error)
 }
 
 // AuthSessionRepository manages refresh-token families.
@@ -115,6 +127,19 @@ type Claims struct {
 	IsSuperAdmin   bool
 	Roles          []string
 	Permissions    []string
+	// ApprovalLevel is the principal's rank for the approval gate — the highest
+	// of their roles'. Carried on the claims so the gate does not re-read the
+	// role graph on the connect path.
+	ApprovalLevel int
+}
+
+// Level is the rank to judge this principal by. Super admins sit above every
+// configurable role so no arrangement of custom levels can outrank them.
+func (c Claims) Level() int {
+	if c.IsSuperAdmin {
+		return SuperAdminLevel
+	}
+	return c.ApprovalLevel
 }
 
 // Scope derives the tenant scope for repository/authorization use.

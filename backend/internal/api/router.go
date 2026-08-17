@@ -98,6 +98,10 @@ func New(d Deps) (*gin.Engine, error) {
 		}
 		if d.Access != nil {
 			d.Access.Register(apiV1, authMW)
+			// Access requests and standing grants ride with the broker: they are
+			// the same bounded context, and the gate that raises a request lives
+			// in Connect.
+			d.Access.RegisterApprovals(apiV1, authMW)
 			// The proxy endpoint mounts on the root engine (browser-facing,
 			// cookie-authenticated), outside /api/v1.
 			d.Access.RegisterProxy(r)

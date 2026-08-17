@@ -341,6 +341,17 @@ type Endpoint struct {
 	// AllowUnmanaged permits a brokered session with no bound credential
 	// (break-glass). When false (the default), Connect fails closed.
 	AllowUnmanaged bool
+	// RequiresApproval gates connecting behind a decision by somebody who
+	// outranks the requester.
+	RequiresApproval bool
+	// MinApprovals is how many distinct approvals a gated connect needs.
+	MinApprovals int
+	// CreatedBy is who registered the device. Its owner is exempt from its own
+	// approval gate — bounded by the inherited-credential rule, because a device
+	// dropped into the right asset group inherits secrets its creator never
+	// supplied, and an unqualified exemption would make registering a device a
+	// route to the whole vault.
+	CreatedBy *uuid.UUID
 	// RecordSessions is the device's recording policy. When false the broker
 	// creates no recording, and the gateway therefore captures no frames.
 	RecordSessions bool

@@ -159,6 +159,33 @@ func failAccess(c *gin.Context, err error) {
 				"the secret is typed into the page by a browser on the server, never sent to you. "+
 				"Turn on session recording for this device to use isolation, or change the credential to "+
 				"HTTP Basic auth or an Authorization header, which the reverse proxy can inject directly.")
+	// ---- approvals ----
+	case errors.Is(err, access.ErrCannotDecide):
+		// 403 rather than 401: the caller is who they say they are and may well
+		// hold approval:decide — they simply do not outrank this particular
+		// request. The message says which, because "forbidden" alone sends
+		// somebody to check a permission that is already granted.
+		problem(c, http.StatusForbidden, "Outranked",
+			"you can only decide requests from people who rank below you")
+	case errors.Is(err, access.ErrAlreadyDecided):
+		problem(c, http.StatusConflict, "Already Decided",
+			"you have already voted on this request; a second approval must come from somebody else")
+	case errors.Is(err, access.ErrRequestNotPending):
+		problem(c, http.StatusConflict, "Already Settled",
+			"this request has already been decided, cancelled or expired")
+	case errors.Is(err, access.ErrRequestNotApproved):
+		problem(c, http.StatusConflict, "Not Approved",
+			"this request is not approved, or its approval has been used or has expired")
+	case errors.Is(err, access.ErrTooManyRequests):
+		c.Header("Retry-After", "60")
+		problem(c, http.StatusTooManyRequests, "Too Many Requests",
+			"you already have the maximum number of access requests waiting; cancel one or wait for a decision")
+	case errors.Is(err, access.ErrNoApprover):
+		// A configuration fault, surfaced at the moment somebody trips over it
+		// rather than left to expire silently thirty minutes later.
+		problem(c, http.StatusConflict, "Nobody Can Approve",
+			"this device requires approval, but nobody who outranks you can approve it. "+
+				"Ask an administrator to give somebody a higher approval level, or to grant approval:decide.")
 	case errors.Is(err, access.ErrHostKeyMismatch):
 		// 502: GuardRail is the gateway, and the host answering for this device
 		// failed identity verification. The full error text is passed through on

@@ -13,7 +13,7 @@ import { Footer } from "./Footer";
 import { Menu, MenuItem, Badge, cn } from "./ui";
 import {
   IconDashboard, IconDevices, IconSessions, IconSliders, IconAudit, IconShield,
-  IconLogout, IconBell, IconSun, IconMoon, IconMenu, IconChevronsLeft, IconSearch, IconX, IconActivity, IconFilm, IconGlobe,
+  IconLogout, IconBell, IconSun, IconMoon, IconMenu, IconChevronsLeft, IconSearch, IconX, IconActivity, IconFilm, IconGlobe, IconCheck,
 } from "./icons";
 
 type IconType = ComponentType<{ size?: number; className?: string }>;
@@ -24,6 +24,9 @@ const NAV: NavItem[] = [
   { to: "/devices", label: "Devices", icon: IconDevices, perm: "device:read", section: "Access" },
   { to: "/sessions", label: "Sessions", icon: IconSessions, perm: "session:read", section: "Access" },
   { to: "/recordings", label: "Recordings", icon: IconFilm, perm: "session:read", section: "Access" },
+  // No perm gate: a requester needs to watch their own request, and the page
+  // narrows itself to their own rows for anybody without approval:read.
+  { to: "/approvals", label: "Approvals", icon: IconCheck, section: "Governance" },
   { to: "/access", label: "Access Control", icon: IconSliders, perm: "user:read", section: "Governance" },
   { to: "/access-log", label: "Access Log", icon: IconActivity, perm: "user:read", section: "Governance" },
   { to: "/audit", label: "Audit Log", icon: IconAudit, perm: "log:read", section: "Governance" },

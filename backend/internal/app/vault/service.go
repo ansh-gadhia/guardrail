@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -61,6 +62,31 @@ type CredentialView struct {
 	Injection vault.InjectionMethod
 	KEKID     string
 	HasSecret bool
+	// PerUser and Inherited describe where this credential came from, so the
+	// console can tell somebody they will connect as their own named account
+	// rather than the device's shared login — before they press Connect.
+	PerUser   bool
+	Inherited bool
+	// RotatedAt is when the secret last changed; nil means never since creation.
+	RotatedAt *time.Time
+	// AgeDays is how long the secret has gone unchanged, measured from the
+	// rotation if there was one and from creation otherwise.
+	AgeDays int
+}
+
+// BindingView is one per-user account binding, for the console listing.
+type BindingView struct {
+	CredentialID uuid.UUID
+	Name         string
+	Username     string
+	Injection    vault.InjectionMethod
+	UserID       *uuid.UUID
+	UserEmail    string
+	DeviceID     *uuid.UUID
+	GroupID      *uuid.UUID
+	GroupName    string
+	RotatedAt    *time.Time
+	AgeDays      int
 }
 
 // ResolvedCredential is the plaintext form handed to the gateway for injection.
@@ -68,6 +94,12 @@ type ResolvedCredential struct {
 	Username  string
 	Secret    string
 	Injection vault.InjectionMethod
+	// PerUser and Inherited are provenance, carried so the broker can apply the
+	// owner-bypass limit: a device's owner skips the approval gate on their own
+	// device, but not when the credential was inherited from a group they never
+	// supplied it to.
+	PerUser   bool
+	Inherited bool
 }
 
 func scopeOf(a iam.Claims) vault.Scope {
@@ -78,6 +110,37 @@ func view(c *vault.Credential) CredentialView {
 	return CredentialView{
 		ID: c.ID, Name: c.Name, Type: c.Type, Username: c.Username,
 		Injection: c.Injection, KEKID: c.Sealed.KEKID, HasSecret: len(c.Sealed.Ciphertext) > 0,
+		RotatedAt: c.RotatedAt, AgeDays: secretAgeDays(c.RotatedAt, c.CreatedAt),
+	}
+}
+
+// secretAgeDays is how long a secret has gone unchanged.
+//
+// Measured from creation when it has never been rotated, rather than reported as
+// unknown: "never rotated" and "rotated three years ago" are the same exposure,
+// and calling the first one unknown would hide the oldest secrets in the vault
+// from the very surface built to find them.
+func secretAgeDays(rotated *time.Time, created time.Time) int {
+	from := created
+	if rotated != nil {
+		from = *rotated
+	}
+	if from.IsZero() {
+		return 0
+	}
+	d := int(time.Since(from).Hours() / 24)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+func bindingView(b *vault.Binding) BindingView {
+	return BindingView{
+		CredentialID: b.CredentialID, Name: b.CredentialName, Username: b.Username,
+		Injection: b.Injection, UserID: b.UserID, UserEmail: b.UserEmail,
+		DeviceID: b.DeviceID, GroupID: b.GroupID, GroupName: b.GroupName,
+		RotatedAt: b.RotatedAt, AgeDays: secretAgeDays(b.RotatedAt, b.CreatedAt),
 	}
 }
 
@@ -163,24 +226,25 @@ func (s *Service) Delete(ctx context.Context, actor iam.Claims, id uuid.UUID, me
 	return nil
 }
 
-// BindToDevice binds a credential to a device.
-func (s *Service) BindToDevice(ctx context.Context, actor iam.Claims, deviceID, credentialID uuid.UUID, isDefault bool) error {
-	return s.repo.BindToDevice(ctx, scopeOf(actor), deviceID, credentialID, isDefault)
+// BindToDevice binds a credential to a device. A nil userID makes it the shared
+// credential; a non-nil one makes it that person's named account.
+func (s *Service) BindToDevice(ctx context.Context, actor iam.Claims, deviceID, credentialID uuid.UUID, userID *uuid.UUID) error {
+	return s.repo.BindToDevice(ctx, scopeOf(actor), deviceID, credentialID, userID)
 }
 
-// GetForDevice returns the metadata of the credential a device owns (never the
-// secret), or (nil, nil) if the device has none. It never decrypts and never
-// audits, so it is safe for read projections. A device owns at most one
-// credential in the console model.
+// GetForDevice returns the metadata of the credential this actor would be
+// injected with on a device (never the secret), or (nil, nil) if they would get
+// none. It never decrypts and never audits, so it is safe for read projections.
 func (s *Service) GetForDevice(ctx context.Context, actor iam.Claims, deviceID uuid.UUID) (*CredentialView, error) {
-	c, err := s.repo.ResolveForDevice(ctx, scopeOf(actor), deviceID)
+	res, err := s.repo.ResolveForDevice(ctx, scopeOf(actor), deviceID, actor.UserID)
 	if errors.Is(err, vault.ErrNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	v := view(c)
+	v := view(res.Credential)
+	v.PerUser, v.Inherited = res.PerUser, res.Inherited
 	return &v, nil
 }
 
@@ -191,87 +255,274 @@ func (s *Service) GetForDevice(ctx context.Context, actor iam.Claims, deviceID u
 // username and injection are always applied. Creating a new credential requires
 // a secret.
 func (s *Service) SetForDevice(ctx context.Context, actor iam.Claims, deviceID uuid.UUID, in CredentialInput) error {
+	return s.setBinding(ctx, actor, deviceID, nil, nil, in)
+}
+
+// SetForUser binds a person's own named account on a device (or, with a group
+// id, across that group's subtree). This is the per-user path: the credential is
+// an account that exists ON THE DEVICE, such as `jsmith-admin` — never the
+// person's own login password, which GuardRail must not hold.
+func (s *Service) SetForUser(ctx context.Context, actor iam.Claims, deviceID, groupID *uuid.UUID, userID uuid.UUID, in CredentialInput) error {
+	if deviceID == nil && groupID == nil {
+		return fmt.Errorf("%w: a per-user account must name a device or a group", vault.ErrInvalid)
+	}
+	if deviceID != nil {
+		return s.setBinding(ctx, actor, *deviceID, nil, &userID, in)
+	}
+	return s.setBinding(ctx, actor, uuid.Nil, groupID, &userID, in)
+}
+
+// setBinding is the one write path for every kind of binding: shared on a
+// device, one person's on a device, one person's on a group.
+//
+// It rotates in place when a binding already exists and creates one otherwise,
+// so the console can send the same payload either way. An empty secret on update
+// keeps the stored one (the console never echoes a secret back); creating
+// requires a secret, because a credential that authenticates with nothing is a
+// device that looks configured and refuses every connection.
+func (s *Service) setBinding(ctx context.Context, actor iam.Claims, deviceID uuid.UUID, groupID *uuid.UUID, userID *uuid.UUID, in CredentialInput) error {
 	// Checked before anything is written, so a refused request changes nothing.
 	if err := validateInjection(in); err != nil {
 		return err
 	}
-	existing, err := s.repo.ResolveForDevice(ctx, scopeOf(actor), deviceID)
-	switch {
-	case err == nil:
-		// Update the owned credential in place.
+	existing, err := s.existingBinding(ctx, actor, deviceID, groupID, userID)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		cred, gerr := s.repo.GetByID(ctx, scopeOf(actor), existing.CredentialID)
+		if gerr != nil {
+			return gerr
+		}
 		if in.Secret != "" {
 			sealed, serr := s.enc.Seal([]byte(in.Secret))
 			if serr != nil {
 				return serr
 			}
-			existing.Sealed = sealed
+			cred.Sealed = sealed
 		}
 		if in.Name != "" {
-			existing.Name = in.Name
+			cred.Name = in.Name
 		}
-		existing.Username = in.Username
-		existing.Injection = defaultInjection(in.Injection, in.Scheme)
-		if uerr := s.repo.Update(ctx, scopeOf(actor), existing); uerr != nil {
+		cred.Username = in.Username
+		cred.Injection = defaultInjection(in.Injection, in.Scheme)
+		if uerr := s.repo.Update(ctx, scopeOf(actor), cred); uerr != nil {
 			return uerr
 		}
-		s.record(ctx, actor, "credential.rotate", existing.ID, in.Meta, audit.ResultSuccess)
+		s.record(ctx, actor, "credential.rotate", cred.ID, in.Meta, audit.ResultSuccess)
 		return nil
-	case errors.Is(err, vault.ErrNotFound):
-		// No credential yet — create and bind one. A secret is mandatory here.
-		if in.Secret == "" {
-			return vault.ErrSecretRequired
-		}
-		if in.Name == "" {
-			in.Name = "device credential"
-		}
-		v, cerr := s.Create(ctx, actor, in)
-		if cerr != nil {
-			return cerr
-		}
-		return s.repo.BindToDevice(ctx, scopeOf(actor), deviceID, v.ID, true)
-	default:
-		return err
 	}
+
+	if in.Secret == "" {
+		return vault.ErrSecretRequired
+	}
+	if in.Name == "" {
+		in.Name = "device credential"
+		if userID != nil {
+			in.Name = in.Username
+			if in.Name == "" {
+				in.Name = "per-user account"
+			}
+		}
+	}
+	v, cerr := s.Create(ctx, actor, in)
+	if cerr != nil {
+		return cerr
+	}
+	if groupID != nil {
+		return s.repo.BindToGroup(ctx, scopeOf(actor), *groupID, v.ID, *userID)
+	}
+	return s.repo.BindToDevice(ctx, scopeOf(actor), deviceID, v.ID, userID)
+}
+
+// existingBinding finds the binding a write would replace, or nil.
+func (s *Service) existingBinding(ctx context.Context, actor iam.Claims, deviceID uuid.UUID, groupID, userID *uuid.UUID) (*vault.Binding, error) {
+	var list []vault.Binding
+	var err error
+	if groupID != nil {
+		list, err = s.repo.ListGroupBindings(ctx, scopeOf(actor), *groupID)
+	} else {
+		list, err = s.repo.ListDeviceBindings(ctx, scopeOf(actor), deviceID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		b := &list[i]
+		switch {
+		case userID == nil && b.UserID == nil:
+			return b, nil
+		case userID != nil && b.UserID != nil && *b.UserID == *userID:
+			return b, nil
+		}
+	}
+	return nil, nil
 }
 
 // ClearForDevice removes the credential a device owns (soft-delete), returning
 // the device to the unmanaged state. It is a no-op if the device has none.
 func (s *Service) ClearForDevice(ctx context.Context, actor iam.Claims, deviceID uuid.UUID, meta ReqMeta) error {
-	existing, err := s.repo.ResolveForDevice(ctx, scopeOf(actor), deviceID)
-	if errors.Is(err, vault.ErrNotFound) {
-		return nil
+	return s.clearBinding(ctx, actor, deviceID, nil, nil, meta)
+}
+
+// ClearForUser removes one person's named account from a device or a group.
+func (s *Service) ClearForUser(ctx context.Context, actor iam.Claims, deviceID, groupID *uuid.UUID, userID uuid.UUID, meta ReqMeta) error {
+	if deviceID != nil {
+		return s.clearBinding(ctx, actor, *deviceID, nil, &userID, meta)
 	}
-	if err != nil {
+	if groupID != nil {
+		return s.clearBinding(ctx, actor, uuid.Nil, groupID, &userID, meta)
+	}
+	return fmt.Errorf("%w: a per-user account must name a device or a group", vault.ErrInvalid)
+}
+
+func (s *Service) clearBinding(ctx context.Context, actor iam.Claims, deviceID uuid.UUID, groupID, userID *uuid.UUID, meta ReqMeta) error {
+	existing, err := s.existingBinding(ctx, actor, deviceID, groupID, userID)
+	if err != nil || existing == nil {
 		return err
 	}
-	if derr := s.repo.SoftDelete(ctx, scopeOf(actor), existing.ID); derr != nil {
+	if groupID != nil {
+		if uerr := s.repo.UnbindFromGroup(ctx, scopeOf(actor), *groupID, *userID); uerr != nil {
+			return uerr
+		}
+	} else if uerr := s.repo.UnbindFromDevice(ctx, scopeOf(actor), deviceID, userID); uerr != nil {
+		return uerr
+	}
+	if derr := s.repo.SoftDelete(ctx, scopeOf(actor), existing.CredentialID); derr != nil {
 		return derr
 	}
-	s.record(ctx, actor, "credential.delete", existing.ID, meta, audit.ResultSuccess)
+	s.record(ctx, actor, "credential.delete", existing.CredentialID, meta, audit.ResultSuccess)
 	return nil
 }
 
-// HasCredential reports whether a device has at least one bound credential. It
-// never decrypts and never audits, so it is safe as a fail-closed pre-flight
-// before establishing a session.
-func (s *Service) HasCredential(ctx context.Context, actor iam.Claims, deviceID uuid.UUID) (bool, error) {
-	return s.repo.HasCredentialForDevice(ctx, scopeOf(actor), deviceID)
+// DeviceBindings returns every account bound to a device, its own and the ones
+// it inherits from asset groups above it.
+func (s *Service) DeviceBindings(ctx context.Context, actor iam.Claims, deviceID uuid.UUID) (own, inherited []BindingView, err error) {
+	ob, err := s.repo.ListDeviceBindings(ctx, scopeOf(actor), deviceID)
+	if err != nil {
+		return nil, nil, err
+	}
+	ib, err := s.repo.ListInheritedBindings(ctx, scopeOf(actor), deviceID)
+	if err != nil {
+		return nil, nil, err
+	}
+	own = make([]BindingView, 0, len(ob))
+	for i := range ob {
+		own = append(own, bindingView(&ob[i]))
+	}
+	inherited = make([]BindingView, 0, len(ib))
+	for i := range ib {
+		inherited = append(inherited, bindingView(&ib[i]))
+	}
+	return own, inherited, nil
 }
 
-// DevicesWithCredential returns which of the given device IDs currently have a
-// bound credential, for annotating device listings.
+// GroupBindings returns every per-user account bound to an asset group.
+func (s *Service) GroupBindings(ctx context.Context, actor iam.Claims, groupID uuid.UUID) ([]BindingView, error) {
+	list, err := s.repo.ListGroupBindings(ctx, scopeOf(actor), groupID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]BindingView, 0, len(list))
+	for i := range list {
+		out = append(out, bindingView(&list[i]))
+	}
+	return out, nil
+}
+
+// UserBindings returns every account belonging to one person.
+func (s *Service) UserBindings(ctx context.Context, actor iam.Claims, userID uuid.UUID) ([]BindingView, error) {
+	list, err := s.repo.ListUserBindings(ctx, scopeOf(actor), userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]BindingView, 0, len(list))
+	for i := range list {
+		out = append(out, bindingView(&list[i]))
+	}
+	return out, nil
+}
+
+// RetireUserCredentials soft-deletes every credential belonging to a person,
+// for offboarding. It returns how many were retired.
+//
+// Deliberately explicit rather than a database cascade: a deletion that quietly
+// destroys vault material is its own incident, and the count is what the console
+// reports back so somebody can see what just happened.
+func (s *Service) RetireUserCredentials(ctx context.Context, actor iam.Claims, userID uuid.UUID, meta ReqMeta) (int, error) {
+	ids, err := s.repo.CredentialIDsForUser(ctx, scopeOf(actor), userID)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, id := range ids {
+		if derr := s.repo.SoftDelete(ctx, scopeOf(actor), id); derr != nil {
+			return n, derr
+		}
+		s.record(ctx, actor, "credential.delete", id, meta, audit.ResultSuccess)
+		n++
+	}
+	return n, nil
+}
+
+// StaleCredentials returns credentials whose secret has gone unchanged for
+// longer than olderThan.
+func (s *Service) StaleCredentials(ctx context.Context, actor iam.Claims, olderThan time.Duration, limit int) ([]CredentialView, error) {
+	list, err := s.repo.StaleCredentials(ctx, scopeOf(actor), time.Now().Add(-olderThan), limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CredentialView, 0, len(list))
+	for i := range list {
+		out = append(out, view(&list[i]))
+	}
+	return out, nil
+}
+
+// CredentialInherited reports whether the credential this actor would be
+// injected with on a device came from an asset group rather than from the device
+// itself. It reads the sealed binding only — nothing is decrypted or audited.
+func (s *Service) CredentialInherited(ctx context.Context, actor iam.Claims, deviceID uuid.UUID) (bool, error) {
+	res, err := s.repo.ResolveForDevice(ctx, scopeOf(actor), deviceID, actor.UserID)
+	if err != nil {
+		return false, err
+	}
+	return res.Inherited, nil
+}
+
+// HasCredential reports whether this actor would be injected with a credential
+// on the device. It never decrypts and never audits, so it is safe as a
+// fail-closed pre-flight before establishing a session.
+//
+// It asks the same question ResolveForDevice answers, for the same user. A
+// pre-flight that checks "does this device have any credential" while the
+// resolution checks "does this person have one here" would let a per-user
+// device pass on somebody else's account and fail at injection time, after the
+// session row exists.
+func (s *Service) HasCredential(ctx context.Context, actor iam.Claims, deviceID uuid.UUID) (bool, error) {
+	return s.repo.HasCredentialForDevice(ctx, scopeOf(actor), deviceID, actor.UserID)
+}
+
+// DevicesWithCredential returns which of the given device IDs are provisioned —
+// connectable by somebody — for annotating device listings.
+//
+// An estate view, not a personal one: "is this device set up" is a different
+// question from "what do I connect as", and conflating them would show forty
+// working per-user devices as unconfigured to an administrator who holds no
+// account on any of them.
 func (s *Service) DevicesWithCredential(ctx context.Context, actor iam.Claims, deviceIDs []uuid.UUID) (map[uuid.UUID]bool, error) {
-	return s.repo.DeviceIDsWithCredential(ctx, scopeOf(actor), deviceIDs)
+	return s.repo.DeviceIDsProvisioned(ctx, scopeOf(actor), deviceIDs)
 }
 
 // ResolveForDevice returns the plaintext credential for just-in-time injection
 // by the gateway. This is the ONLY path that decrypts a secret, and it is always
 // audited as credential use. Callers must already be authorized to connect.
 func (s *Service) ResolveForDevice(ctx context.Context, actor iam.Claims, deviceID uuid.UUID, sessionID *uuid.UUID) (*ResolvedCredential, error) {
-	c, err := s.repo.ResolveForDevice(ctx, scopeOf(actor), deviceID)
+	res, err := s.repo.ResolveForDevice(ctx, scopeOf(actor), deviceID, actor.UserID)
 	if err != nil {
 		return nil, err
 	}
+	c := res.Credential
 	plaintext, err := s.enc.Open(c.Sealed)
 	if err != nil {
 		return nil, err
@@ -279,13 +530,26 @@ func (s *Service) ResolveForDevice(ctx context.Context, actor iam.Claims, device
 	org := actor.OrganizationID
 	uid := actor.UserID
 	if s.audit != nil {
+		// The account name and the provenance go into the event, not just the
+		// credential id. Correlating a GuardRail session with the target's own
+		// logs is the entire payoff of per-user accounts, and the target logs
+		// record a username — a UUID cannot be joined to anything over there.
+		// Never the secret: this records which account, not how it authenticated.
 		_ = s.audit.Record(ctx, audit.Event{
 			ID: uuid.New(), OrganizationID: &org, ActorID: &uid, ActorEmail: actor.Email,
 			Action: "credential.use", Category: audit.CategoryVault, TargetType: "credential",
 			TargetID: c.ID.String(), SessionID: sessionID, Result: audit.ResultSuccess,
+			Detail: map[string]any{
+				"account":   c.Username,
+				"per_user":  res.PerUser,
+				"inherited": res.Inherited,
+			},
 		})
 	}
-	return &ResolvedCredential{Username: c.Username, Secret: string(plaintext), Injection: c.Injection}, nil
+	return &ResolvedCredential{
+		Username: c.Username, Secret: string(plaintext), Injection: c.Injection,
+		PerUser: res.PerUser, Inherited: res.Inherited,
+	}, nil
 }
 
 // RotateKEK re-wraps all credentials currently under oldKEKID onto the active

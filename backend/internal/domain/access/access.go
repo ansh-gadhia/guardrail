@@ -274,11 +274,21 @@ type LiveSession struct {
 // resolution is audited as credential use.
 type CredentialResolver interface {
 	Resolve(ctx context.Context, s *Session) (Credential, error)
-	// HasCredential reports whether a device has at least one bound credential,
-	// without decrypting or auditing. The broker uses it as a fail-closed
-	// pre-flight so no session is created for a device that could never have a
-	// credential injected.
-	HasCredential(ctx context.Context, s Scope, deviceID uuid.UUID) (bool, error)
+	// HasCredential reports whether THIS USER would be injected with a credential
+	// on this device, without decrypting or auditing. The broker uses it as a
+	// fail-closed pre-flight so no session is created for a connect that could
+	// never have a credential injected.
+	//
+	// userID is not optional and not cosmetic. On a per-user device the answer
+	// differs per person, and a pre-flight that asked the device-wide question
+	// would pass on a colleague's account, create the session, emit the audit
+	// event, and only fail once the gateway asked for the secret — mid-connect,
+	// in front of the user, with a session row already written.
+	HasCredential(ctx context.Context, s Scope, deviceID, userID uuid.UUID) (bool, error)
+	// CredentialInherited reports whether the credential this user would be
+	// injected with comes from an asset group rather than from the device
+	// itself. It decrypts nothing — provenance is stored alongside the binding.
+	CredentialInherited(ctx context.Context, s Scope, deviceID, userID uuid.UUID) (bool, error)
 }
 
 // Credential is the plaintext material injected by a gateway. It exists only in

@@ -447,6 +447,121 @@ returned alongside — poll faster than that and you will read the same answer.
 
 ---
 
+## 7b. Access policy: who connects as whom, and who says yes
+
+Two settings live on every device, under **Devices → (a device) → Access policy**.
+Both default to the behaviour GuardRail has always had, so an upgrade changes
+nothing until you change something.
+
+### Per-user accounts
+
+By default a device holds **one shared login** and everyone entitled to the
+device is injected with it. That is right for an appliance with a single admin
+account and wrong wherever your operators hold named accounts on the target —
+because the device's own logs then record the shared account for every session,
+which destroys the attribution the audit trail exists to provide.
+
+Switch **Credentials** to **Per-user accounts** and each person is injected with
+their own login instead.
+
+> **These are accounts that exist on the device** — `jsmith-admin` — **not
+> somebody's GuardRail or Active Directory password.** GuardRail must never hold
+> a person's own login, and nothing in the product asks for one.
+
+Two ways to bind them:
+
+| Where | When to use it |
+|---|---|
+| **Devices → Access policy → Manage** | One device. |
+| **Access Control → Per-user accounts** | An asset group. The account then works on every device beneath it, including devices added later. |
+
+Bind at the group. One named account usually covers a whole rack, and binding
+per device is thirty rows per person — a set nobody maintains. The nearest group
+wins, so an account bound on *Datacentre / Core* beats one bound on *Datacentre*,
+and an account bound on the device itself beats both.
+
+**A per-user device never falls back to the shared login.** Somebody with no
+account bound is refused, and told so on the device page before they try. The
+alternative would log them into the device as the shared admin account when they
+were supposed to appear in its logs under their own name.
+
+Forty people across twenty devices is not a form-fill job — paste a CSV into
+**Access Control → Per-user accounts → Bulk import**:
+
+```csv
+user_email,device_id,group_id,username,secret,injection
+alice@corp.com,,4f1c…,alice-admin,s3cret,ssh-password
+```
+
+Every failed row is reported with its line number; the rest still import.
+
+**Ageing secrets** on the same page lists credentials nobody has changed in a
+long time. Per-user accounts multiply the number of secrets in the vault by the
+number of people, and stale ones are how that rots.
+
+### Approvals
+
+Turn on **Require approval** and connecting waits for a decision from somebody
+who ranks above the requester.
+
+Rank comes from roles. Each role has an **approval level** (Access Control →
+Roles → *Edit* on the rank row); a person's rank is the highest of their roles'.
+The seeded ladder is:
+
+| Role | Rank |
+|---|---|
+| Super Admin | 100 |
+| Organization Admin | 50 |
+| Operator | 10 |
+| Auditor, Read-only | 0 |
+
+**An approver must outrank the requester strictly.** That one rule is also why
+nobody can approve their own request, and why two operators cannot sign off each
+other's.
+
+Deciding needs the `approval:decide` permission as well: rank says *who* somebody
+may decide for, the permission says *whether* they may decide at all.
+
+**Who skips the gate**
+
+- Anyone holding `approval:bypass` — seeded to Super Admin and Organization
+  Admin. It exempts their own connects; they still decide other people's.
+- **The person who registered the device.** Waiting for permission to reach
+  something you added yourself is friction with no control behind it. The one
+  exception: if the credential is *inherited* from an asset group rather than
+  supplied by them, the gate still applies — otherwise "register a device in the
+  right group" would be an ungated path to every secret in the vault.
+- Anyone holding standing access (below).
+
+**The three answers.** An approver gets *Allow once*, *Allow all time*, and
+*Deny*, and may shorten the window the requester asked for. Allow-all-time is
+not really a decision — it changes future authorization — so it writes a row
+under **Approvals → Standing access**, where it can be listed and revoked.
+Revoking also ends any session it is holding open.
+
+**Two-person rule.** Set **Approvals needed** to 2 on a device that deserves it.
+Distinct people, enforced in the database. A single denial still settles it
+either way: raising the bar for granting access never raises the bar for
+refusing it.
+
+**Waiting.** A request lives 30 minutes, then escalates one rank and gets another
+30. If nobody answers, it expires. An approved request that is never used expires
+too — an approval that stays redeemable for a week is a standing grant nobody
+wrote down.
+
+**Emergency access.** It is 3am, the firewall is down, and everyone senior is
+asleep. The requester can take access immediately: every approver is notified at
+once, the session is flagged, and it lands in **Approvals → Emergency review**
+for somebody to sign off afterwards. The control moves from prevention to
+accountability rather than disappearing — which is what stops people routing
+around approvals by sharing the break-glass credential.
+
+**Before you gate a device,** the console checks that somebody can actually
+approve every rank that can reach it, and warns if not. A request nobody outranks
+can only expire, and 3am is a bad time to find that out.
+
+---
+
 ## 8. Common operations
 
 ```bash

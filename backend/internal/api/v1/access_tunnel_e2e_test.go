@@ -46,7 +46,7 @@ type e2eResolver struct{ cred domaccess.Credential }
 func (r e2eResolver) Resolve(context.Context, *domaccess.Session) (domaccess.Credential, error) {
 	return r.cred, nil
 }
-func (r e2eResolver) HasCredential(context.Context, domaccess.Scope, uuid.UUID) (bool, error) {
+func (r e2eResolver) HasCredential(context.Context, domaccess.Scope, uuid.UUID, uuid.UUID) (bool, error) {
 	return true, nil
 }
 
@@ -224,4 +224,8 @@ func TestTunnel_ConcurrentSessionsAreIsolated(t *testing.T) {
 	if !gw.ServeTunnel(newRecorder(), req, a.ID, liveA.ProxyToken) {
 		t.Error("session A rejected its own token")
 	}
+}
+
+func (r e2eResolver) CredentialInherited(context.Context, domaccess.Scope, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
 }

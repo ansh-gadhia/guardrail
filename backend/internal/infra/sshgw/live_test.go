@@ -169,7 +169,7 @@ func (s stubCreds) Resolve(context.Context, *access.Session) (access.Credential,
 	}
 	return s.cred, nil
 }
-func (s stubCreds) HasCredential(context.Context, access.Scope, uuid.UUID) (bool, error) {
+func (s stubCreds) HasCredential(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
 	return s.err == nil, nil
 }
 
@@ -386,4 +386,8 @@ func TestEstablishHonoursHandshakeTimeout(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("Establish took %v; the handshake timeout did not apply", elapsed)
 	}
+}
+
+func (s stubCreds) CredentialInherited(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
 }

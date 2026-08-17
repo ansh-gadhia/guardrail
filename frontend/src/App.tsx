@@ -13,6 +13,7 @@ import { RecordingsPage } from "./pages/RecordingsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { AccessLogPage } from "./pages/AccessLogPage";
 import { SecurityPage } from "./pages/SecurityPage";
+import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { FirstRunPage } from "./pages/FirstRunPage";
 import { NotFoundPage, ErrorBoundary } from "./pages/ErrorPages";
 
@@ -65,6 +66,7 @@ export default function App() {
         <Route path="/recordings" element={<RecordingsPage />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="/access-log" element={<AccessLogPage />} />
+        <Route path="/approvals" element={<ApprovalsPage />} />
         <Route path="/security" element={<SecurityPage />} />
       </Route>
       {/* Styled 404 for unmatched routes (previously redirected to "/"). */}

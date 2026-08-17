@@ -48,6 +48,9 @@ type Service struct {
 	blobs      access.BlobStore
 	devices    access.DeviceLookup
 	creds      access.CredentialResolver
+	requests   access.RequestRepository
+	grants     access.GrantRepository
+	ranker     access.Ranker
 	audit      audit.Recorder
 	notifier   Notifier
 	activity   *ActivityTracker
@@ -79,8 +82,14 @@ type Deps struct {
 	Blobs            access.BlobStore
 	Devices          access.DeviceLookup
 	Creds            access.CredentialResolver
-	Audit            audit.Recorder
-	Notifier         Notifier
+	// Requests, Grants and Ranker drive the approval gate. All three nil is a
+	// valid deployment: the gate then never fires and every device connects
+	// immediately, which is exactly how things behaved before approvals existed.
+	Requests access.RequestRepository
+	Grants   access.GrantRepository
+	Ranker   access.Ranker
+	Audit    audit.Recorder
+	Notifier Notifier
 	// Activity is the tracker the gateways touch. The broker holds it so ending a
 	// session can drop its throttle state.
 	Activity *ActivityTracker
@@ -104,6 +113,7 @@ func NewService(d Deps) *Service {
 		gateways: indexGateways(d.Gateways), isolated: indexGateways(d.IsolatedGateways),
 		registry: d.Registry,
 		events:   d.Events, recordings: d.Recordings, blobs: d.Blobs, devices: d.Devices, creds: d.Creds,
+		requests: d.Requests, grants: d.Grants, ranker: d.Ranker,
 		audit: d.Audit, notifier: d.Notifier, activity: d.Activity,
 		clock: clock, node: d.Node, cfg: d.Config, log: d.Log,
 	}
@@ -177,6 +187,11 @@ type ConnectResult struct {
 	// the tunnel is disabled or this session is not served by the HTTP gateway.
 	TunnelHost   string
 	GrantedUntil time.Time
+	// Pending is set, and every other field left zero, when the device requires
+	// approval and the caller is not exempt. The connect has not failed — a
+	// request has been raised and the caller should wait on it, which is why this
+	// is a field rather than an error the delivery layer has to catch.
+	Pending *access.Request
 }
 
 func scopeOf(a iam.Claims) access.Scope {
@@ -200,6 +215,18 @@ func watermarkFor(actor iam.Claims, sessionID uuid.UUID) string {
 // this additionally enforces resource-level entitlement — the actor must have a
 // role whose device scope reaches this device, unless they are a super admin.
 func (s *Service) Connect(ctx context.Context, actor iam.Claims, deviceID uuid.UUID, meta ReqMeta) (*ConnectResult, error) {
+	return s.ConnectWith(ctx, actor, deviceID, meta, ConnectOptions{})
+}
+
+// ConnectWith is Connect plus what the requester said when asking for access:
+// a reason, a window, or a flag taking emergency access.
+//
+// On an approval-gated device where the caller is not exempt, it returns a
+// result carrying Pending and no session. That is not an error — a request has
+// been raised and the caller should wait on it — which is why it is a field on
+// the result rather than a sentinel the delivery layer has to catch.
+func (s *Service) ConnectWith(ctx context.Context, actor iam.Claims, deviceID uuid.UUID,
+	meta ReqMeta, opts ConnectOptions) (*ConnectResult, error) {
 	ep, err := s.devices.Endpoint(ctx, scopeOf(actor), deviceID)
 	if err != nil {
 		return nil, err
@@ -233,13 +260,25 @@ func (s *Service) Connect(ctx context.Context, actor iam.Claims, deviceID uuid.U
 		}
 	}
 
+	// Approval. After entitlement, because there is no point waking an approver
+	// for somebody whose roles cannot reach the device at all; before the
+	// credential pre-flight, because resolving a secret for a request that may
+	// sit pending for half an hour is work done on a hope.
+	gate, err := s.approvalGate(ctx, actor, ep, deviceID, opts, meta)
+	if err != nil {
+		return nil, err
+	}
+	if !gate.allow {
+		return &ConnectResult{Pending: gate.request}, nil
+	}
+
 	// Fail closed: GuardRail exists to inject a vaulted credential server-side. A
 	// device with no bound credential has nothing to inject, so a "session" would
 	// just proxy the device's own login page — leaking the target to the user and
 	// defeating the platform's guarantee. Refuse before creating any session,
 	// unless the device explicitly opts into break-glass unmanaged access.
 	if !ep.AllowUnmanaged {
-		has, err := s.creds.HasCredential(ctx, scopeOf(actor), deviceID)
+		has, err := s.creds.HasCredential(ctx, scopeOf(actor), deviceID, actor.UserID)
 		if err != nil {
 			return nil, err
 		}
@@ -260,10 +299,31 @@ func (s *Service) Connect(ctx context.Context, actor iam.Claims, deviceID uuid.U
 		DeviceAddress: net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port)),
 	}
 	sess.Watermark = watermarkFor(actor, sess.ID)
-	until := now.Add(s.cfg.DefaultWindow)
+	// An approved request sets the window. "I need thirty minutes" has to mean
+	// thirty minutes, not the organization default of several hours — otherwise
+	// asking for a short window is a courtesy with no effect, and the approver
+	// who shortened it was answering a question nobody acted on.
+	window := s.cfg.DefaultWindow
+	if gate.redeem != nil {
+		window = gate.redeem.Window(window)
+	}
+	until := now.Add(window)
 	sess.GrantedFrom, sess.GrantedUntil, sess.GatewayNode, sess.StartedAt = &now, &until, s.node, &now
 	if err := s.sessions.Create(ctx, scopeOf(actor), sess); err != nil {
 		return nil, err
+	}
+	// Bind the session to the approval that authorized it, before the gateway
+	// starts. This is the join that lets an auditor open a recording and ask who
+	// let this happen — and redemption is single-use at the database, so two tabs
+	// racing the same approval produce one session.
+	if gate.redeem != nil && s.requests != nil {
+		if rerr := s.requests.Redeem(ctx, scopeOf(actor), gate.redeem.ID, sess.ID, now); rerr != nil {
+			return nil, rerr
+		}
+	}
+	if gate.reason != "" {
+		s.recordAuditDetail(ctx, actor, "access.granted", sess, meta, audit.ResultSuccess,
+			map[string]any{"gate": gate.reason})
 	}
 	return s.establish(ctx, actor, sess, meta, ep.RecordSessions, ep.Isolate)
 }

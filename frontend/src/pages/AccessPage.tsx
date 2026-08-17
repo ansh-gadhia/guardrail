@@ -3,9 +3,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
 import type { UserRow, Role, Permission, RoleDeviceAccess, AssetGroup } from "@/lib/types";
 import { useAuth } from "@/store/auth";
-import { PageHero, ErrorNote, EmptyState, Modal, Field, StatCluster, Badge, Skeleton, Spinner, Tabs, cn } from "@/components/ui";
-import { IconUsers, IconPlus, IconTrash, IconShield, IconLock, IconCheck, IconMinus, IconSliders, IconAudit, IconDevices, IconFolder, IconGlobe } from "@/components/icons";
+import { PageHero, ErrorNote, EmptyState, Modal, Field, StatCluster, Badge, Skeleton, Spinner, Tabs, Input, Button, cn } from "@/components/ui";
+import { IconUsers, IconPlus, IconTrash, IconShield, IconLock, IconCheck, IconMinus, IconSliders, IconAudit, IconDevices, IconFolder, IconGlobe, IconKey } from "@/components/icons";
 import { toast } from "@/components/Toast";
+import { AccountsAdmin } from "@/components/AccountsAdmin";
 import { PasswordStrength, scorePassword } from "@/components/PasswordStrength";
 import { DEVICE_TYPES, deviceTypeLabel } from "./DevicesPage";
 
@@ -13,6 +14,7 @@ export function AccessPage() {
   const qc = useQueryClient();
   const me = useAuth((s) => s.principal);
   const canWrite = useAuth((s) => s.has("user:write"));
+  const canBindCredentials = useAuth((s) => s.has("credential:write"));
   const [showCreate, setShowCreate] = useState(false);
   const [editRolesFor, setEditRolesFor] = useState<UserRow | null>(null);
   const [editAccessFor, setEditAccessFor] = useState<Role | null>(null);
@@ -39,7 +41,7 @@ export function AccessPage() {
     queryKey: ["permissions"],
     queryFn: async () => (await api.get<{ data: Permission[] }>("/permissions")).data.data,
   });
-  const [tab, setTab] = useState<"members" | "roles">("members");
+  const [tab, setTab] = useState<"members" | "roles" | "accounts">("members");
 
   const userCount = users.data?.length ?? 0;
   const superCount = users.data?.filter((u) => u.is_super_admin).length ?? 0;
@@ -78,9 +80,10 @@ export function AccessPage() {
           tabs={[
             { id: "members", label: "Members", icon: IconUsers },
             { id: "roles", label: "Roles & Permissions", icon: IconSliders },
+            ...(canBindCredentials ? [{ id: "accounts", label: "Per-user accounts", icon: IconKey }] : []),
           ]}
           active={tab}
-          onChange={(t) => setTab(t as "members" | "roles")}
+          onChange={(t) => setTab(t as "members" | "roles" | "accounts")}
         />
       </div>
 
@@ -148,6 +151,8 @@ export function AccessPage() {
             </div>
           )}
         </>
+      ) : tab === "accounts" ? (
+        <AccountsAdmin />
       ) : (
         <RolesAndPermissions roles={roles} perms={perms} editAccessFor={editAccessFor} onEditAccess={setEditAccessFor} />
       )}
@@ -230,6 +235,7 @@ function RolesAndPermissions({
 }) {
   const qc = useQueryClient();
   const canWriteRoles = useAuth((s) => s.has("role:write"));
+  const [rankFor, setRankFor] = useState<Role | null>(null);
   if (roles.isLoading || perms.isLoading) {
     return (
       <div className="space-y-5">
@@ -269,9 +275,23 @@ function RolesAndPermissions({
             groups={groups}
             total={totalPerms}
             onEditAccess={canWriteRoles ? () => onEditAccess(r) : undefined}
+            onEditRank={canWriteRoles ? () => setRankFor(r) : undefined}
           />
         ))}
       </div>
+
+      {rankFor && (
+        <ApprovalRankEditor
+          role={rankFor}
+          onClose={() => setRankFor(null)}
+          onSaved={() => {
+            setRankFor(null);
+            toast.success("Approval rank updated");
+            void qc.invalidateQueries({ queryKey: ["roles"] });
+            void qc.invalidateQueries({ queryKey: ["approval-coverage"] });
+          }}
+        />
+      )}
 
       {editAccessFor && (
         <DeviceAccessEditor
@@ -590,11 +610,13 @@ function RoleSummaryCard({
   groups,
   total,
   onEditAccess,
+  onEditRank,
 }: {
   role: Role;
   groups: PermGroup[];
   total: number;
   onEditAccess?: () => void;
+  onEditRank?: () => void;
 }) {
   const superRole = isSuperRole(role);
   const id = roleIdentity(role);
@@ -638,6 +660,26 @@ function RoleSummaryCard({
           )}
         </div>
       )}
+
+      {/* Approval rank — who this role can sign off for. Shown next to device
+          reach because both answer "how far does this role go". */}
+      <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-line bg-surface-2/40 px-2.5 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <IconShield size={14} className="shrink-0 text-faint" />
+          <span className="truncate text-xs text-muted">
+            {superRole
+              ? "Approves anybody"
+              : role.approval_level > 0
+                ? `Approval rank ${role.approval_level}`
+                : "Cannot approve anybody"}
+          </span>
+        </div>
+        {onEditRank && !superRole && (
+          <button className="shrink-0 text-2xs font-medium text-accent transition hover:underline" onClick={onEditRank}>
+            Edit
+          </button>
+        )}
+      </div>
 
       {/* Grant-coverage bar */}
       <div className="mt-3">
@@ -811,6 +853,99 @@ function EditRolesModal({
         </div>
       )}
       <RoleChecklist roles={roles} selected={sel} toggle={toggle} />
+    </Modal>
+  );
+}
+
+// ApprovalRankEditor sets a role's rank in the approval hierarchy.
+//
+// The one dial that decides who can sign off whose access. It is presented as a
+// ladder rather than a number box, because "50" means nothing on its own and
+// "above Operator, below Organization Admin" means everything.
+function ApprovalRankEditor({
+  role,
+  onClose,
+  onSaved,
+}: {
+  role: Role;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [level, setLevel] = useState(role.approval_level);
+
+  const roles = useQuery<Role[]>({
+    queryKey: ["roles"],
+    queryFn: async () => (await api.get<{ data: Role[] }>("/roles")).data.data,
+  });
+
+  const save = useMutation({
+    mutationFn: async () => api.put(`/roles/${role.id}/approval-level`, { approval_level: level }),
+    onSuccess: onSaved,
+    onError: (e) => toast.error(problemDetail(e, "Could not set the approval rank")),
+  });
+
+  // Who this rank would be able to decide for, and who could decide for them.
+  const others = (roles.data ?? []).filter((r) => r.id !== role.id);
+  const canApprove = others.filter((r) => r.approval_level < level);
+  const approvedBy = others.filter((r) => r.approval_level > level);
+
+  return (
+    <Modal onClose={onClose} title={`Approval rank — ${role.name}`} icon={IconShield}>
+      <div className="space-y-4">
+        <p className="text-sm text-muted">
+          An approver must outrank the requester <b>strictly</b>. That is also why nobody can approve
+          their own request, and why two people at the same rank cannot sign off each other&rsquo;s.
+        </p>
+
+        <Field label="Rank" hint="0–999. Gaps are deliberate: leave room to slot a role in later.">
+          <Input
+            type="number"
+            min={0}
+            max={999}
+            value={level}
+            onChange={(e) => setLevel(Math.max(0, Math.min(999, Number(e.target.value))))}
+          />
+        </Field>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-lg border border-line bg-surface-2 p-3">
+            <div className="text-2xs font-semibold uppercase tracking-wider text-faint">Can approve</div>
+            {canApprove.length === 0 ? (
+              <p className="mt-1 text-xs text-warn">Nobody. This role cannot decide any request.</p>
+            ) : (
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {canApprove.map((r) => (
+                  <Badge key={r.id} tone="neutral">{r.name}</Badge>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="rounded-lg border border-line bg-surface-2 p-3">
+            <div className="text-2xs font-semibold uppercase tracking-wider text-faint">Approved by</div>
+            {approvedBy.length === 0 ? (
+              <p className="mt-1 text-xs text-warn">
+                Nobody outranks this. Requests from it can only expire.
+              </p>
+            ) : (
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {approvedBy.map((r) => (
+                  <Badge key={r.id} tone="neutral">{r.name}</Badge>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <p className="text-xs text-muted">
+          Deciding also needs the <span className="font-mono">approval:decide</span> permission. Rank
+          says <em>who</em> they may decide for; the permission says <em>whether</em> they may decide at all.
+        </p>
+
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" loading={save.isPending} onClick={() => save.mutate()}>Save</Button>
+        </div>
+      </div>
     </Modal>
   );
 }

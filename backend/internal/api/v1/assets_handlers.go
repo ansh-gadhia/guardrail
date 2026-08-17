@@ -9,6 +9,7 @@ import (
 
 	"github.com/guardrail/guardrail/internal/api/middleware"
 	appassets "github.com/guardrail/guardrail/internal/app/assets"
+	appiam "github.com/guardrail/guardrail/internal/app/iam"
 	appvault "github.com/guardrail/guardrail/internal/app/vault"
 	domassets "github.com/guardrail/guardrail/internal/domain/assets"
 	"github.com/guardrail/guardrail/internal/domain/iam"
@@ -21,11 +22,22 @@ import (
 type AssetsHandler struct {
 	svc   *appassets.Service
 	vault *appvault.Service
+	// users resolves an email to a user id for the bulk account import. A CSV
+	// written by a human names people by email, not by UUID; requiring the UUID
+	// would make the import as much work as the form it replaces. Optional —
+	// nil simply means an import must supply user_id.
+	users *appiam.Service
 }
 
 // NewAssetsHandler constructs an AssetsHandler.
 func NewAssetsHandler(svc *appassets.Service, vault *appvault.Service) *AssetsHandler {
 	return &AssetsHandler{svc: svc, vault: vault}
+}
+
+// WithUsers supplies the user lookup used by the bulk account import.
+func (h *AssetsHandler) WithUsers(users *appiam.Service) *AssetsHandler {
+	h.users = users
+	return h
 }
 
 // Register mounts device + group routes.
@@ -41,6 +53,14 @@ func (h *AssetsHandler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 		// than a separate vault surface.
 		d.PUT("/:id/credential", middleware.RequirePermission("credential:write"), h.setCredential)
 		d.DELETE("/:id/credential", middleware.RequirePermission("credential:write"), h.clearCredential)
+		// Per-user accounts: named logins that exist ON THE DEVICE, so its own
+		// logs record who was actually there. Never a person's own password.
+		d.GET("/:id/accounts", middleware.RequirePermission("device:read"), h.listDeviceAccounts)
+		d.PUT("/:id/accounts/:userID", middleware.RequirePermission("credential:write"), h.setDeviceAccount)
+		d.DELETE("/:id/accounts/:userID", middleware.RequirePermission("credential:write"), h.clearDeviceAccount)
+		// What this caller would connect as, resolved through mode and group
+		// inheritance — answered before they press Connect, not after.
+		d.GET("/:id/whoami", middleware.RequirePermission("device:read"), h.deviceWhoAmI)
 	}
 	g := rg.Group("/asset-groups", authMW)
 	{
@@ -48,6 +68,19 @@ func (h *AssetsHandler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 		g.POST("", middleware.RequirePermission("group:write"), h.createGroup)
 		g.POST("/:id/members/:deviceID", middleware.RequirePermission("group:write"), h.addMember)
 		g.DELETE("/:id/members/:deviceID", middleware.RequirePermission("group:write"), h.removeMember)
+		// A per-user account bound here works on every device in the subtree.
+		// Binding per device does not survive contact with reality: one named
+		// account usually covers a whole rack.
+		g.GET("/:id/accounts", middleware.RequirePermission("group:read"), h.listGroupAccounts)
+		g.PUT("/:id/accounts/:userID", middleware.RequirePermission("credential:write"), h.setGroupAccount)
+		g.DELETE("/:id/accounts/:userID", middleware.RequirePermission("credential:write"), h.clearGroupAccount)
+	}
+	a := rg.Group("/accounts", authMW)
+	{
+		a.POST("/import", middleware.RequirePermission("credential:write"), h.importAccounts)
+		a.GET("/stale", middleware.RequirePermission("credential:write"), h.staleCredentials)
+		a.GET("/user/:userID", middleware.RequirePermission("credential:write"), h.listUserAccounts)
+		a.POST("/user/:userID/retire", middleware.RequirePermission("credential:write"), h.retireUserAccounts)
 	}
 }
 
@@ -87,6 +120,13 @@ type deviceRequest struct {
 	// GroupIDs replaces the device's asset-group membership. Omitting the key
 	// leaves membership as it is; sending an empty array clears it.
 	GroupIDs *[]string `json:"group_ids"`
+	// CredentialMode is "shared" (one login for everyone entitled) or "per_user"
+	// (each person's own named account on the target).
+	CredentialMode *string `json:"credential_mode"`
+	// RequiresApproval gates connecting behind a decision by somebody who
+	// outranks the requester. MinApprovals is the two-person rule.
+	RequiresApproval *bool `json:"requires_approval"`
+	MinApprovals     *int  `json:"min_approvals"`
 	// Credential is the device's own credential, entered inline when adding a
 	// device. It is optional — username and secret are not compulsory. When
 	// omitted (or with an empty secret on create) the device is registered with
@@ -127,7 +167,11 @@ func (r deviceRequest) toInput(meta appassets.ReqMeta) (appassets.DeviceInput, e
 		AllowUnmanaged: r.AllowUnmanaged, RecordSessions: r.RecordSessions,
 		RecordingKinds:     r.RecordingKinds,
 		DeliveryMode:       r.DeliveryMode,
-		IdleTimeoutMinutes: r.IdleTimeoutMinutes, Meta: meta,
+		IdleTimeoutMinutes: r.IdleTimeoutMinutes,
+		CredentialMode:     r.CredentialMode,
+		RequiresApproval:   r.RequiresApproval,
+		MinApprovals:       r.MinApprovals,
+		Meta:               meta,
 	}
 	if r.IdleTimeoutMinutes != nil && (*r.IdleTimeoutMinutes < 0 || *r.IdleTimeoutMinutes > maxIdleTimeoutMinutes) {
 		return in, fmt.Errorf("idle_timeout_minutes must be between 0 and %d", maxIdleTimeoutMinutes)
@@ -158,6 +202,8 @@ func deviceDTO(d *domassets.Device, actor iam.Claims, hasCredential bool, cred *
 		"verify_tls": d.VerifyTLS, "custom_headers": d.CustomHeaders, "tags": d.Tags,
 		"status": d.Status, "url": d.BaseURL(),
 		"allow_unmanaged": d.AllowUnmanaged, "has_credential": hasCredential,
+		"credential_mode": d.CredentialMode, "requires_approval": d.RequiresApproval,
+		"min_approvals":   d.EffectiveMinApprovals(),
 		"record_sessions": d.RecordSessions,
 		// What this device actually captures, already resolved against its
 		// protocol — so the console renders the truth rather than re-deriving it

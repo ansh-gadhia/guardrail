@@ -48,6 +48,8 @@ func (a *DeviceLookupAdapter) Endpoint(ctx context.Context, s access.Scope, devi
 		VerifyTLS: d.VerifyTLS, CustomHeaders: d.CustomHeaders,
 		Name: d.Name, DeviceType: d.DeviceType,
 		AllowUnmanaged: d.AllowUnmanaged, RecordSessions: d.RecordSessions,
+		RequiresApproval: d.RequiresApproval, MinApprovals: d.EffectiveMinApprovals(),
+		CreatedBy: d.CreatedBy,
 		// Resolved here rather than in the gateway: what a device captures is a
 		// policy question about the device, and the gateway's job is to obey it.
 		RecordingKinds: d.EffectiveRecordingKinds(),
@@ -93,9 +95,55 @@ func (r *VaultCredentialResolver) Resolve(ctx context.Context, s *access.Session
 	return access.Credential{Username: rc.Username, Secret: rc.Secret, Injection: string(rc.Injection)}, nil
 }
 
-// HasCredential reports whether a device has at least one bound credential,
-// without decrypting or auditing. Used by the broker as a fail-closed pre-flight.
-func (r *VaultCredentialResolver) HasCredential(ctx context.Context, s access.Scope, deviceID uuid.UUID) (bool, error) {
-	claims := iam.Claims{OrganizationID: s.OrganizationID, IsSuperAdmin: s.IsSuperAdmin}
+// CredentialInherited reports whether this user's credential on the device comes
+// from an asset group rather than from the device itself.
+//
+// A missing credential is not inherited: the caller uses this to decide whether
+// a device's owner may skip its approval gate, and "there is nothing to inject"
+// is not a reason to make them ask permission.
+func (r *VaultCredentialResolver) CredentialInherited(ctx context.Context, s access.Scope, deviceID, userID uuid.UUID) (bool, error) {
+	claims := iam.Claims{OrganizationID: s.OrganizationID, IsSuperAdmin: s.IsSuperAdmin, UserID: userID}
+	inherited, err := r.vault.CredentialInherited(ctx, claims, deviceID)
+	if errors.Is(err, vaultdom.ErrNotFound) {
+		return false, nil
+	}
+	return inherited, err
+}
+
+// HasCredential reports whether this user would be injected with a credential on
+// the device, without decrypting or auditing. Used by the broker as a
+// fail-closed pre-flight.
+//
+// The claims carry UserID because the answer is per person on a per-user device.
+// They deliberately do NOT carry IsSuperAdmin's connect privileges into the
+// credential question: being able to reach every device is not the same as
+// having an account on one.
+func (r *VaultCredentialResolver) HasCredential(ctx context.Context, s access.Scope, deviceID, userID uuid.UUID) (bool, error) {
+	claims := iam.Claims{OrganizationID: s.OrganizationID, IsSuperAdmin: s.IsSuperAdmin, UserID: userID}
 	return r.vault.HasCredential(ctx, claims, deviceID)
+}
+
+// RoleRanker adapts the IAM role repository to the access context's Ranker port,
+// so the broker can ask "who outranks this person" without importing IAM's
+// application layer.
+type RoleRanker struct {
+	roles iam.RoleRepository
+}
+
+// NewRoleRanker constructs a RoleRanker.
+func NewRoleRanker(roles iam.RoleRepository) *RoleRanker { return &RoleRanker{roles: roles} }
+
+// LevelFor returns a user's effective rank: the highest of their roles'.
+func (r *RoleRanker) LevelFor(ctx context.Context, s access.Scope, userID uuid.UUID) (int, error) {
+	return r.roles.MaxApprovalLevel(ctx, tenantScope(s), userID)
+}
+
+// ApproversAbove counts active users who hold approval:decide and outrank the
+// given level.
+func (r *RoleRanker) ApproversAbove(ctx context.Context, s access.Scope, level int) (int, error) {
+	return r.roles.ApproverCountAbove(ctx, tenantScope(s), level)
+}
+
+func tenantScope(s access.Scope) iam.TenantScope {
+	return iam.TenantScope{OrganizationID: s.OrganizationID, IsSuperAdmin: s.IsSuperAdmin}
 }

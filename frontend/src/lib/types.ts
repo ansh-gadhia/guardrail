@@ -11,6 +11,9 @@ export interface Principal {
   // True while this account still has the temporary password an admin set for
   // it. The console forces a change before letting the person do anything else.
   must_change_password: boolean;
+  // Rank in the approval hierarchy: the highest of this person's roles. They
+  // can decide requests from anybody strictly below it.
+  approval_level: number;
 }
 
 export interface TokenResponse {
@@ -70,6 +73,14 @@ export interface Device {
   has_credential: boolean;
   // Break-glass: allow connecting with no bound credential (no injection).
   allow_unmanaged: boolean;
+  // "shared" — one vaulted login for everyone entitled. "per_user" — each
+  // person is injected with their own named account ON THE DEVICE, so the
+  // device's own logs record who was actually there.
+  credential_mode: CredentialMode;
+  // Connecting needs a decision from somebody who outranks the requester.
+  requires_approval: boolean;
+  // How many distinct approvals a gated connect needs (the two-person rule).
+  min_approvals: number;
   // Whether sessions to this device are recorded at all.
   record_sessions: boolean;
   // What a recorded session captures, already resolved against the protocol:
@@ -236,6 +247,10 @@ export interface Role {
   // default (every device in the org); 'scoped' narrows it to the types and
   // groups in RoleDeviceAccess.
   device_scope: "all" | "scoped";
+  // Rank in the approval hierarchy. An approver must outrank the requester
+  // STRICTLY — which is also what makes self-approval impossible, since nobody
+  // outranks themselves.
+  approval_level: number;
 }
 
 // AssetGroup is a folder of devices (GET /asset-groups) — the unit a role can be
@@ -484,4 +499,104 @@ export const TOKEN_SCOPES: { key: string; label: string; blurb: string }[] = [
   { key: "user:read", label: "Users", blurb: "Accounts, emails and role assignments" },
   { key: "role:read", label: "Roles", blurb: "Roles and the permissions they carry" },
   { key: "org:read", label: "Organization", blurb: "Organization name and settings" },
+];
+
+// ---- per-user accounts ----------------------------------------------------
+
+export type CredentialMode = "shared" | "per_user";
+
+// Account is a named login that exists ON THE TARGET DEVICE — `jsmith-admin`.
+// It is never the person's own password: GuardRail must not hold one.
+export interface Account {
+  credential_id: string;
+  name: string;
+  username: string;
+  injection: string;
+  user_id?: string;
+  user?: string;
+  // "device" — bound to this device. "group" — inherited from an asset group,
+  // covering everything in its subtree.
+  scope: "device" | "group";
+  group_id?: string;
+  group_name?: string;
+  // How long the secret has gone unchanged, from the rotation if there was one
+  // and from creation otherwise.
+  age_days: number;
+  rotated_at?: string;
+}
+
+// WhoAmI is which account the current user would connect as, answered before
+// they press Connect rather than after.
+export interface WhoAmI {
+  credential_mode: CredentialMode;
+  allow_unmanaged: boolean;
+  has_credential: boolean;
+  username?: string;
+  per_user?: boolean;
+  inherited?: boolean;
+  age_days?: number;
+}
+
+// ---- approvals ------------------------------------------------------------
+
+export type RequestStatus = "pending" | "approved" | "denied" | "expired" | "cancelled";
+export type GrantScope = "once" | "always";
+
+export interface AccessDecision {
+  by: string;
+  decision: "approve" | "deny";
+  note?: string;
+  decided_at: string;
+}
+
+export interface AccessRequest {
+  id: string;
+  user_id: string;
+  device_id: string;
+  requester: string;
+  device: string;
+  status: RequestStatus;
+  reason: string;
+  requested_minutes: number;
+  granted_minutes?: number;
+  grant_scope?: GrantScope;
+  approvals: number;
+  min_approvals: number;
+  requester_level: number;
+  is_emergency: boolean;
+  reviewed: boolean;
+  review_note?: string;
+  escalated_level?: number;
+  session_id?: string;
+  expires_at: string;
+  created_at: string;
+  decisions: AccessDecision[];
+}
+
+// Grant is standing permission for one person on one device — the "allow all
+// time" button. It gets its own list and its own revoke path, because access
+// that only accumulates and can never be enumerated is how a deployment rots.
+export interface AccessGrant {
+  id: string;
+  user_id: string;
+  user: string;
+  device_id: string;
+  device: string;
+  granted_by?: string;
+  expires_at?: string;
+  revoked_at?: string;
+  live: boolean;
+  created_at: string;
+}
+
+// Windows a requester can ask for. Capped well below a working day: an access
+// request is for a task, and "I need it until tomorrow" is a standing grant
+// wearing a disguise.
+export const REQUEST_WINDOWS: { minutes: number; label: string }[] = [
+  { minutes: 15, label: "15 minutes" },
+  { minutes: 30, label: "30 minutes" },
+  { minutes: 60, label: "1 hour" },
+  { minutes: 120, label: "2 hours" },
+  { minutes: 240, label: "4 hours" },
+  { minutes: 480, label: "8 hours" },
 ];

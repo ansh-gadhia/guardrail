@@ -122,6 +122,15 @@ func startWorkers(ctx context.Context, log *zap.Logger, notifySvc *appnotify.Ser
 				} else if n > 0 {
 					log.Info("ended idle sessions", zap.Int("count", n))
 				}
+				// Access requests get the same sweep. A request nobody answered
+				// climbs one rank and gets a fresh window before it dies, so a
+				// request whose first approver was on leave finds somebody else
+				// rather than quietly expiring.
+				if esc, exp, err := broker.ExpireRequests(ctx); err != nil {
+					log.Warn("access request sweep failed", zap.Error(err))
+				} else if esc > 0 || exp > 0 {
+					log.Info("swept access requests", zap.Int("escalated", esc), zap.Int("expired", exp))
+				}
 			}
 		}
 	}()
@@ -338,7 +347,9 @@ func run() error {
 	auditRec := postgres.NewAuditRepo(pg)
 	assetsSvc := appassets.NewService(postgres.NewDeviceRepo(pg), postgres.NewAssetGroupRepo(pg), auditRec)
 	vaultSvc := appvault.NewService(postgres.NewCredentialRepo(pg), encryptor, auditRec)
-	assetsHandler := v1.NewAssetsHandler(assetsSvc, vaultSvc)
+	// WithUsers supplies the email lookup the bulk per-user account import needs:
+	// a CSV written by a person names people by email, not by UUID.
+	assetsHandler := v1.NewAssetsHandler(assetsSvc, vaultSvc).WithUsers(iamSvc)
 
 	// --- Notifications (M6) ---
 	notifySvc := appnotify.NewService(
@@ -544,6 +555,9 @@ func run() error {
 		Blobs:            blobStore,
 		Devices:          deviceLookup,
 		Creds:            credResolver,
+		Requests:         postgres.NewRequestRepo(pg),
+		Grants:           postgres.NewGrantRepo(pg),
+		Ranker:           appaccess.NewRoleRanker(postgres.NewRoleRepo(pg)),
 		Audit:            auditRec,
 		Notifier:         notifySvc,
 		Node:             cfg.Telemetry.ServiceName,

@@ -26,16 +26,26 @@ INSERT INTO permissions (key, description) VALUES
     ('group:write',          'Manage asset groups'),
     ('report:read',          'View/generate reports'),
     ('org:read',             'View organization settings'),
-    ('org:write',            'Manage organization settings')
+    ('org:write',            'Manage organization settings'),
+    -- decide and bypass are separate powers. Bypass exempts the holder's OWN
+    -- connects from the gate; it says nothing about deciding other people's
+    -- requests, and treating them as one check would delete the organization's
+    -- approval capacity the moment bypass was granted.
+    ('approval:read',        'View access requests awaiting decision'),
+    ('approval:decide',      'Approve or deny access requests'),
+    ('approval:bypass',      'Connect to approval-gated devices without asking')
 ON CONFLICT (key) DO NOTHING;
 
 -- ---- System role templates (organization_id NULL, is_system true) ----
-INSERT INTO roles (id, organization_id, name, description, is_system) VALUES
-    ('10000000-0000-0000-0000-000000000001', NULL, 'Super Admin',        'Full cross-tenant administration', true),
-    ('10000000-0000-0000-0000-000000000002', NULL, 'Organization Admin', 'Full administration within an org', true),
-    ('10000000-0000-0000-0000-000000000003', NULL, 'Auditor',            'Read-only access to logs and recordings', true),
-    ('10000000-0000-0000-0000-000000000004', NULL, 'Operator',           'Connect to devices and manage sessions', true),
-    ('10000000-0000-0000-0000-000000000005', NULL, 'Read-only',          'View assets and sessions', true)
+-- approval_level ranks a role for the approval gate: an approver must outrank
+-- the requester strictly. Gaps are deliberate, so a custom role can be slotted
+-- between two system roles without renumbering everything.
+INSERT INTO roles (id, organization_id, name, description, is_system, approval_level) VALUES
+    ('10000000-0000-0000-0000-000000000001', NULL, 'Super Admin',        'Full cross-tenant administration', true, 100),
+    ('10000000-0000-0000-0000-000000000002', NULL, 'Organization Admin', 'Full administration within an org', true, 50),
+    ('10000000-0000-0000-0000-000000000003', NULL, 'Auditor',            'Read-only access to logs and recordings', true, 0),
+    ('10000000-0000-0000-0000-000000000004', NULL, 'Operator',           'Connect to devices and manage sessions', true, 10),
+    ('10000000-0000-0000-0000-000000000005', NULL, 'Read-only',          'View assets and sessions', true, 0)
 ON CONFLICT (id) DO NOTHING;
 
 -- Organization Admin: everything except cross-tenant.
@@ -46,7 +56,9 @@ ON CONFLICT DO NOTHING;
 -- Auditor: read logs, sessions, recordings.
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT '10000000-0000-0000-0000-000000000003', p.id FROM permissions p
-WHERE p.key IN ('log:read', 'session:read', 'recording:read', 'report:read', 'device:read', 'user:read')
+WHERE p.key IN ('log:read', 'session:read', 'recording:read', 'report:read', 'device:read', 'user:read',
+                -- Auditors watch the approval queue; they do not decide in it.
+                'approval:read')
 ON CONFLICT DO NOTHING;
 
 -- Operator: connect + manage own sessions + read devices/credentials metadata.

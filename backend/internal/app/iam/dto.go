@@ -82,6 +82,9 @@ type Principal struct {
 	IsSuperAdmin   bool
 	Roles          []string
 	Permissions    []string
+	// ApprovalLevel is this person's rank in the approval hierarchy, so the
+	// console can say who they are able to decide for.
+	ApprovalLevel int
 	// MustChangePassword tells the console to force a password change before
 	// letting this person do anything else.
 	MustChangePassword bool
@@ -96,6 +99,7 @@ func principalFromUser(u *iam.User) Principal {
 		IsSuperAdmin:       u.HasSuperAdmin(),
 		Roles:              u.RoleNames(),
 		Permissions:        u.Permissions(),
+		ApprovalLevel:      u.ApprovalLevel(),
 		MustChangePassword: u.MustChangePassword,
 	}
 }
@@ -108,6 +112,7 @@ func claimsFromUser(u *iam.User) iam.Claims {
 		IsSuperAdmin:   u.HasSuperAdmin(),
 		Roles:          u.RoleNames(),
 		Permissions:    u.Permissions(),
+		ApprovalLevel:  u.ApprovalLevel(),
 	}
 }
 
