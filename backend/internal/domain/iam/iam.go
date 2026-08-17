@@ -109,6 +109,24 @@ func (u *User) Permissions() []string {
 	return out
 }
 
+// IsBootstrapAdmin reports whether this is the account the platform was
+// installed with — the one seed-admin creates from GUARDRAIL_ADMIN_EMAIL on
+// first boot.
+//
+// It is identified by the is_super_admin COLUMN specifically, not by
+// HasSuperAdmin: the column is set only by that bootstrap, while the Super Admin
+// ROLE is what the console hands out. So this distinguishes "the account that
+// exists because the platform exists" from "somebody an administrator promoted",
+// and only the first is protected.
+//
+// It has to be protected because it is the recovery path. Every other privileged
+// account can be recreated by it; nothing can recreate it except shell access to
+// the server. An administrator who demotes or deletes it — by accident, or
+// because somebody talked them into it — has locked the organization out of its
+// own privileged-access platform, and no amount of remaining permission puts it
+// back.
+func (u *User) IsBootstrapAdmin() bool { return u.IsSuperAdmin }
+
 // ApprovalLevel is the user's rank: the highest of their roles'.
 func (u *User) ApprovalLevel() int { return EffectiveApprovalLevel(u.Roles) }
 

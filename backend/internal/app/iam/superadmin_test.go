@@ -140,7 +140,10 @@ func TestSuperAdminCanGrantSuperAdminRole(t *testing.T) {
 		UserID: iam.NewID(), OrganizationID: orgID, Email: "root@acme.com",
 		IsSuperAdmin: true,
 	}
-	target := iam.NewID()
+	// A real user: AssignRoles looks the target up so it can refuse changes to
+	// the installation account, so a phantom id is now a 404 rather than a
+	// role grant that would have failed later on a foreign key.
+	target := h.addUserInOrg(t, orgID, "target@acme.com", "TargetPass123!").ID
 
 	if err := h.svc.AssignRoles(context.Background(), actor, target, []iam.ID{iam.SuperAdminRoleID}, ReqMeta{}); err != nil {
 		t.Fatalf("a super admin was refused: %v", err)
@@ -160,7 +163,7 @@ func TestNonSuperAdminCanGrantOrdinaryRoles(t *testing.T) {
 		UserID: iam.NewID(), OrganizationID: orgID, Email: "orgadmin@acme.com",
 		IsSuperAdmin: false, Permissions: []string{"user:write"},
 	}
-	target := iam.NewID()
+	target := h.addUserInOrg(t, orgID, "ordinary@acme.com", "TargetPass123!").ID
 	ordinary := []iam.ID{iam.NewID(), iam.NewID()}
 
 	if err := h.svc.AssignRoles(context.Background(), actor, target, ordinary, ReqMeta{}); err != nil {
@@ -168,5 +171,49 @@ func TestNonSuperAdminCanGrantOrdinaryRoles(t *testing.T) {
 	}
 	if roles, called := h.users.rolesOf(target); !called || len(roles) != 2 {
 		t.Errorf("ordinary roles not granted: called=%v roles=%v", called, roles)
+	}
+}
+
+// The account GuardRail was installed with is refused to everybody, including a
+// super admin. It is the recovery path: nothing inside the product can recreate
+// it, so a rule a privileged person could switch off would be a speed bump
+// rather than a protection.
+func TestBootstrapAdminIsProtectedFromEveryone(t *testing.T) {
+	h := newHarness(t)
+	orgID := h.addOrg("acme")
+	root := iam.Claims{
+		UserID: iam.NewID(), OrganizationID: orgID, Email: "root@acme.com", IsSuperAdmin: true,
+	}
+
+	boot := h.addUserInOrg(t, orgID, "installed@acme.com", "BootPass123456!")
+	// The is_super_admin COLUMN is what seed-admin sets; that is the marker.
+	boot.IsSuperAdmin = true
+	if err := h.users.Create(context.Background(), iam.TenantScope{OrganizationID: orgID}, boot); err != nil {
+		t.Fatalf("store bootstrap admin: %v", err)
+	}
+
+	if err := h.svc.AssignRoles(context.Background(), root, boot.ID, []iam.ID{iam.NewID()}, ReqMeta{}); !errors.Is(err, iam.ErrProtectedAccount) {
+		t.Fatalf("a super admin must not be able to change its roles, got %v", err)
+	}
+	if err := h.svc.DeleteUser(context.Background(), root, boot.ID, ReqMeta{}); !errors.Is(err, iam.ErrProtectedAccount) {
+		t.Fatalf("a super admin must not be able to delete it, got %v", err)
+	}
+
+	// Its own holder cannot demote it either — self-service lockout is still
+	// lockout.
+	self := iam.Claims{UserID: boot.ID, OrganizationID: orgID, Email: boot.Email.String(), IsSuperAdmin: true}
+	if err := h.svc.AssignRoles(context.Background(), self, boot.ID, nil, ReqMeta{}); !errors.Is(err, iam.ErrProtectedAccount) {
+		t.Fatalf("the account must not be able to demote itself, got %v", err)
+	}
+
+	// A super admin promoted through the console holds the ROLE, not the column,
+	// and stays manageable — otherwise the protection would quietly freeze every
+	// admin an organization ever creates.
+	promoted := h.addUserInOrg(t, orgID, "promoted@acme.com", "PromoPass123456!")
+	if err := h.svc.AssignRoles(context.Background(), root, promoted.ID, []iam.ID{iam.SuperAdminRoleID}, ReqMeta{}); err != nil {
+		t.Fatalf("promoting through the console should work: %v", err)
+	}
+	if err := h.svc.AssignRoles(context.Background(), root, promoted.ID, nil, ReqMeta{}); err != nil {
+		t.Fatalf("a console-promoted super admin must remain demotable: %v", err)
 	}
 }

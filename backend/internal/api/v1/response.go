@@ -43,6 +43,19 @@ func fail(c *gin.Context, err error) {
 		problem(c, http.StatusUnauthorized, "Session Expired", "please sign in again")
 	case errors.Is(err, iam.ErrPermissionDenied):
 		problem(c, http.StatusForbidden, "Forbidden", "permission denied")
+	// Named separately from ErrPermissionDenied: the caller almost certainly DOES
+	// have the permission — this account is refused to everybody, including super
+	// admins — so "permission denied" would send them to check a grant that is
+	// already there. The message says which account and why, and names the way
+	// out, because the way out is not in the console.
+	case errors.Is(err, iam.ErrProtectedAccount):
+		// Written out rather than echoing err.Error(): the wrapped sentinel reads
+		// "iam: this account is protected: ...", and a Go error string is not a
+		// sentence to show somebody. The account is named on the row they clicked.
+		problem(c, http.StatusForbidden, "Protected Account",
+			"This is the account GuardRail was installed with. Its roles cannot be changed and "+
+				"it cannot be removed, by anyone — it is how you get back in if every other "+
+				"administrator is lost. To replace it, run `guardrail seed-admin` on the server.")
 	// Named separately from ErrPermissionDenied: the caller is allowed to issue
 	// tokens, they just asked for a permission no token may carry. Saying
 	// "permission denied" would send them to check their own role, which is not

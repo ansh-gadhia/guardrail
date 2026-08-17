@@ -23,4 +23,7 @@ var (
 	ErrMFAChallengeInvalid = errors.New("iam: mfa challenge invalid or expired")
 	ErrMFANotEnrolled      = errors.New("iam: mfa not enrolled")
 	ErrMFAAlreadyEnrolled  = errors.New("iam: mfa already enrolled")
+	// ErrProtectedAccount is returned when somebody tries to change or remove the
+	// account the platform was installed with. See User.IsBootstrapAdmin.
+	ErrProtectedAccount = errors.New("iam: this account is protected")
 )

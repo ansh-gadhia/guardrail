@@ -233,8 +233,13 @@ export interface UserRow {
   email: string;
   username: string;
   is_super_admin: boolean;
+  // The account this GuardRail was installed with. Its roles cannot be changed
+  // and it cannot be removed — by anyone, including other super admins — because
+  // it is the way back in if every other administrator is lost.
+  is_bootstrap_admin: boolean;
   roles: string[];
   permissions: string[];
+  approval_level: number;
 }
 
 export interface Role {

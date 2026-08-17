@@ -85,6 +85,10 @@ type Principal struct {
 	// ApprovalLevel is this person's rank in the approval hierarchy, so the
 	// console can say who they are able to decide for.
 	ApprovalLevel int
+	// IsBootstrapAdmin marks the account the platform was installed with. The
+	// console uses it to explain why its roles cannot be edited, rather than
+	// silently hiding the control and leaving somebody hunting for it.
+	IsBootstrapAdmin bool
 	// MustChangePassword tells the console to force a password change before
 	// letting this person do anything else.
 	MustChangePassword bool
@@ -97,6 +101,7 @@ func principalFromUser(u *iam.User) Principal {
 		Email:              u.Email.String(),
 		Username:           u.Username,
 		IsSuperAdmin:       u.HasSuperAdmin(),
+		IsBootstrapAdmin:   u.IsBootstrapAdmin(),
 		Roles:              u.RoleNames(),
 		Permissions:        u.Permissions(),
 		ApprovalLevel:      u.ApprovalLevel(),

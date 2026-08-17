@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	appiam "github.com/guardrail/guardrail/internal/app/iam"
 	domaccess "github.com/guardrail/guardrail/internal/domain/access"
 	domassets "github.com/guardrail/guardrail/internal/domain/assets"
 	domiam "github.com/guardrail/guardrail/internal/domain/iam"
@@ -549,5 +550,77 @@ func TestIntegration_RequestsFilterByUser(t *testing.T) {
 	}
 	if list[0].ID != want.ID {
 		t.Fatalf("expected %v, got %v", want.ID, list[0].ID)
+	}
+}
+
+// A NON-super-admin must be able to approve somebody who ranks below them.
+//
+// Every earlier test approved as a super admin, who bypasses rank entirely, so
+// they all passed while the rank hierarchy was inert: user roles were hydrated
+// without approval_level, so every ordinary principal carried rank 0 and the
+// strict comparison 0 > 0 meant nobody but a super admin could decide anything.
+// This asserts the claims a real sign-in produces, not levels handed in by the
+// test.
+func TestIntegration_NonSuperAdminApproverCarriesRealRank(t *testing.T) {
+	svc, closeIAM := newService(t)
+	defer closeIAM()
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+	f := newApprovalFixture(t, pg)
+	actor := superAdmin()
+
+	orgAdminRole := domiam.ID(uuid.MustParse("10000000-0000-0000-0000-000000000002"))
+	operatorRole := domiam.ID(uuid.MustParse("10000000-0000-0000-0000-000000000004"))
+
+	boss, err := svc.CreateUser(ctx, actor, appiam.CreateUserInput{
+		Email: "boss-" + uuid.NewString()[:8] + "@example.com", Username: "boss",
+		Password: "IntegrationPass123!", RoleIDs: []domiam.ID{orgAdminRole},
+	})
+	if err != nil {
+		t.Fatalf("create approver: %v", err)
+	}
+	op, err := svc.CreateUser(ctx, actor, appiam.CreateUserInput{
+		Email: "op-" + uuid.NewString()[:8] + "@example.com", Username: "op",
+		Password: "IntegrationPass123!", RoleIDs: []domiam.ID{operatorRole},
+	})
+	if err != nil {
+		t.Fatalf("create requester: %v", err)
+	}
+
+	// The ranks a sign-in would actually put on the token.
+	if boss.ApprovalLevel != 50 {
+		t.Fatalf("Organization Admin principal carries rank %d, want 50 — user roles are "+
+			"being hydrated without approval_level", boss.ApprovalLevel)
+	}
+	if op.ApprovalLevel != 10 {
+		t.Fatalf("Operator principal carries rank %d, want 10", op.ApprovalLevel)
+	}
+
+	// And the gate honours them: the Organization Admin decides the Operator's
+	// request without being a super admin.
+	d := f.device(t, ctx, 1)
+	req := f.request(t, ctx, op.UserID, d.ID, op.ApprovalLevel, 1)
+	got, err := f.requests.AddDecision(ctx, f.scope, req.ID, boss.UserID,
+		domaccess.Decision{Decision: domaccess.DecisionApprove}, boss.ApprovalLevel, false)
+	if err != nil {
+		t.Fatalf("an Organization Admin must be able to approve an Operator: %v", err)
+	}
+	if got.Status != domaccess.RequestApproved {
+		t.Fatalf("status = %q, want approved", got.Status)
+	}
+
+	// A peer still cannot.
+	peer, err := svc.CreateUser(ctx, actor, appiam.CreateUserInput{
+		Email: "peer-" + uuid.NewString()[:8] + "@example.com", Username: "peer",
+		Password: "IntegrationPass123!", RoleIDs: []domiam.ID{operatorRole},
+	})
+	if err != nil {
+		t.Fatalf("create peer: %v", err)
+	}
+	req2 := f.request(t, ctx, op.UserID, d.ID, op.ApprovalLevel, 1)
+	if _, err := f.requests.AddDecision(ctx, f.scope, req2.ID, peer.UserID,
+		domaccess.Decision{Decision: domaccess.DecisionApprove}, peer.ApprovalLevel, false); !errors.Is(err, domaccess.ErrCannotDecide) {
+		t.Fatalf("an equal rank must not approve, got %v", err)
 	}
 }

@@ -349,3 +349,38 @@ func (h *Handler) approvalCoverage(c *gin.Context) {
 	sort.Slice(out, func(i, j int) bool { return out[i]["level"].(int) < out[j]["level"].(int) })
 	c.JSON(http.StatusOK, gin.H{"coverage": out, "gaps": gaps})
 }
+
+// resetPasswordRequest optionally carries a chosen password. Blank means "make
+// one up", which is the safe default and what the console sends.
+type resetPasswordRequest struct {
+	Password string `json:"password"`
+}
+
+// resetPassword sets a temporary password on somebody else's account.
+//
+// The temporary password is returned ONCE, in this response, and never stored in
+// the clear or retrievable again — the same one-time-reveal contract as an API
+// token. Requires user:write, and the service refuses the installation account
+// and any account that outranks the caller.
+func (h *Handler) resetPassword(c *gin.Context) {
+	actor, _ := middleware.ClaimsFrom(c)
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		badRequest(c, "invalid user id")
+		return
+	}
+	var body resetPasswordRequest
+	_ = c.ShouldBindJSON(&body)
+
+	res, err := h.svc.ResetPassword(c.Request.Context(), actor, id, strings.TrimSpace(body.Password), metaFrom(c))
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"email":    res.Email,
+		"password": res.Password,
+		"warning": "Shown once. Give it to them over a channel you trust — they must change it at " +
+			"next sign-in, and every session they had is now signed out.",
+	})
+}

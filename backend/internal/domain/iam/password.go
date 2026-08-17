@@ -1,6 +1,8 @@
 package iam
 
 import (
+	"crypto/rand"
+	"errors"
 	"regexp"
 	"strings"
 	"unicode"
@@ -141,4 +143,39 @@ func ValidatePassword(pw string) error {
 		return ErrPasswordPolicy
 	}
 	return nil
+}
+
+// temporaryAlphabet excludes characters that are read wrong when a temporary
+// password is spoken over a phone or copied off a screen: 0/O, 1/l/I, 5/S.
+// A reset password gets typed by hand more often than any other, and a
+// transcription failure looks exactly like a reset that did not work.
+const temporaryAlphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// TemporaryPasswordLen is comfortably above MinPasswordLen. This credential
+// exists to be typed once and replaced, so length costs nothing and buys margin.
+const TemporaryPasswordLen = 20
+
+// GenerateTemporaryPassword mints a random password for an administrator to hand
+// over, using crypto/rand.
+//
+// It loops until the result satisfies the platform policy rather than assuming
+// it will: ScorePassword rejects patterns as well as length, and a generator
+// that silently produced a password the platform would refuse would fail at the
+// worst moment — mid-reset, for somebody already locked out.
+func GenerateTemporaryPassword() (string, error) {
+	for attempt := 0; attempt < 20; attempt++ {
+		buf := make([]byte, TemporaryPasswordLen)
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
+		}
+		out := make([]byte, TemporaryPasswordLen)
+		for i, b := range buf {
+			out[i] = temporaryAlphabet[int(b)%len(temporaryAlphabet)]
+		}
+		pw := string(out)
+		if ValidatePassword(pw) == nil {
+			return pw, nil
+		}
+	}
+	return "", errors.New("iam: could not generate a temporary password meeting the policy")
 }

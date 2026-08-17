@@ -80,6 +80,10 @@ func (h *Handler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 		users.GET("/:id", middleware.RequirePermission("user:read"), h.getUser)
 		users.DELETE("/:id", middleware.RequirePermission("user:write"), h.deleteUser)
 		users.PUT("/:id/roles", middleware.RequirePermission("user:write"), h.assignRoles)
+		// Sets a temporary password for somebody who has locked themselves out.
+		// The service refuses the installation account and anybody who outranks
+		// the caller, so user:write is the floor rather than the whole rule.
+		users.POST("/:id/reset-password", middleware.RequirePermission("user:write"), h.resetPassword)
 	}
 
 	orgs := rg.Group("/organizations", authMW)

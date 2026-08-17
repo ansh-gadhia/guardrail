@@ -23,13 +23,17 @@ type tokenResponse struct {
 }
 
 type principalDTO struct {
-	UserID             string   `json:"user_id"`
-	OrganizationID     string   `json:"organization_id"`
-	Email              string   `json:"email"`
-	Username           string   `json:"username"`
-	IsSuperAdmin       bool     `json:"is_super_admin"`
+	UserID         string `json:"user_id"`
+	OrganizationID string `json:"organization_id"`
+	Email          string `json:"email"`
+	Username       string `json:"username"`
+	IsSuperAdmin   bool   `json:"is_super_admin"`
+	// IsBootstrapAdmin marks the account this GuardRail was installed with. The
+	// console shows why its roles cannot be edited rather than hiding the control.
+	IsBootstrapAdmin   bool     `json:"is_bootstrap_admin"`
 	Roles              []string `json:"roles"`
 	Permissions        []string `json:"permissions"`
+	ApprovalLevel      int      `json:"approval_level"`
 	MustChangePassword bool     `json:"must_change_password"`
 }
 
@@ -40,8 +44,10 @@ func toPrincipalDTO(p appiam.Principal) principalDTO {
 		Email:              p.Email,
 		Username:           p.Username,
 		IsSuperAdmin:       p.IsSuperAdmin,
+		IsBootstrapAdmin:   p.IsBootstrapAdmin,
 		Roles:              p.Roles,
 		Permissions:        p.Permissions,
+		ApprovalLevel:      p.ApprovalLevel,
 		MustChangePassword: p.MustChangePassword,
 	}
 }

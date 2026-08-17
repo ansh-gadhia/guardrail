@@ -4,7 +4,7 @@ import { api, problemDetail } from "@/lib/api";
 import type { UserRow, Role, Permission, RoleDeviceAccess, AssetGroup } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, ErrorNote, EmptyState, Modal, Field, StatCluster, Badge, Skeleton, Spinner, Tabs, Input, Button, cn } from "@/components/ui";
-import { IconUsers, IconPlus, IconTrash, IconShield, IconLock, IconCheck, IconMinus, IconSliders, IconAudit, IconDevices, IconFolder, IconGlobe, IconKey } from "@/components/icons";
+import { IconUsers, IconPlus, IconTrash, IconShield, IconLock, IconCheck, IconMinus, IconSliders, IconAudit, IconDevices, IconFolder, IconGlobe, IconKey, IconAlert, IconClipboard } from "@/components/icons";
 import { toast } from "@/components/Toast";
 import { AccountsAdmin } from "@/components/AccountsAdmin";
 import { PasswordStrength, scorePassword } from "@/components/PasswordStrength";
@@ -17,6 +17,7 @@ export function AccessPage() {
   const canBindCredentials = useAuth((s) => s.has("credential:write"));
   const [showCreate, setShowCreate] = useState(false);
   const [editRolesFor, setEditRolesFor] = useState<UserRow | null>(null);
+  const [resetFor, setResetFor] = useState<UserRow | null>(null);
   const [editAccessFor, setEditAccessFor] = useState<Role | null>(null);
 
   const users = useQuery<UserRow[]>({
@@ -113,7 +114,10 @@ export function AccessPage() {
                   </div>
                   <div className="mt-3 flex flex-wrap gap-1.5">
                     {u.is_super_admin ? (
-                      <Badge tone="accent">Super Admin</Badge>
+                      <>
+                        <Badge tone="accent">Super Admin</Badge>
+                        {u.is_bootstrap_admin && <Badge tone="neutral">installation account</Badge>}
+                      </>
                     ) : u.roles.length ? (
                       u.roles.map((r) => (
                         <Badge key={r} tone="neutral">
@@ -124,25 +128,40 @@ export function AccessPage() {
                       <span className="text-xs text-faint">no roles</span>
                     )}
                   </div>
-                  {canWrite && (!u.is_super_admin || u.user_id !== me?.user_id) && (
+                  {canWrite && (
                     <div className="mt-4 flex items-center justify-end gap-2 border-t border-line pt-3">
-                      {!u.is_super_admin && (
-                        <button className="btn-subtle" onClick={() => setEditRolesFor(u)}>
-                          Edit roles
-                        </button>
-                      )}
-                      {u.user_id !== me?.user_id && (
-                        <button
-                          className="btn-subtle text-faint hover:text-danger"
-                          disabled={remove.isPending}
-                          aria-label={`Remove user ${u.email}`}
-                          title="Remove user"
-                          onClick={() => {
-                            if (window.confirm(`Remove user "${u.email}"?`)) remove.mutate(u.user_id);
-                          }}
+                      {u.is_bootstrap_admin ? (
+                        /* Say WHY rather than hiding the controls. A missing button
+                           sends somebody hunting for a permission they already have;
+                           this account is refused to everyone, including them. */
+                        <span
+                          className="flex items-center gap-1.5 text-xs text-faint"
+                          title="This is the account GuardRail was installed with. It is how you get back in if every other administrator is lost, so its roles cannot be changed and it cannot be removed — by anyone. Replace it with `guardrail seed-admin` on the server."
                         >
-                          <IconTrash size={15} />
-                        </button>
+                          <IconLock size={13} /> Installation account — locked
+                        </span>
+                      ) : (
+                        <>
+                          <button className="btn-subtle" onClick={() => setEditRolesFor(u)}>
+                            Edit roles
+                          </button>
+                          <button className="btn-subtle" onClick={() => setResetFor(u)}>
+                            Reset password
+                          </button>
+                          {u.user_id !== me?.user_id && (
+                            <button
+                              className="btn-subtle text-faint hover:text-danger"
+                              disabled={remove.isPending}
+                              aria-label={`Remove user ${u.email}`}
+                              title="Remove user"
+                              onClick={() => {
+                                if (window.confirm(`Remove user "${u.email}"?`)) remove.mutate(u.user_id);
+                              }}
+                            >
+                              <IconTrash size={15} />
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
                   )}
@@ -155,6 +174,10 @@ export function AccessPage() {
         <AccountsAdmin />
       ) : (
         <RolesAndPermissions roles={roles} perms={perms} editAccessFor={editAccessFor} onEditAccess={setEditAccessFor} />
+      )}
+
+      {resetFor && (
+        <ResetPasswordModal user={resetFor} onClose={() => setResetFor(null)} />
       )}
 
       {showCreate && roles.data && (
@@ -832,6 +855,17 @@ function EditRolesModal({
     onSuccess: onSaved,
   });
 
+  // What this change actually does to their standing. Roles are a checklist, but
+  // the thing an administrator is really deciding is how far this person can
+  // reach and whose access they can sign off — so spell that out rather than
+  // leaving it to be inferred from a set of ticks.
+  const selected = roles.filter((r) => sel.has(r.id));
+  const beforeRank = user.approval_level ?? 0;
+  const afterRank = selected.reduce((m, r) => Math.max(m, r.approval_level ?? 0), 0);
+  const becomesSuper = selected.some(isSuperRole);
+  const wasSuper = user.is_super_admin;
+  const rankMoved = afterRank !== beforeRank;
+
   return (
     <Modal
       title={`Roles — ${user.email}`}
@@ -853,6 +887,46 @@ function EditRolesModal({
         </div>
       )}
       <RoleChecklist roles={roles} selected={sel} toggle={toggle} />
+
+      <div className="mt-4 space-y-2 border-t border-line pt-3 text-sm">
+        {rankMoved && (
+          <div className={cn("flex items-center gap-2", afterRank > beforeRank ? "text-warn" : "text-fg")}>
+            <IconShield size={14} className="shrink-0" />
+            <span>
+              Approval rank {afterRank > beforeRank ? "rises" : "falls"} from{" "}
+              <b>{beforeRank}</b> to <b>{afterRank}</b> — they will be able to decide requests from
+              anybody ranked below {afterRank}.
+            </span>
+          </div>
+        )}
+        {becomesSuper && !wasSuper && (
+          <div className="flex items-center gap-2 text-warn">
+            <IconAlert size={14} className="shrink-0" />
+            <span>
+              <b>Super Admin</b> is unrestricted and crosses every organization. It is not a higher
+              rank — it is no limit at all.
+            </span>
+          </div>
+        )}
+        {wasSuper && !becomesSuper && (
+          <div className="flex items-center gap-2 text-warn">
+            <IconAlert size={14} className="shrink-0" />
+            <span>
+              This removes <b>Super Admin</b>. Make sure somebody else still holds it.
+            </span>
+          </div>
+        )}
+        {selected.length === 0 && (
+          <div className="flex items-center gap-2 text-danger">
+            <IconAlert size={14} className="shrink-0" />
+            <span>No roles selected — they will be able to sign in and do nothing.</span>
+          </div>
+        )}
+        <p className="text-xs text-muted">
+          Saving signs this person out of the console, so the change takes effect on their next
+          sign-in rather than whenever their token happens to expire.
+        </p>
+      </div>
     </Modal>
   );
 }
@@ -946,6 +1020,97 @@ function ApprovalRankEditor({
           <Button variant="primary" loading={save.isPending} onClick={() => save.mutate()}>Save</Button>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+// ResetPasswordModal issues a temporary password for somebody who is locked out.
+//
+// The value is shown ONCE and never retrievable again, so the reveal stays until
+// it is dismissed — no auto-hide, no toast. An administrator who looks away and
+// comes back to an empty screen has to reset the account a second time, which
+// signs the person out again.
+function ResetPasswordModal({ user, onClose }: { user: UserRow; onClose: () => void }) {
+  const [issued, setIssued] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const reset = useMutation({
+    mutationFn: async () =>
+      (await api.post<{ password: string }>(`/users/${user.user_id}/reset-password`, {})).data,
+    onSuccess: (d) => setIssued(d.password),
+    onError: (e) => toast.error(problemDetail(e, "Could not reset the password")),
+  });
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(issued ?? "");
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      toast.error("Couldn't reach the clipboard — select the text and copy it");
+    }
+  };
+
+  if (issued) {
+    return (
+      <Modal
+        title="Temporary password"
+        onClose={onClose}
+        footer={
+          <button className="btn-primary" onClick={onClose}>
+            I have given it to them
+          </button>
+        }
+      >
+        <p className="text-sm text-fg">
+          Give this to <b>{user.email}</b> over a channel you trust. It is shown once and cannot be
+          retrieved again.
+        </p>
+        <div className="mt-3 rounded-lg border border-accent/40 bg-accent-soft/40 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <code className="break-all font-mono text-base text-fg">{issued}</code>
+            <button className="btn-subtle shrink-0" onClick={copy}>
+              {copied ? <IconCheck size={15} /> : <IconClipboard size={15} />}
+            </button>
+          </div>
+        </div>
+        <ul className="mt-3 space-y-1 text-xs text-muted">
+          <li>They must choose a new password at their next sign-in.</li>
+          <li>Every session they had is signed out, so a lost laptop stops being a way in.</li>
+        </ul>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal
+      title={`Reset password — ${user.email}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn-ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn-primary" disabled={reset.isPending} onClick={() => reset.mutate()}>
+            {reset.isPending ? "Resetting…" : "Issue temporary password"}
+          </button>
+        </>
+      }
+    >
+      <p className="text-sm text-fg">
+        Use this when somebody has forgotten their password and cannot sign in.
+      </p>
+      <ul className="mt-3 space-y-1.5 text-sm text-muted">
+        <li>A random temporary password is generated and shown to you once.</li>
+        <li>They are forced to replace it at next sign-in, so you never hold their credential.</li>
+        <li>Every session they currently have is signed out.</li>
+      </ul>
+      {/* Say why there is no "set it to the usual one" box. */}
+      <p className="mt-3 text-xs text-muted">
+        There is deliberately no fixed default. On a platform that brokers privileged access, a
+        well-known reset password would make every account mid-reset takeable by anyone who had read
+        the documentation.
+      </p>
     </Modal>
   );
 }

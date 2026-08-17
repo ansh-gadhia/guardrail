@@ -251,15 +251,20 @@ func loadRoles(ctx context.Context, tx pgx.Tx, users []*iam.User) error {
 		ids = append(ids, s)
 		index[s] = u
 	}
+	// approval_level is selected here, not just in RoleRepo. This is the query
+	// that hydrates the roles a Principal and its JWT Claims are built from, so
+	// omitting it left every non-super-admin carrying rank 0 — and the gate
+	// requires an approver to outrank the requester STRICTLY, so 0 > 0 meant
+	// nobody but a super admin could approve anything.
 	rows, err := tx.Query(ctx, `
-		SELECT ur.user_id, r.id, r.name, r.description, r.is_system,
+		SELECT ur.user_id, r.id, r.name, r.description, r.is_system, r.approval_level,
 			COALESCE(array_agg(p.key) FILTER (WHERE p.key IS NOT NULL), '{}') AS perms
 		FROM user_roles ur
 		JOIN roles r ON r.id = ur.role_id
 		LEFT JOIN role_permissions rp ON rp.role_id = r.id
 		LEFT JOIN permissions p ON p.id = rp.permission_id
 		WHERE ur.user_id = ANY($1::uuid[])
-		GROUP BY ur.user_id, r.id, r.name, r.description, r.is_system`, ids)
+		GROUP BY ur.user_id, r.id, r.name, r.description, r.is_system, r.approval_level`, ids)
 	if err != nil {
 		return fmt.Errorf("postgres: load roles: %w", err)
 	}
@@ -267,7 +272,8 @@ func loadRoles(ctx context.Context, tx pgx.Tx, users []*iam.User) error {
 	for rows.Next() {
 		var userID, roleID iam.ID
 		var role iam.Role
-		if err := rows.Scan(&userID, &roleID, &role.Name, &role.Description, &role.IsSystem, &role.Permissions); err != nil {
+		if err := rows.Scan(&userID, &roleID, &role.Name, &role.Description, &role.IsSystem,
+			&role.ApprovalLevel, &role.Permissions); err != nil {
 			return err
 		}
 		role.ID = roleID
