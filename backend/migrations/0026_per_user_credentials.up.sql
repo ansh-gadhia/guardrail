@@ -36,10 +36,46 @@ COMMENT ON COLUMN devices.credential_mode IS
 -- every current row means exactly what it meant yesterday.
 ALTER TABLE device_credentials ADD COLUMN user_id UUID REFERENCES users (id) ON DELETE CASCADE;
 
+-- ---------------------------------------------------------------------------
+-- Collapse pre-existing duplicate bindings.
+-- ---------------------------------------------------------------------------
+-- The old schema allowed a device to hold several credentials; only the
+-- application kept it to one. So a real deployment has rows the new unique
+-- index below would reject, and the migration has to settle them rather than
+-- refuse to run.
+--
+-- Two kinds, and the first is the common one:
+--
+-- 1. Bindings to a SOFT-DELETED credential. Replacing a device's credential
+--    soft-deletes the old one but leaves its binding row behind, so every
+--    rotation since 0003 has left one of these. They are already invisible —
+--    every read path joins credentials with deleted_at IS NULL — so deleting
+--    them changes nothing anybody can observe.
+DELETE FROM device_credentials dc
+USING credentials c
+WHERE c.id = dc.credential_id AND c.deleted_at IS NOT NULL;
+
+-- 2. Genuinely several LIVE credentials on one device. Keep exactly the one the
+--    old resolution would have picked (ORDER BY is_default DESC, created_at) so
+--    that what the device authenticates with does not change, and drop the rest.
+--    The credentials themselves are untouched: this removes a binding, not
+--    secret material, so nothing becomes unrecoverable.
+DELETE FROM device_credentials dc
+WHERE EXISTS (
+    SELECT 1
+    FROM device_credentials other
+    JOIN credentials oc ON oc.id = other.credential_id AND oc.deleted_at IS NULL
+    JOIN credentials tc ON tc.id = dc.credential_id AND tc.deleted_at IS NULL
+    WHERE other.device_id = dc.device_id
+      AND other.credential_id <> dc.credential_id
+      AND (other.is_default, oc.created_at) > (dc.is_default, tc.created_at)
+);
+
 -- is_default is dropped rather than left in place. With user_id present it can
 -- no longer be answered without asking "default for whom?", and a flag that
 -- cannot be answered is a second, contradictory source of truth for resolution.
--- Mode plus owner decide it now.
+-- Mode plus owner decide it now. Dropped AFTER the collapse above, which uses it
+-- to decide which binding survives.
 ALTER TABLE device_credentials DROP COLUMN IF EXISTS is_default;
 
 -- The old primary key allowed one device to hold the same credential twice under
