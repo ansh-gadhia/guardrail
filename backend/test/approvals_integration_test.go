@@ -409,24 +409,145 @@ func TestIntegration_RankQueries(t *testing.T) {
 		t.Fatalf("effective level = %d, want 10 — MAX across roles, so a low role cannot demote", level)
 	}
 
-	// An ordinary rank has somebody above it, which is what the unapprovable-
-	// configuration check reads.
+	// The unapprovable-configuration check: with nobody above an Operator, a
+	// request at that rank could only ever expire — which is exactly what the
+	// device form refuses to let somebody configure.
+	//
+	// The approver is created here rather than assumed. Depending on whatever
+	// users happen to exist made this pass on a database that had been seeded
+	// with an admin and fail on a fresh one.
+	boss := f.user(t, ctx, "boss")
+	orgAdminRole := domiam.ID(uuid.MustParse("10000000-0000-0000-0000-000000000002"))
+	if err := f.users.SetRoles(ctx, f.tScope, boss, []domiam.ID{orgAdminRole}); err != nil {
+		t.Fatalf("assign org admin: %v", err)
+	}
 	n, err := f.roles.ApproverCountAbove(ctx, f.tScope, 10)
 	if err != nil {
 		t.Fatalf("approver count: %v", err)
 	}
 	if n == 0 {
-		t.Fatal("an Operator-level request should have at least one possible approver")
+		t.Fatal("an Organization Admin outranks an Operator and holds approval:decide, " +
+			"so an Operator-level request must have a possible approver")
 	}
 
-	// Super admins are counted at every level on purpose: AddDecision lets them
-	// decide regardless of rank, so a check that excluded them would report a
-	// deadlock that does not exist and block a device from being gated.
+	// Nobody outranks the super-admin level by rank alone, so an org with no
+	// super admin reports a gap there — which is the honest answer.
 	high, err := f.roles.ApproverCountAbove(ctx, f.tScope, domiam.SuperAdminLevel)
 	if err != nil {
 		t.Fatalf("approver count: %v", err)
 	}
-	if high == 0 {
-		t.Fatal("a super admin can decide any request, so they must count as an approver at every level")
+	before := high
+
+	// Super admins are counted at every level on purpose: AddDecision lets them
+	// decide regardless of rank, so excluding them would report a deadlock that
+	// does not exist and block a device from being gated. Prove it by adding one.
+	su := f.user(t, ctx, "root")
+	superRole := domiam.SuperAdminRoleID
+	if err := f.users.SetRoles(ctx, f.tScope, su, []domiam.ID{superRole}); err != nil {
+		t.Fatalf("assign super admin role: %v", err)
+	}
+	after, err := f.roles.ApproverCountAbove(ctx, f.tScope, domiam.SuperAdminLevel)
+	if err != nil {
+		t.Fatalf("approver count: %v", err)
+	}
+	if after != before+1 {
+		t.Fatalf("a super admin must count as an approver at every level: %d -> %d", before, after)
+	}
+	// Deliberately granted by ROLE, not by the is_super_admin column. That is the
+	// only route the console offers, and reading only the column here told an
+	// organization whose super admin was created that way that nobody could
+	// approve anything — blocking them from gating a device over a deadlock that
+	// did not exist.
+	_ = superRole
+}
+
+// A person at the pending-request cap must still be able to take emergency
+// access.
+//
+// Regression: the rate limit ran before the emergency branch mattered, so the
+// operator most likely to be at the cap — the one who has been hammering the
+// ordinary request button — was the one locked out of the 3am door.
+func TestIntegration_RateLimitDoesNotBlockEmergency(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+	f := newApprovalFixture(t, pg)
+
+	who := f.user(t, ctx, "operator")
+	d := f.device(t, ctx, 1)
+
+	// Fill the cap with ordinary pending requests.
+	for i := 0; i < domaccess.MaxPendingPerUser; i++ {
+		f.request(t, ctx, who, f.device(t, ctx, 1).ID, 10, 1)
+	}
+	n, err := f.requests.CountPending(ctx, f.scope, who)
+	if err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if n < domaccess.MaxPendingPerUser {
+		t.Fatalf("expected the cap to be reached, got %d pending", n)
+	}
+
+	// An emergency is created already approved, and must be storable regardless.
+	minutes := 30
+	em := &domaccess.Request{
+		ID: uuid.New(), OrganizationID: defaultOrgID, UserID: who, DeviceID: d.ID,
+		Status: domaccess.RequestApproved, Reason: "firewall down at 3am",
+		RequestedMinutes: minutes, GrantedMinutes: &minutes, MinApprovals: 1,
+		RequesterLevel: 10, IsEmergency: true,
+		ExpiresAt: time.Now().Add(domaccess.DefaultRequestTTL),
+	}
+	if err := f.requests.Create(ctx, f.scope, em); err != nil {
+		t.Fatalf("emergency request at the cap: %v", err)
+	}
+	if !em.Redeemable(time.Now()) {
+		t.Fatal("an emergency request must be immediately redeemable")
+	}
+
+	// And it must show up in the review queue rather than vanishing.
+	list, err := f.requests.List(ctx, f.scope, domaccess.RequestFilter{UnreviewedEmergency: true, Limit: 50})
+	if err != nil {
+		t.Fatalf("review queue: %v", err)
+	}
+	found := false
+	for i := range list {
+		if list[i].ID == em.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("emergency access must land in the review queue for after-the-fact sign-off")
+	}
+}
+
+// Listing must be narrowable to one person, which is what the console's "My
+// requests" tab asks for. Without it a privileged user asking for their own
+// requests was shown the whole tenant's.
+func TestIntegration_RequestsFilterByUser(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+	f := newApprovalFixture(t, pg)
+
+	mine := f.user(t, ctx, "mine")
+	theirs := f.user(t, ctx, "theirs")
+	d := f.device(t, ctx, 1)
+	want := f.request(t, ctx, mine, d.ID, 10, 1)
+	f.request(t, ctx, theirs, d.ID, 10, 1)
+
+	list, err := f.requests.List(ctx, f.scope, domaccess.RequestFilter{UserID: &mine, Limit: 50})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) == 0 {
+		t.Fatal("filtering by user returned nothing")
+	}
+	for i := range list {
+		if list[i].UserID != mine {
+			t.Fatalf("request %v belongs to somebody else — the filter leaked the tenant's requests", list[i].ID)
+		}
+	}
+	if list[0].ID != want.ID {
+		t.Fatalf("expected %v, got %v", want.ID, list[0].ID)
 	}
 }

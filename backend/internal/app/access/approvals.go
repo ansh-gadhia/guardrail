@@ -156,12 +156,19 @@ func (s *Service) raiseRequest(ctx context.Context, actor iam.Claims, ep access.
 	if opts.Reason == "" {
 		return nil, access.ErrInvalid
 	}
-	pending, err := s.requests.CountPending(ctx, scopeOf(actor), actor.UserID)
-	if err != nil {
-		return nil, err
-	}
-	if pending >= access.MaxPendingPerUser {
-		return nil, access.ErrTooManyRequests
+	// The rate limit exists so one frustrated operator cannot bury every approver
+	// in notifications. It must NOT apply to an emergency: somebody reaching for
+	// that button has usually been hammering the ordinary one first, so the
+	// person most likely to be at the cap is exactly the person in a crisis —
+	// and locking them out is how the emergency door stops being a door.
+	if !emergency {
+		pending, err := s.requests.CountPending(ctx, scopeOf(actor), actor.UserID)
+		if err != nil {
+			return nil, err
+		}
+		if pending >= access.MaxPendingPerUser {
+			return nil, access.ErrTooManyRequests
+		}
 	}
 
 	level := actor.Level()

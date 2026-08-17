@@ -253,18 +253,35 @@ func (r *RoleRepo) MaxApprovalLevel(ctx context.Context, s iam.TenantScope, user
 	return level, err
 }
 
+// isSuperAdminSQL is the domain's definition of a super admin, in SQL.
+//
+// TWO things confer it — the column, which bootstraps the first admin before any
+// role exists to assign, and holding the Super Admin role, which is the only
+// route available through the console (see iam.User.HasSuperAdmin). Reading only
+// the column here would have told an organization whose super admin was created
+// through the console that nobody could approve anything, and blocked them from
+// gating a device over a deadlock that did not exist.
+const isSuperAdminSQL = `(
+	u.is_super_admin
+	OR EXISTS (
+		SELECT 1 FROM user_roles sur
+		WHERE sur.user_id = u.id AND sur.role_id = '10000000-0000-0000-0000-000000000001'
+	)
+)`
+
 // ApproverCountAbove counts active users who could decide a request made at the
 // given level: they hold approval:decide and they outrank it strictly.
 //
-// Super admins are counted regardless of their explicit grants, because they
-// hold every permission by definition and sit above every configurable rank.
+// Super admins are counted regardless of their explicit grants and rank, because
+// they hold every permission by definition and AddDecision lets them decide at
+// any level.
 func (r *RoleRepo) ApproverCountAbove(ctx context.Context, s iam.TenantScope, level int) (int, error) {
 	var n int
 	err := r.db.withScope(ctx, s, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
 			SELECT COUNT(*) FROM users u
 			WHERE u.deleted_at IS NULL AND u.status = 'active' AND (
-				u.is_super_admin
+				`+isSuperAdminSQL+`
 				OR (
 					EXISTS (
 						SELECT 1 FROM user_roles ur
@@ -293,7 +310,7 @@ func (r *RoleRepo) LevelsInUse(ctx context.Context, s iam.TenantScope) ([]int, e
 			FROM users u
 			LEFT JOIN user_roles ur ON ur.user_id = u.id
 			LEFT JOIN roles r ON r.id = ur.role_id
-			WHERE u.deleted_at IS NULL AND u.status = 'active' AND NOT u.is_super_admin
+			WHERE u.deleted_at IS NULL AND u.status = 'active' AND NOT `+isSuperAdminSQL+`
 			GROUP BY u.id
 			ORDER BY lvl`)
 		if err != nil {

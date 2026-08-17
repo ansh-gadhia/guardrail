@@ -479,6 +479,31 @@ func (s *Service) StaleCredentials(ctx context.Context, actor iam.Claims, olderT
 	return out, nil
 }
 
+// SharedForDevice returns the metadata of the device's SHARED credential — the
+// one bound with no owner — regardless of the device's mode or who is asking.
+//
+// Distinct from GetForDevice, which answers "what would *you* be injected with".
+// The console's credential editor edits the shared credential, and on a per-user
+// device the viewer's own resolution is the wrong thing to prefill it from.
+func (s *Service) SharedForDevice(ctx context.Context, actor iam.Claims, deviceID uuid.UUID) (*CredentialView, error) {
+	list, err := s.repo.ListDeviceBindings(ctx, scopeOf(actor), deviceID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if list[i].UserID != nil {
+			continue
+		}
+		c, gerr := s.repo.GetByID(ctx, scopeOf(actor), list[i].CredentialID)
+		if gerr != nil {
+			return nil, gerr
+		}
+		v := view(c)
+		return &v, nil
+	}
+	return nil, nil
+}
+
 // CredentialInherited reports whether the credential this actor would be
 // injected with on a device came from an asset group rather than from the device
 // itself. It reads the sealed binding only — nothing is decrypted or audited.

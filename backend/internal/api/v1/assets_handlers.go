@@ -285,7 +285,7 @@ func (h *AssetsHandler) create(c *gin.Context) {
 		}
 	}
 	cred := h.credFor(c, actor, d.ID)
-	c.JSON(http.StatusCreated, deviceDTO(d, actor, cred != nil, cred, h.groupsFor(c, actor, d.ID)))
+	c.JSON(http.StatusCreated, deviceDTO(d, actor, h.provisioned(c, actor, d.ID), cred, h.groupsFor(c, actor, d.ID)))
 }
 
 func (h *AssetsHandler) update(c *gin.Context) {
@@ -311,7 +311,7 @@ func (h *AssetsHandler) update(c *gin.Context) {
 		return
 	}
 	cred := h.credFor(c, actor, d.ID)
-	c.JSON(http.StatusOK, deviceDTO(d, actor, cred != nil, cred, h.groupsFor(c, actor, d.ID)))
+	c.JSON(http.StatusOK, deviceDTO(d, actor, h.provisioned(c, actor, d.ID), cred, h.groupsFor(c, actor, d.ID)))
 }
 
 func (h *AssetsHandler) get(c *gin.Context) {
@@ -327,7 +327,7 @@ func (h *AssetsHandler) get(c *gin.Context) {
 		return
 	}
 	cred := h.credFor(c, actor, d.ID)
-	c.JSON(http.StatusOK, deviceDTO(d, actor, cred != nil, cred, h.groupsFor(c, actor, d.ID)))
+	c.JSON(http.StatusOK, deviceDTO(d, actor, h.provisioned(c, actor, d.ID), cred, h.groupsFor(c, actor, d.ID)))
 }
 
 func (h *AssetsHandler) list(c *gin.Context) {
@@ -359,15 +359,35 @@ func (h *AssetsHandler) list(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": out})
 }
 
-// credFor returns the device's owned credential metadata (never the secret), or
+// credFor returns the device's SHARED credential metadata (never the secret), or
 // nil if it has none. Best-effort: on error it reports nil rather than failing
-// the surrounding request, matching the previous has-credential annotation.
+// the surrounding request.
+//
+// Shared rather than "whatever this viewer resolves": it prefills the editor for
+// the device's own credential, and on a per-user device the viewer's personal
+// account is the wrong thing to put in that form.
 func (h *AssetsHandler) credFor(c *gin.Context, actor iam.Claims, id uuid.UUID) *appvault.CredentialView {
-	v, err := h.vault.GetForDevice(c.Request.Context(), actor, id)
+	v, err := h.vault.SharedForDevice(c.Request.Context(), actor, id)
 	if err != nil {
 		return nil
 	}
 	return v
+}
+
+// provisioned reports whether SOMEBODY can connect to this device — the same
+// question the device listing answers.
+//
+// The single-device response used to answer a different one ("does the person
+// reading this have a credential here"), so a per-user device with forty bound
+// accounts showed a red "none" to the administrator who held none of them, while
+// the list two clicks away showed it as configured. Who *you* connect as is
+// answered by /devices/:id/whoami.
+func (h *AssetsHandler) provisioned(c *gin.Context, actor iam.Claims, id uuid.UUID) bool {
+	m, err := h.vault.DevicesWithCredential(c.Request.Context(), actor, []uuid.UUID{id})
+	if err != nil {
+		return false
+	}
+	return m[id]
 }
 
 // setCredential creates or updates the credential a device owns. Leaving the
@@ -397,7 +417,7 @@ func (h *AssetsHandler) setCredential(c *gin.Context) {
 		return
 	}
 	cred := h.credFor(c, actor, id)
-	c.JSON(http.StatusOK, deviceDTO(d, actor, cred != nil, cred, h.groupsFor(c, actor, id)))
+	c.JSON(http.StatusOK, deviceDTO(d, actor, h.provisioned(c, actor, d.ID), cred, h.groupsFor(c, actor, id)))
 }
 
 // clearCredential removes the credential a device owns, returning it to the

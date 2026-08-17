@@ -3,6 +3,7 @@ package v1
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -291,10 +292,14 @@ func (h *AssetsHandler) retireUserAccounts(c *gin.Context) {
 // than left to be discovered.
 func (h *AssetsHandler) staleCredentials(c *gin.Context) {
 	actor, _ := middleware.ClaimsFrom(c)
+	// Plain days. This parsed the value as hours and then multiplied by 24 again,
+	// so the console's "180 days" asked for 4320 — and the panel reported nothing
+	// overdue no matter how old the vault got, which is the worst way for a
+	// hygiene surface to fail: silently, and reassuringly.
 	days := 90
 	if v := c.Query("days"); v != "" {
-		if n, err := time.ParseDuration(v + "h"); err == nil && n > 0 {
-			days = int(n.Hours())
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			days = n
 		}
 	}
 	list, err := h.vault.StaleCredentials(c.Request.Context(), actor,
@@ -355,11 +360,17 @@ func (h *AssetsHandler) importAccounts(c *gin.Context) {
 		Index int    `json:"index"`
 		Error string `json:"error"`
 	}
+	idx, err := h.buildUserIndex(c, actor)
+	if err != nil {
+		failAssets(c, err)
+		return
+	}
+
 	imported := 0
 	failures := make([]rowErr, 0)
 	for i := range body.Accounts {
 		row := &body.Accounts[i]
-		userID, err := h.resolveUser(c, actor, row)
+		userID, err := idx.resolve(row)
 		if err != nil {
 			failures = append(failures, rowErr{Index: i, Error: err.Error()})
 			continue
@@ -408,14 +419,42 @@ func (h *AssetsHandler) importAccounts(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"imported": imported, "failed": failures})
 }
 
-// resolveUser turns an import row's user_id or user_email into a user id.
+// userIndex maps lowercased email -> id for a bulk import.
 //
-// Email is accepted because a CSV written by a person names people by email;
-// insisting on a UUID would make the import as much work as the form it exists
-// to replace. An email that matches nobody is an error on that row, never a
-// silent skip — an import that quietly binds thirty-nine of forty accounts is
-// worse than one that says which line was wrong.
-func (h *AssetsHandler) resolveUser(c *gin.Context, actor iam.Claims, row *importAccountRow) (uuid.UUID, error) {
+// Built ONCE per import rather than per row: resolving inside the loop meant a
+// 500-row CSV issued 500 full user listings, and each of those is a scoped
+// query. Truncated reports whether the tenant has more users than one page
+// returns, so an unmatched email can say which of the two things went wrong.
+type userIndex struct {
+	byEmail   map[string]uuid.UUID
+	truncated bool
+}
+
+func (h *AssetsHandler) buildUserIndex(c *gin.Context, actor iam.Claims) (userIndex, error) {
+	idx := userIndex{byEmail: map[string]uuid.UUID{}}
+	if h.users == nil {
+		return idx, nil
+	}
+	// The repository caps a page at 200 and honours no cursor, so this is
+	// everything one call can see. Rather than silently resolving the first 200
+	// people and telling everybody else they do not exist, record the cap and
+	// say so on the rows it actually affects.
+	people, err := h.users.ListUsers(c.Request.Context(), actor, iam.Page{Limit: userPageCap})
+	if err != nil {
+		return idx, err
+	}
+	for i := range people {
+		idx.byEmail[strings.ToLower(strings.TrimSpace(people[i].Email))] = people[i].UserID
+	}
+	idx.truncated = len(people) >= userPageCap
+	return idx, nil
+}
+
+// userPageCap mirrors the repository's page ceiling.
+const userPageCap = 200
+
+// resolve turns an import row's user_id or user_email into a user id.
+func (idx userIndex) resolve(row *importAccountRow) (uuid.UUID, error) {
 	if row.UserID != "" {
 		id, err := uuid.Parse(row.UserID)
 		if err != nil {
@@ -426,24 +465,18 @@ func (h *AssetsHandler) resolveUser(c *gin.Context, actor iam.Claims, row *impor
 	if row.UserEmail == "" {
 		return uuid.Nil, errInvalidUser
 	}
-	if h.users == nil {
-		return uuid.Nil, errEmailLookupUnavailable
+	if id, ok := idx.byEmail[strings.ToLower(strings.TrimSpace(row.UserEmail))]; ok {
+		return id, nil
 	}
-	want := strings.ToLower(strings.TrimSpace(row.UserEmail))
-	people, err := h.users.ListUsers(c.Request.Context(), actor, iam.Page{Limit: 1000})
-	if err != nil {
-		return uuid.Nil, err
-	}
-	for i := range people {
-		if strings.ToLower(people[i].Email) == want {
-			return people[i].UserID, nil
-		}
+	if idx.truncated {
+		return uuid.Nil, errLookupTruncated
 	}
 	return uuid.Nil, errNoSuchUser
 }
 
 var (
-	errInvalidUser            = errors.New("needs a user_id or a user_email")
-	errNoSuchUser             = errors.New("no user with that email")
-	errEmailLookupUnavailable = errors.New("email lookup unavailable; supply user_id")
+	errInvalidUser     = errors.New("needs a user_id or a user_email")
+	errNoSuchUser      = errors.New("no user with that email")
+	errLookupTruncated = errors.New(
+		"email lookup only covers the first 200 users and this address was not among them; supply user_id for this row")
 )

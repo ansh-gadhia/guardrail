@@ -125,6 +125,15 @@ func (h *AccessHandler) listRequests(c *gin.Context) {
 			f.DeviceID = &id
 		}
 	}
+	// Without this the console's "My requests" tab showed an administrator
+	// everybody's requests: the service only narrows to the caller's own rows for
+	// somebody who lacks approval:read, so a privileged user asking for their own
+	// list got the whole tenant's.
+	if v := c.Query("user_id"); v != "" {
+		if id, err := uuid.Parse(v); err == nil {
+			f.UserID = &id
+		}
+	}
 	list, err := h.svc.ListRequests(c.Request.Context(), actor, f)
 	if err != nil {
 		failAccess(c, err)

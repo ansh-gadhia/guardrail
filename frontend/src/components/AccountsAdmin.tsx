@@ -365,7 +365,7 @@ function StaleSecrets() {
     queryKey: ["stale-credentials", days],
     queryFn: async () =>
       (await api.get<{ credentials: { id: string; name: string; username: string; age_days: number }[] }>(
-        `/accounts/stale?days=${days * 24}`,
+        `/accounts/stale?days=${days}`,
       )).data.credentials ?? [],
   });
 
