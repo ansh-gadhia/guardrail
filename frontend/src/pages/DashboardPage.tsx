@@ -3,8 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { plausibleDate } from "@/lib/dates";
-import type { DashboardSummary, Device } from "@/lib/types";
-import { ErrorNote, StatusBadge, Panel, EmptyState, Skeleton, Hairline, cn } from "@/components/ui";
+import type { AccessRequest, DashboardSummary, Device } from "@/lib/types";
+import { useAuth } from "@/store/auth";
+import { ErrorNote, StatusBadge, Panel, EmptyState, Skeleton, Hairline, Badge, cn } from "@/components/ui";
 import { Donut, Legend, PostureBar } from "@/components/charts";
 import {
   IconDevices,
@@ -15,9 +16,32 @@ import {
   IconCheck,
   IconAlert,
   IconChevronRight,
+  IconShield,
 } from "@/components/icons";
 
 export function DashboardPage() {
+  const has = useAuth((st) => st.has);
+  const isSuper = useAuth((st) => !!st.principal?.is_super_admin);
+  const canDecide = isSuper || has("approval:decide");
+
+  // Lifted to the page rather than owned by the band below, because the posture
+  // headline has to agree with it. "Nothing needs you right now" printed directly
+  // above an unreviewed emergency access is worse than either line alone.
+  const pendingApprovals = useQuery<AccessRequest[]>({
+    queryKey: ["access-requests", "pending"],
+    queryFn: async () =>
+      (await api.get<{ requests: AccessRequest[] }>("/access-requests?pending=true")).data.requests ?? [],
+    enabled: canDecide,
+    refetchInterval: 30_000,
+  });
+  const unreviewed = useQuery<AccessRequest[]>({
+    queryKey: ["access-requests", "unreviewed"],
+    queryFn: async () =>
+      (await api.get<{ requests: AccessRequest[] }>("/access-requests?unreviewed=true")).data.requests ?? [],
+    enabled: canDecide,
+    refetchInterval: 60_000,
+  });
+
   const summary = useQuery<DashboardSummary>({
     queryKey: ["dashboard"],
     queryFn: async () => (await api.get<DashboardSummary>("/dashboard/summary")).data,
@@ -36,9 +60,13 @@ export function DashboardPage() {
   const needsCred = dev.filter((d) => !d.has_credential && !d.allow_unmanaged).length;
   const breakGlass = dev.filter((d) => d.allow_unmanaged && !d.has_credential).length;
 
+  const waiting = pendingApprovals.data ?? [];
+  const toReview = unreviewed.data ?? [];
+
   // "Attention" = things an operator should act on now — derived from real state,
-  // not an invented score.
-  const attention = needsCred;
+  // not an invented score. A request nobody has answered and an emergency nobody
+  // has signed off are both somebody's job, so they count.
+  const attention = needsCred + waiting.length + toReview.length;
 
   return (
     <div className="space-y-5">
@@ -50,6 +78,8 @@ export function DashboardPage() {
         devices={s.devices}
         users={s.users}
       />
+
+      <ApprovalsBand waiting={waiting} toReview={toReview} />
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
         <div className="lg:col-span-7">
@@ -289,5 +319,61 @@ function DashboardSkeleton() {
         </div>
       </div>
     </div>
+  );
+}
+
+// ApprovalsBand surfaces the two things that need a person, on the screen people
+// actually land on.
+//
+// It renders nothing when there is nothing to do — a permanently-present empty
+// panel is how a dashboard teaches people to stop reading it — and nothing at
+// all for somebody who cannot decide anything.
+function ApprovalsBand({ waiting, toReview }: { waiting: AccessRequest[]; toReview: AccessRequest[] }) {
+  if (waiting.length === 0 && toReview.length === 0) return null;
+
+  return (
+    <Panel
+      title="Waiting on you"
+      icon={IconShield}
+      subtitle="Access requests nobody has answered, and emergency access nobody has signed off"
+      actions={<TinyLink to="/approvals">Approvals</TinyLink>}
+    >
+      <div className="space-y-2">
+        {waiting.slice(0, 4).map((r) => (
+          <Link
+            key={r.id}
+            to="/approvals"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-surface-2/40 px-3 py-2.5 transition hover:border-line-strong"
+          >
+            <div className="min-w-0">
+              <div className="text-sm text-fg">
+                <span className="font-medium">{r.requester}</span>
+                <span className="text-muted"> wants </span>
+                <span className="font-medium">{r.device}</span>
+              </div>
+              <div className="mt-0.5 truncate text-xs text-muted">{r.reason}</div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {r.is_emergency && <Badge tone="danger">Emergency</Badge>}
+              <Badge tone="warn">Decide</Badge>
+            </div>
+          </Link>
+        ))}
+        {waiting.length > 4 && (
+          <div className="px-1 text-xs text-muted">and {waiting.length - 4} more waiting</div>
+        )}
+        {toReview.length > 0 && (
+          <Link
+            to="/approvals"
+            className="flex items-center justify-between gap-3 rounded-lg border border-danger/30 bg-danger/5 px-3 py-2.5 transition hover:border-danger/50"
+          >
+            <div className="text-sm text-fg">
+              {toReview.length} emergency {toReview.length === 1 ? "access" : "accesses"} taken without approval
+            </div>
+            <Badge tone="danger">Review</Badge>
+          </Link>
+        )}
+      </div>
+    </Panel>
   );
 }

@@ -5,7 +5,7 @@ import { useAuth } from "@/store/auth";
 import { useTheme } from "@/store/theme";
 import { useVersion } from "@/hooks/useVersion";
 import { api } from "@/lib/api";
-import type { Session } from "@/lib/types";
+import type { AccessRequest, Session } from "@/lib/types";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { CommandPalette, type Command } from "./CommandPalette";
 import { BrandMark, CompanyLogo } from "./brand";
@@ -86,6 +86,22 @@ export function AppLayout() {
   });
   const liveCount = liveSessions.data?.length ?? 0;
 
+  // Requests waiting on this person. An approval system whose only signal is a
+  // page you have no reason to open fails quietly: everybody concludes it is
+  // slow, when in fact nobody knew they had been asked.
+  // Returns the ARRAY, not the envelope. React Query dedupes by key, and the
+  // dashboard and the approvals page cache the same key — whichever query ran
+  // first won, so returning a different shape here handed one of them an object
+  // where it expected a list.
+  const pendingApprovals = useQuery<AccessRequest[]>({
+    queryKey: ["access-requests", "pending"],
+    queryFn: async () =>
+      (await api.get<{ requests: AccessRequest[] }>("/access-requests?pending=true")).data.requests ?? [],
+    refetchInterval: 30000,
+    enabled: !!principal && (principal.is_super_admin || has("approval:decide")),
+  });
+  const approvalCount = pendingApprovals.data?.length ?? 0;
+
   const commands: Command[] = useMemo(() => {
     const navCmds: Command[] = nav.map((n) => ({
       id: `nav:${n.to}`, label: n.label, group: "Navigate", icon: n.icon, hint: "Go", run: () => { setPaletteOpen(false); navigate(n.to); },
@@ -165,6 +181,7 @@ export function AppLayout() {
                     <Icon size={17} />
                     {!collapsed && <span className="flex-1">{n.label}</span>}
                     {!collapsed && n.to === "/sessions" && liveCount > 0 && <Badge tone="success">{liveCount}</Badge>}
+                    {!collapsed && n.to === "/approvals" && approvalCount > 0 && <Badge tone="warn">{approvalCount}</Badge>}
                   </NavLink>
                 );
               })}

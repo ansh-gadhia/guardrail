@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { api, problemDetail } from "@/lib/api";
 import type { AccessGrant, AccessRequest, GrantScope } from "@/lib/types";
 import { useAuth } from "@/store/auth";
@@ -7,18 +8,17 @@ import {
   PageHero, Panel, Spinner, ErrorNote, EmptyState, Badge, Button, Modal,
   Field, Select, Textarea, Tabs, Hairline,
 } from "@/components/ui";
-import { IconCheck, IconClock, IconShield, IconAlert, IconTrash } from "@/components/icons";
+import { IconCheck, IconClock, IconShield, IconAlert, IconTrash, IconAudit } from "@/components/icons";
 import { toast } from "@/components/Toast";
 import { plausibleDate } from "@/lib/dates";
 
 // Approvals.
 //
-// The queue is the screen an approver lives on, so it is built to be decided
-// from rather than read: who, what, why, and how long — then two buttons. The
-// reason is given the most room of anything on the row, because it is the only
-// field that actually informs the decision.
+// Five views of one question, because "who may reach this device" gets asked in
+// five different tenses: who is asking now, who is already in, who has ever been
+// let in, what have I asked for, and what did somebody take without asking.
 
-type Tab = "queue" | "mine" | "grants" | "emergency";
+type Tab = "queue" | "open" | "history" | "mine" | "emergency";
 
 export function ApprovalsPage() {
   const principal = useAuth((s) => s.principal);
@@ -26,10 +26,24 @@ export function ApprovalsPage() {
   const canRead = canDecide || !!principal?.permissions.includes("approval:read");
   const [tab, setTab] = useState<Tab>(canDecide ? "queue" : "mine");
 
+  // The waiting count rides on the tab label so an approver can see there is
+  // something to do without opening it first.
+  const pending = useQuery({
+    queryKey: ["access-requests", "pending"],
+    queryFn: async () =>
+      (await api.get<{ requests: AccessRequest[] }>("/access-requests?pending=true")).data.requests ?? [],
+    enabled: canDecide,
+    refetchInterval: 30_000,
+  });
+  const waiting = pending.data?.length ?? 0;
+
   const tabs = [
-    ...(canDecide ? [{ id: "queue", label: "Awaiting decision", icon: IconClock }] : []),
+    ...(canDecide
+      ? [{ id: "queue", label: waiting > 0 ? `Awaiting decision (${waiting})` : "Awaiting decision", icon: IconClock }]
+      : []),
+    ...(canRead ? [{ id: "open", label: "Open access", icon: IconCheck }] : []),
+    { id: "history", label: "History", icon: IconAudit },
     { id: "mine", label: "My requests", icon: IconShield },
-    ...(canRead ? [{ id: "grants", label: "Standing access", icon: IconCheck }] : []),
     ...(canDecide ? [{ id: "emergency", label: "Emergency review", icon: IconAlert }] : []),
   ];
 
@@ -39,7 +53,7 @@ export function ApprovalsPage() {
         icon={IconShield}
         eyebrow="Governance"
         title="Approvals"
-        subtitle="Decide who may reach a gated device, and for how long"
+        subtitle="Who may reach a gated device, for how long, and who said so"
         actions={
           principal && (
             <Badge tone="neutral">
@@ -52,8 +66,9 @@ export function ApprovalsPage() {
         <Tabs tabs={tabs} active={tab} onChange={(t) => setTab(t as Tab)} />
       </div>
       {tab === "queue" && <QueueTab />}
+      {tab === "open" && <OpenAccessTab canRevoke={canDecide} />}
+      {tab === "history" && <HistoryTab />}
       {tab === "mine" && <MineTab />}
-      {tab === "grants" && <GrantsTab canRevoke={canDecide} />}
       {tab === "emergency" && <EmergencyTab />}
     </div>
   );
@@ -74,8 +89,32 @@ function statusTone(s: AccessRequest["status"]) {
   }
 }
 
-// countdown says how long is left in words. A pending request is a clock
-// somebody is waiting on, and "expires 14:32" makes the reader do the maths.
+// outcome says what actually happened, in the words somebody would use.
+//
+// "Expired" is split in two on purpose: a request nobody answered and an
+// approval nobody used are different failures — the first is an approver
+// problem, the second is not — and reporting both as "expired" hides which one
+// an organization actually has.
+function outcome(r: AccessRequest): { label: string; tone: "success" | "danger" | "warn" | "neutral" } {
+  const wasApproved = (r.decisions ?? []).some((d) => d.decision === "approve");
+  switch (r.status) {
+    case "approved":
+      return r.grant_scope === "always"
+        ? { label: "Allowed — all time", tone: "success" }
+        : { label: "Allowed — once", tone: "success" };
+    case "denied":
+      return { label: "Denied", tone: "danger" };
+    case "cancelled":
+      return { label: "Withdrawn", tone: "neutral" };
+    case "expired":
+      return wasApproved
+        ? { label: "Approved, never used", tone: "warn" }
+        : { label: "Expired unanswered", tone: "warn" };
+    default:
+      return { label: "Waiting", tone: "warn" };
+  }
+}
+
 function countdown(iso: string): string {
   const ms = new Date(iso).getTime() - Date.now();
   if (Number.isNaN(ms)) return "";
@@ -85,16 +124,33 @@ function countdown(iso: string): string {
   return `${Math.round(mins / 60)}h left`;
 }
 
+function minutesLabel(m: number): string {
+  return m < 60 ? `${m} min` : `${Math.round((m / 60) * 10) / 10} h`;
+}
+
 function windowLabel(r: AccessRequest): string {
   const m = r.granted_minutes ?? r.requested_minutes;
-  const asked = r.requested_minutes;
-  const label = m < 60 ? `${m} min` : `${Math.round((m / 60) * 10) / 10} h`;
   // Name the shortening explicitly. An operator who asked for four hours and
   // got one needs to know before they start, not when the session ends.
-  if (r.granted_minutes != null && r.granted_minutes < asked) {
-    return `${label} (asked ${asked < 60 ? `${asked} min` : `${asked / 60} h`})`;
+  if (r.granted_minutes != null && r.granted_minutes < r.requested_minutes) {
+    return `${minutesLabel(m)} (asked ${minutesLabel(r.requested_minutes)})`;
   }
-  return label;
+  return minutesLabel(m);
+}
+
+// decidedBy names who allowed it — or says plainly that nobody did.
+//
+// An emergency has no approver by design, and rendering it as "approved by —"
+// reads as missing data rather than as the thing that actually happened.
+function decidedBy(r: AccessRequest): string {
+  if (r.is_emergency) return "taken as emergency";
+  const last = (r.decisions ?? []).at(-1);
+  return last ? `approved by ${last.by}` : "no approver recorded";
+}
+
+function when(iso?: string): string {
+  const d = plausibleDate(iso);
+  return d ? d.toLocaleString() : "—";
 }
 
 function RequestCard({ r, children }: { r: AccessRequest; children?: React.ReactNode }) {
@@ -125,7 +181,7 @@ function RequestCard({ r, children }: { r: AccessRequest; children?: React.React
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
             <span>Wants {windowLabel(r)}</span>
             <span>Rank {r.requester_level}</span>
-            <span>Asked {plausibleDate(r.created_at)?.toLocaleString() ?? "—"}</span>
+            <span>Asked {when(r.created_at)}</span>
             {r.status === "pending" && <span className="text-warn">{countdown(r.expires_at)}</span>}
           </div>
           {decisions.length > 0 && (
@@ -156,7 +212,8 @@ function QueueTab() {
 
   const q = useQuery({
     queryKey: ["access-requests", "pending"],
-    queryFn: async () => (await api.get<{ requests: AccessRequest[] }>("/access-requests?pending=true")).data.requests ?? [],
+    queryFn: async () =>
+      (await api.get<{ requests: AccessRequest[] }>("/access-requests?pending=true")).data.requests ?? [],
     // Somebody is waiting on this screen. Refresh often enough that a decision
     // made in another tab does not leave a stale row to be decided twice.
     refetchInterval: 15_000,
@@ -171,7 +228,7 @@ function QueueTab() {
       <EmptyState
         icon={IconCheck}
         title="Nothing waiting"
-        message="Requests to reach approval-gated devices appear here. You can only decide requests from people who rank below you."
+        message="Requests to reach approval-gated devices appear here. You can only decide requests from people who rank below you — everything already settled is under History."
       />
     );
   }
@@ -202,9 +259,9 @@ function QueueTab() {
 
 // DecideModal is the three answers, spelled out.
 //
-// "Allow all time" is deliberately styled as the heavier choice and labelled
-// with what it actually does: it is not an answer to this request, it is a
-// standing grant that will still be there in six months.
+// "Allow all time" is deliberately labelled with what it actually does: it is
+// not an answer to this request, it is a standing grant that will still be there
+// in six months.
 function DecideModal({
   request,
   onClose,
@@ -249,10 +306,7 @@ function DecideModal({
           </p>
         </div>
 
-        <Field
-          label="Grant for"
-          hint="You can shorten what they asked for, but not extend it."
-        >
+        <Field label="Grant for" hint="You can shorten what they asked for, but not extend it.">
           <Select value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}>
             {[15, 30, 60, 120, 240, 480]
               .filter((m) => m <= request.requested_minutes)
@@ -264,7 +318,7 @@ function DecideModal({
           </Select>
         </Field>
 
-        <Field label="Note" hint="Recorded against the decision and visible in the audit trail.">
+        <Field label="Note" hint="Recorded against the decision and shown in History and the audit trail.">
           <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional" />
         </Field>
 
@@ -290,9 +344,8 @@ function DecideModal({
           >
             Allow all time — standing access
           </Button>
-          {/* Say what the heavier button costs, next to the button. */}
           <p className="px-1 text-xs text-muted">
-            Standing access never asks again. It appears under <b>Standing access</b>, where it can be
+            Standing access never asks again. It appears under <b>Open access</b>, where it can be
             revoked — revoking also ends any session it is holding open.
           </p>
           <Button
@@ -309,6 +362,290 @@ function DecideModal({
   );
 }
 
+// ---- open access ----------------------------------------------------------
+
+// Everything that is open right now, both kinds in one place.
+//
+// Standing grants and live one-off approvals live in different tables, but they
+// answer the same question — "who can reach a gated device without asking me
+// first?" — and splitting them across two screens is how one of them stops being
+// read.
+function OpenAccessTab({ canRevoke }: { canRevoke: boolean }) {
+  const qc = useQueryClient();
+  const [confirm, setConfirm] = useState<AccessGrant | null>(null);
+
+  const grants = useQuery({
+    queryKey: ["access-grants"],
+    queryFn: async () => (await api.get<{ grants: AccessGrant[] }>("/access-grants?live=true")).data.grants ?? [],
+  });
+
+  const approved = useQuery({
+    queryKey: ["access-requests", "approved"],
+    queryFn: async () =>
+      (await api.get<{ requests: AccessRequest[] }>("/access-requests?status=approved&limit=200")).data.requests ?? [],
+    refetchInterval: 30_000,
+  });
+
+  const revoke = useMutation({
+    mutationFn: async (id: string) => api.delete(`/access-grants/${id}`),
+    onSuccess: () => {
+      toast.success("Standing access revoked and any live session ended");
+      setConfirm(null);
+      void qc.invalidateQueries({ queryKey: ["access-grants"] });
+      void qc.invalidateQueries({ queryKey: ["sessions"] });
+    },
+    onError: (e) => toast.error(problemDetail(e, "Could not revoke")),
+  });
+
+  // A one-off approval is "open" while it can still be turned into a session.
+  // Once redeemed it is the session that is open, so those are listed apart and
+  // point at the session, which is where they can actually be ended.
+  const unused = useMemo(
+    () =>
+      (approved.data ?? []).filter(
+        (r) => r.grant_scope !== "always" && !r.session_id && new Date(r.expires_at).getTime() > Date.now(),
+      ),
+    [approved.data],
+  );
+  const inUse = useMemo(
+    () => (approved.data ?? []).filter((r) => r.grant_scope !== "always" && r.session_id),
+    [approved.data],
+  );
+
+  if (grants.isLoading || approved.isLoading) return <Spinner />;
+  if (grants.error) return <ErrorNote message={problemDetail(grants.error, "Could not load standing access")} />;
+
+  const live = grants.data ?? [];
+
+  return (
+    <div className="space-y-4">
+      <Panel
+        title="Never expires — standing access"
+        icon={IconCheck}
+        subtitle="Granted with “Allow all time”. This is the list that answers “who can get in without a decision?”"
+      >
+        {live.length === 0 ? (
+          <p className="text-sm text-muted">
+            Nobody holds standing access. Every gated connect is decided one at a time.
+          </p>
+        ) : (
+          <div className="divide-y divide-line">
+            {live.map((g) => (
+              <div key={g.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-fg">
+                    {g.user} <span className="text-muted">on</span> {g.device}
+                  </div>
+                  <div className="mt-0.5 text-xs text-muted">
+                    Granted by {g.granted_by || "—"} · {when(g.created_at)}
+                    {g.expires_at ? ` · until ${when(g.expires_at)}` : " · no expiry"}
+                  </div>
+                </div>
+                {canRevoke && (
+                  <Button variant="ghost" size="sm" onClick={() => setConfirm(g)}>
+                    <IconTrash size={14} /> Revoke
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <Panel
+        title="One-off — approved, not yet used"
+        icon={IconClock}
+        subtitle="Allowed once and still redeemable. These lapse on their own if nobody connects."
+      >
+        {unused.length === 0 ? (
+          <p className="text-sm text-muted">Nothing approved and waiting to be used.</p>
+        ) : (
+          <div className="divide-y divide-line">
+            {unused.map((r) => (
+              <div key={r.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-fg">
+                    {r.requester} <span className="text-muted">on</span> {r.device}
+                  </div>
+                  <div className="mt-0.5 text-xs text-muted">
+                    {windowLabel(r)} · {decidedBy(r)}
+                  </div>
+                </div>
+                <Badge tone="warn">{countdown(r.expires_at)}</Badge>
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      {inUse.length > 0 && (
+        <Panel
+          title="One-off — in use"
+          icon={IconShield}
+          subtitle="Approved once and already turned into a session. End it from the session itself."
+        >
+          <div className="divide-y divide-line">
+            {inUse.slice(0, 25).map((r) => (
+              <div key={r.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-fg">
+                    {r.requester} <span className="text-muted">on</span> {r.device}
+                  </div>
+                  <div className="mt-0.5 text-xs text-muted">
+                    {windowLabel(r)} · {decidedBy(r)}
+                  </div>
+                </div>
+                {r.session_id && (
+                  <Link
+                    className="text-xs font-medium text-accent hover:underline"
+                    to={`/sessions/${r.session_id}/view`}
+                  >
+                    Open session
+                  </Link>
+                )}
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+
+      {confirm && (
+        <Modal onClose={() => setConfirm(null)} title="Revoke standing access?">
+          <p className="text-sm text-fg">
+            {confirm.user} will have to ask for approval again to reach {confirm.device}.
+          </p>
+          <p className="mt-2 text-sm text-muted">
+            Any session they currently hold on this device ends immediately — leaving it running would
+            mean “allow once” quietly meant “allow for the next eight hours”.
+          </p>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setConfirm(null)}>
+              Keep it
+            </Button>
+            <Button variant="danger" disabled={revoke.isPending} onClick={() => revoke.mutate(confirm.id)}>
+              Revoke and end sessions
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ---- history --------------------------------------------------------------
+
+// Every settled request: who asked, for what, who decided, what they were
+// given, and when.
+//
+// This is the tab somebody opens six months later to ask how a person came to be
+// on a firewall, so it carries the whole record rather than a status word.
+type HistoryFilter = "all" | "approved" | "denied" | "expired" | "cancelled";
+
+function HistoryTab() {
+  const [filter, setFilter] = useState<HistoryFilter>("all");
+
+  const q = useQuery({
+    queryKey: ["access-requests", "history", filter],
+    queryFn: async () => {
+      const qs = filter === "all" ? "?limit=200" : `?status=${filter}&limit=200`;
+      return (await api.get<{ requests: AccessRequest[] }>(`/access-requests${qs}`)).data.requests ?? [];
+    },
+  });
+
+  // Anything still pending belongs to the queue, not to the record of what
+  // happened.
+  const settled = useMemo(() => (q.data ?? []).filter((r) => r.status !== "pending"), [q.data]);
+
+  if (q.isLoading) return <Spinner />;
+  if (q.error) return <ErrorNote message={problemDetail(q.error, "Could not load the history")} />;
+
+  return (
+    <Panel
+      title="Decision history"
+      icon={IconAudit}
+      subtitle="Every settled request — who asked, who decided, and what they were given"
+      actions={
+        <Select value={filter} onChange={(e) => setFilter(e.target.value as HistoryFilter)} className="w-auto">
+          <option value="all">All outcomes</option>
+          <option value="approved">Allowed</option>
+          <option value="denied">Denied</option>
+          <option value="expired">Expired</option>
+          <option value="cancelled">Withdrawn</option>
+        </Select>
+      }
+      bodyClassName="p-0"
+    >
+      {settled.length === 0 ? (
+        <div className="p-4">
+          <EmptyState
+            icon={IconAudit}
+            title="Nothing decided yet"
+            message="Once somebody requests access to a gated device and it is answered, the whole record appears here — including requests that expired unanswered."
+          />
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="border-b border-line bg-surface-2/50 text-left">
+                <th className="px-4 py-2.5 text-2xs font-semibold uppercase tracking-wider text-faint">Who asked</th>
+                <th className="px-4 py-2.5 text-2xs font-semibold uppercase tracking-wider text-faint">Device</th>
+                <th className="px-4 py-2.5 text-2xs font-semibold uppercase tracking-wider text-faint">Outcome</th>
+                <th className="px-4 py-2.5 text-2xs font-semibold uppercase tracking-wider text-faint">Allowed for</th>
+                <th className="px-4 py-2.5 text-2xs font-semibold uppercase tracking-wider text-faint">Decided by</th>
+                <th className="px-4 py-2.5 text-2xs font-semibold uppercase tracking-wider text-faint">When</th>
+              </tr>
+            </thead>
+            <tbody>
+              {settled.map((r) => {
+                const o = outcome(r);
+                const last = (r.decisions ?? []).at(-1);
+                return (
+                  <tr key={r.id} className="border-b border-line/60 align-top last:border-0">
+                    <td className="px-4 py-3">
+                      <div className="text-fg">{r.requester}</div>
+                      <div className="mt-0.5 max-w-xs text-xs text-muted">{r.reason}</div>
+                      {r.is_emergency && (
+                        <Badge tone="danger" className="mt-1">
+                          Emergency{r.reviewed ? " · reviewed" : " · unreviewed"}
+                        </Badge>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-fg">{r.device}</td>
+                    <td className="px-4 py-3">
+                      <Badge tone={o.tone}>{o.label}</Badge>
+                      {r.min_approvals > 1 && (
+                        <div className="mt-1 text-2xs text-muted">
+                          {r.approvals} of {r.min_approvals} approvals
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-muted">
+                      {r.status === "approved" ? windowLabel(r) : <span className="text-faint">—</span>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="text-fg">
+                        {last?.by ?? (
+                          <span className="text-faint">{r.is_emergency ? "taken as emergency" : "nobody"}</span>
+                        )}
+                      </div>
+                      {last?.note && <div className="mt-0.5 max-w-xs text-xs text-muted">“{last.note}”</div>}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 text-xs text-muted">
+                      <div>{when(last?.decided_at ?? r.created_at)}</div>
+                      <div className="text-faint">asked {when(r.created_at)}</div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 // ---- my requests ----------------------------------------------------------
 
 function MineTab() {
@@ -316,7 +653,7 @@ function MineTab() {
   const principal = useAuth((s) => s.principal);
 
   const q = useQuery({
-    queryKey: ["access-requests", "mine"],
+    queryKey: ["access-requests", "mine", principal?.user_id],
     queryFn: async () =>
       (await api.get<{ requests: AccessRequest[] }>(`/access-requests?user_id=${principal?.user_id ?? ""}`)).data
         .requests ?? [],
@@ -361,90 +698,6 @@ function MineTab() {
   );
 }
 
-// ---- standing grants ------------------------------------------------------
-
-function GrantsTab({ canRevoke }: { canRevoke: boolean }) {
-  const qc = useQueryClient();
-  const [confirm, setConfirm] = useState<AccessGrant | null>(null);
-
-  const q = useQuery({
-    queryKey: ["access-grants"],
-    queryFn: async () => (await api.get<{ grants: AccessGrant[] }>("/access-grants?live=true")).data.grants ?? [],
-  });
-
-  const revoke = useMutation({
-    mutationFn: async (id: string) => api.delete(`/access-grants/${id}`),
-    onSuccess: () => {
-      toast.success("Standing access revoked and any live session ended");
-      setConfirm(null);
-      void qc.invalidateQueries({ queryKey: ["access-grants"] });
-      void qc.invalidateQueries({ queryKey: ["sessions"] });
-    },
-    onError: (e) => toast.error(problemDetail(e, "Could not revoke")),
-  });
-
-  if (q.isLoading) return <Spinner />;
-  if (q.error) return <ErrorNote message={problemDetail(q.error, "Could not load standing access")} />;
-
-  const list = q.data ?? [];
-
-  return (
-    <div className="space-y-4">
-      <Panel
-        title="Standing access"
-        subtitle="Everyone who can reach a gated device without asking. This is the list that answers “who can get in without a decision?”"
-      >
-        {list.length === 0 ? (
-          <p className="text-sm text-muted">
-            Nobody holds standing access. Every gated connect is decided one at a time.
-          </p>
-        ) : (
-          <div className="divide-y divide-line">
-            {list.map((g) => (
-              <div key={g.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-fg">
-                    {g.user} <span className="text-muted">on</span> {g.device}
-                  </div>
-                  <div className="mt-0.5 text-xs text-muted">
-                    Granted by {g.granted_by || "—"} · {plausibleDate(g.created_at)?.toLocaleDateString() ?? "—"}
-                    {g.expires_at ? ` · until ${plausibleDate(g.expires_at)?.toLocaleDateString() ?? "?"}` : " · no expiry"}
-                  </div>
-                </div>
-                {canRevoke && (
-                  <Button variant="ghost" size="sm" onClick={() => setConfirm(g)}>
-                    <IconTrash size={14} /> Revoke
-                  </Button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </Panel>
-
-      {confirm && (
-        <Modal onClose={() => setConfirm(null)} title="Revoke standing access?">
-          <p className="text-sm text-fg">
-            {confirm.user} will have to ask for approval again to reach {confirm.device}.
-          </p>
-          <p className="mt-2 text-sm text-muted">
-            Any session they currently hold on this device ends immediately — revoking that left the
-            current session running would mean “allow once” quietly meant “allow for the next eight hours”.
-          </p>
-          <div className="mt-4 flex justify-end gap-2">
-            <Button variant="ghost" onClick={() => setConfirm(null)}>
-              Keep it
-            </Button>
-            <Button variant="danger" disabled={revoke.isPending} onClick={() => revoke.mutate(confirm.id)}>
-              Revoke and end sessions
-            </Button>
-          </div>
-        </Modal>
-      )}
-    </div>
-  );
-}
-
 // ---- emergency review -----------------------------------------------------
 
 // Emergency access is granted first and reviewed afterwards. This queue is what
@@ -478,7 +731,7 @@ function EmergencyTab() {
       <EmptyState
         icon={IconCheck}
         title="Nothing to review"
-        message="Emergency access is taken without waiting for a decision, and lands here to be signed off afterwards."
+        message="Emergency access is taken without waiting for a decision and lands here to be signed off afterwards. Once signed off it stays in History."
       />
     );
   }
