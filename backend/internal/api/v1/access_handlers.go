@@ -215,6 +215,25 @@ func (h *AccessHandler) connect(c *gin.Context) {
 		})
 		return
 	}
+	// 202 as well, but nothing has been raised: this caller has to ask and has
+	// not said why. The console connects with an empty body first on purpose —
+	// that probe is how it learns the gate applies to this person, since bypass,
+	// device ownership, a standing grant and an approval already in hand are all
+	// decided here and invisible from the browser. Answering it with a status
+	// beats refusing it: this used to reach the approval gate with no reason,
+	// come back as an unmapped access.ErrInvalid, and surface as a 500
+	// "unexpected error" on every first click of a gated device.
+	if res.NeedsRequest {
+		c.JSON(http.StatusAccepted, gin.H{"status": "approval_required"})
+		return
+	}
+	// Belt and braces. Every path above either returns a session or has already
+	// answered; if a new one ever reaches here empty-handed, say so instead of
+	// dereferencing nil and turning it into a panic the operator reads as a 500.
+	if res.Session == nil {
+		failAccess(c, domaccess.ErrInvalid)
+		return
+	}
 	h.writeConnected(c, res)
 }
 

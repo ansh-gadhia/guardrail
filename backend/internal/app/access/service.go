@@ -192,6 +192,13 @@ type ConnectResult struct {
 	// request has been raised and the caller should wait on it, which is why this
 	// is a field rather than an error the delivery layer has to catch.
 	Pending *access.Request
+	// NeedsRequest is set, with Pending nil, when the caller must ask but has not
+	// said why. Distinct from Pending because nothing has been raised yet and
+	// there is nothing to wait on: the answer is "tell me your reason", not "sit
+	// tight". The console's first Connect is exactly this case — it carries no
+	// reason because the probe is how it discovers the gate applies to this
+	// caller, and every exemption is decided server-side.
+	NeedsRequest bool
 }
 
 func scopeOf(a iam.Claims) access.Scope {
@@ -269,7 +276,7 @@ func (s *Service) ConnectWith(ctx context.Context, actor iam.Claims, deviceID uu
 		return nil, err
 	}
 	if !gate.allow {
-		return &ConnectResult{Pending: gate.request}, nil
+		return &ConnectResult{Pending: gate.request, NeedsRequest: gate.needsReason}, nil
 	}
 
 	// Fail closed: GuardRail exists to inject a vaulted credential server-side. A

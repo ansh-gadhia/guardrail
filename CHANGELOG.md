@@ -94,6 +94,19 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   audited.
 
 ### Fixed
+- **Connecting to an approval-gated device returned 500 "unexpected error".**
+  Every first click, for anybody not exempt. The console connects with an empty
+  body to find out whether the gate applies — it cannot know from the device row,
+  because bypass, device ownership, a standing grant and an approval already in
+  hand are all decided server-side — and that probe reached the code that raises
+  a request, which refused it for having no reason. The refusal was
+  `access.ErrInvalid`, which nothing mapped, so it fell through to a 500.
+
+  The gate now answers the probe with `202 {"status":"approval_required"}` and
+  the console opens the reason dialog. Pressing Connect again while a request is
+  in flight returns that request instead of asking twice, and the dialog opens on
+  its waiting view rather than a blank form. `access.ErrInvalid` maps to 400.
+  Reasons are trimmed server-side, so whitespace is not a reason.
 - **The approval hierarchy was inert.** The query that loads a user's roles never
   selected `roles.approval_level`, so every principal and every JWT carried rank
   0 — and because an approver must outrank the requester strictly, `0 > 0` meant

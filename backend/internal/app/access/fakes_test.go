@@ -328,6 +328,8 @@ type harness struct {
 	audit      *fakeAudit
 	recordings *fakeRecordings
 	registry   *fakeRegistry
+	// requests is the approval store; only populated for a gated device.
+	requests *fakeRequests
 }
 
 type opts struct {
@@ -348,6 +350,15 @@ type opts struct {
 	// default deployment (the compose image ships one), so the interesting case
 	// to opt into is its absence.
 	noIsolation bool
+	// requiresApproval models a device with the approval gate switched on.
+	requiresApproval bool
+	// minApprovals is the two-person rule; 0 means the default of one.
+	minApprovals int
+	// pendingRequest models this caller already having a request in flight.
+	pendingRequest *access.Request
+	// approversAbove overrides how many people could decide. Nil means one, so
+	// the ordinary case is "somebody can approve this".
+	approversAbove *int
 	// protocol overrides the device's protocol. Defaults to https, the only one
 	// the fake gateways serve, so setting it to anything else models a device
 	// whose protocol has no gateway registered.
@@ -375,6 +386,7 @@ func newHarness(o opts) *harness {
 			Protocol: o.protocol, BaseURL: "https://10.0.0.1", Host: "10.0.0.1", Port: 443,
 			Name: "edge-firewall", DeviceType: "firewall",
 			AllowUnmanaged: o.allowUnmanaged, RecordSessions: !o.noRecording,
+			RequiresApproval: o.requiresApproval, MinApprovals: o.minApprovals,
 			// This mirrors what adapters.go derives from the device row: recording
 			// forces isolated delivery, and isolated delivery is also selectable on
 			// its own.
@@ -392,9 +404,23 @@ func newHarness(o opts) *harness {
 	if !o.noIsolation {
 		deps.IsolatedGateways = []access.Gateway{iso}
 	}
+	// Wired only for gated devices, so every existing test keeps running against
+	// a service with no approval collaborators at all — which is also the shape a
+	// deployment that never turns approvals on actually has.
+	requests := &fakeRequests{pending: o.pendingRequest}
+	if o.requiresApproval {
+		above := 1
+		if o.approversAbove != nil {
+			above = *o.approversAbove
+		}
+		deps.Requests = requests
+		deps.Grants = fakeGrants{}
+		deps.Ranker = fakeRanker{above: above}
+	}
 	return &harness{
 		svc: NewService(deps), sessions: sessions, authorizer: authz,
 		gateway: gw, isolated: iso, audit: aud, recordings: rec, registry: reg,
+		requests: requests,
 	}
 }
 
@@ -458,4 +484,93 @@ func (f *fakeBlobs) Delete(_ context.Context, key string) error {
 
 func (f fakeCreds) CredentialInherited(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
 	return false, nil
+}
+
+// ---- approval gate fakes ----------------------------------------------------
+//
+// Only the handful of methods the gate actually reaches carry behaviour; the
+// rest satisfy the port. A fake that pretends to implement thirteen methods
+// convincingly is a second implementation to keep honest, and the gate calls
+// four of them.
+
+type fakeRequests struct {
+	mu       sync.Mutex
+	created  []*access.Request
+	pending  *access.Request
+	countErr error
+}
+
+func (f *fakeRequests) Create(_ context.Context, _ access.Scope, r *access.Request) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.created = append(f.created, r)
+	return nil
+}
+
+func (f *fakeRequests) PendingFor(context.Context, access.Scope, uuid.UUID, uuid.UUID, time.Time) (*access.Request, error) {
+	if f.pending == nil {
+		return nil, access.ErrNotFound
+	}
+	return f.pending, nil
+}
+
+func (f *fakeRequests) CountPending(context.Context, access.Scope, uuid.UUID) (int, error) {
+	if f.countErr != nil {
+		return 0, f.countErr
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.created), nil
+}
+
+func (f *fakeRequests) Cancel(context.Context, access.Scope, uuid.UUID, uuid.UUID) error { return nil }
+
+func (f *fakeRequests) GetByID(context.Context, access.Scope, uuid.UUID) (*access.Request, error) {
+	return nil, access.ErrNotFound
+}
+func (f *fakeRequests) List(context.Context, access.Scope, access.RequestFilter) ([]access.Request, error) {
+	return nil, nil
+}
+func (f *fakeRequests) AddDecision(context.Context, access.Scope, uuid.UUID, uuid.UUID, access.Decision, int, bool) (*access.Request, error) {
+	return nil, access.ErrNotFound
+}
+func (f *fakeRequests) SetOutcome(context.Context, access.Scope, uuid.UUID, *int, *access.GrantScope) error {
+	return nil
+}
+func (f *fakeRequests) Redeem(context.Context, access.Scope, uuid.UUID, uuid.UUID, time.Time) error {
+	return nil
+}
+func (f *fakeRequests) Escalate(context.Context, time.Time) (int, error)      { return 0, nil }
+func (f *fakeRequests) ExpireOverdue(context.Context, time.Time) (int, error) { return 0, nil }
+func (f *fakeRequests) MarkReviewed(context.Context, access.Scope, uuid.UUID, uuid.UUID, string, time.Time) error {
+	return nil
+}
+
+// fakeGrants holds no standing grant unless one is set.
+type fakeGrants struct{ live *access.Grant }
+
+func (f fakeGrants) Live(context.Context, access.Scope, uuid.UUID, uuid.UUID, time.Time) (*access.Grant, error) {
+	if f.live == nil {
+		return nil, access.ErrNotFound
+	}
+	return f.live, nil
+}
+func (f fakeGrants) Create(context.Context, access.Scope, *access.Grant) error { return nil }
+func (f fakeGrants) GetByID(context.Context, access.Scope, uuid.UUID) (*access.Grant, error) {
+	return nil, access.ErrNotFound
+}
+func (f fakeGrants) List(context.Context, access.Scope, access.GrantFilter) ([]access.Grant, error) {
+	return nil, nil
+}
+func (f fakeGrants) Revoke(context.Context, access.Scope, uuid.UUID, uuid.UUID, time.Time) (*access.Grant, error) {
+	return nil, access.ErrNotFound
+}
+
+// fakeRanker reports how many people could decide. One by default: a device with
+// nobody able to approve it is its own test, not the background for every other.
+type fakeRanker struct{ above int }
+
+func (f fakeRanker) LevelFor(context.Context, access.Scope, uuid.UUID) (int, error) { return 0, nil }
+func (f fakeRanker) ApproversAbove(context.Context, access.Scope, int) (int, error) {
+	return f.above, nil
 }

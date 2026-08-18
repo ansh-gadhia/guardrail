@@ -21,7 +21,11 @@ import { toast } from "@/components/Toast";
 
 export type ConnectOutcome =
   | { kind: "connected"; result: ConnectResult }
-  | { kind: "pending"; request: AccessRequest };
+  | { kind: "pending"; request: AccessRequest }
+  // The device is gated for this caller and nothing has been raised yet, because
+  // we have not said why. Distinct from "pending": there is nothing to wait on,
+  // the answer is "ask properly".
+  | { kind: "needs_request" };
 
 /** connectDevice performs a connect, distinguishing "in" from "you have to ask". */
 export async function connectDevice(
@@ -37,6 +41,13 @@ export async function connectDevice(
   if (res.status === 202 && res.data.request) {
     return { kind: "pending", request: res.data.request };
   }
+  // 202 with no request: gated, and we have to ask. This is what the opening
+  // probe below gets, and it is deliberately a separate outcome — falling
+  // through to "connected" here handed the caller a body with no session_id and
+  // the click did nothing at all.
+  if (res.status === 202) {
+    return { kind: "needs_request" };
+  }
   return { kind: "connected", result: res.data as ConnectResult };
 }
 
@@ -45,15 +56,20 @@ export function RequestAccessModal({
   device,
   onClose,
   onConnected,
+  // initialRequest opens straight into the waiting view. The probe returns a
+  // request the caller already has in flight, and re-showing the form would ask
+  // somebody to justify a request they have already made.
+  initialRequest = null,
 }: {
   device: Device;
   onClose: () => void;
   onConnected: (r: ConnectResult) => void;
+  initialRequest?: AccessRequest | null;
 }) {
   const qc = useQueryClient();
   const [reason, setReason] = useState("");
   const [minutes, setMinutes] = useState(60);
-  const [pending, setPending] = useState<AccessRequest | null>(null);
+  const [pending, setPending] = useState<AccessRequest | null>(initialRequest);
   const [confirmEmergency, setConfirmEmergency] = useState(false);
 
   const ask = useMutation({
@@ -63,6 +79,12 @@ export function RequestAccessModal({
       void qc.invalidateQueries({ queryKey: ["access-requests"] });
       if (out.kind === "connected") {
         onConnected(out.result);
+        return;
+      }
+      if (out.kind === "needs_request") {
+        // The server still wants a reason. Only reachable if the field was
+        // emptied between validation and submit; say so rather than closing.
+        toast.error("A reason is required to ask for access to this device");
         return;
       }
       setPending(out.request);
@@ -210,7 +232,13 @@ function WaitingForApproval({
   const redeem = useMutation({
     mutationFn: async () => connectDevice(device.id, {}),
     onSuccess: (out) => {
+      // Three outcomes now, and they mean different things. "pending" is a
+      // decision that has not landed yet; "needs_request" is an approval that
+      // has been spent or has expired, leaving us back at the start. Reporting
+      // both as "no longer usable" told somebody still waiting that their
+      // request was dead.
       if (out.kind === "connected") onConnected(out.result);
+      else if (out.kind === "pending") toast.error("Still waiting on a decision");
       else toast.error("That approval is no longer usable — ask again");
     },
     onError: (e) => toast.error(problemDetail(e, "Could not start the session")),

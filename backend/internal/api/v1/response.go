@@ -86,6 +86,20 @@ func fail(c *gin.Context, err error) {
 	}
 }
 
+// detailFor renders a wrapped sentinel's added context as a problem detail,
+// falling back to a written sentence when nothing was wrapped.
+//
+// It strips the sentinel's own prefix: "access: invalid: a reason is required"
+// is a Go error string, not something to show somebody, and a bare "access:
+// invalid" tells a reader nothing at all.
+func detailFor(err, sentinel error, fallback string) string {
+	full, base := err.Error(), sentinel.Error()
+	if len(full) > len(base)+2 && full[:len(base)] == base && full[len(base):len(base)+2] == ": " {
+		return full[len(base)+2:]
+	}
+	return fallback
+}
+
 // badRequest is a convenience for request-binding/validation failures.
 func badRequest(c *gin.Context, detail string) {
 	problem(c, http.StatusBadRequest, "Bad Request", detail)
@@ -122,6 +136,14 @@ func failAccess(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, access.ErrNotFound):
 		problem(c, http.StatusNotFound, "Not Found", "session not found")
+	// 400 rather than the 500 this used to be. access.ErrInvalid marks a value the
+	// broker refuses to interpret — a missing reason on a gated connect, an
+	// unknown protocol — which is the caller's input, not a server fault. Left
+	// unmapped it fell through to "unexpected error", which is both wrong and
+	// the least actionable thing the API can say.
+	case errors.Is(err, access.ErrInvalid):
+		problem(c, http.StatusBadRequest, "Bad Request", detailFor(err, access.ErrInvalid,
+			"the request is missing something this device requires"))
 	case errors.Is(err, access.ErrNoGateway):
 		problem(c, http.StatusBadRequest, "Unsupported", "no gateway for this device protocol")
 	case errors.Is(err, access.ErrNotActive), errors.Is(err, access.ErrExpired):

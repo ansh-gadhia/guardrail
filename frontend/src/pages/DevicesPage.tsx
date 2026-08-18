@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, problemDetail } from "@/lib/api";
 import { plausibleDate } from "@/lib/dates";
-import type { Device, DeviceCredential, ConnectResult, RecordingKind } from "@/lib/types";
+import type { AccessRequest, Device, DeviceCredential, ConnectResult, RecordingKind } from "@/lib/types";
 import { injectionMethodsFor, defaultInjectionFor, RECORDING_KIND_INFO } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import {
@@ -203,7 +203,9 @@ export function DevicesPage() {
   });
 
   // Where a gated device sends the operator: the request dialog, not an error.
-  const [requesting, setRequesting] = useState<Device | null>(null);
+  // The device being asked about, plus the request already in flight for it if
+  // the probe found one — the dialog opens on its waiting view in that case.
+  const [requesting, setRequesting] = useState<{ device: Device; request: AccessRequest | null } | null>(null);
 
   const openSession = (sessionID: string, dev: Device) => {
     void qc.invalidateQueries({ queryKey: ["sessions", "active"] });
@@ -213,11 +215,21 @@ export function DevicesPage() {
   const connect = useMutation({
     mutationFn: async (dev: Device) => ({ out: await connectDevice(dev.id), dev }),
     onSuccess: ({ out, dev }) => {
-      // 202 rather than a session: the device is approval-gated and a request
-      // is now waiting on somebody. Hand over to the request dialog, which
-      // already knows how to wait, escalate and redeem.
+      // 202 rather than a session: the device is approval-gated. Two shapes.
+      //
+      // "pending" — a request of ours is already in flight; open the dialog on
+      // its waiting view rather than asking for a reason a second time.
       if (out.kind === "pending") {
-        setRequesting(dev);
+        setRequesting({ device: dev, request: out.request });
+        return;
+      }
+      // "needs_request" — gated, nothing raised, we have not said why. This
+      // click IS the probe: whether the gate applies is decided server-side
+      // (bypass, device ownership, a standing grant, an approval already in
+      // hand), so the console cannot know from the device row alone. Collect
+      // the reason now.
+      if (out.kind === "needs_request") {
+        setRequesting({ device: dev, request: null });
         return;
       }
       if (out.result.session_id) openSession(out.result.session_id, dev);
@@ -395,12 +407,13 @@ export function DevicesPage() {
       )}
       {requesting && (
         <RequestAccessModal
-          device={requesting}
+          device={requesting.device}
+          initialRequest={requesting.request}
           onClose={() => setRequesting(null)}
           onConnected={(res) => {
-            const dev = requesting;
+            const dev = requesting.device;
             setRequesting(null);
-            if (res.session_id && dev) openSession(res.session_id, dev);
+            if (res.session_id) openSession(res.session_id, dev);
           }}
         />
       )}

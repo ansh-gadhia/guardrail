@@ -3,6 +3,8 @@ package access
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +36,11 @@ type gateOutcome struct {
 	redeem *access.Request
 	// reason names why a connect was allowed without asking, for the audit trail.
 	reason string
+	// needsReason means the caller must ask, and has not said why yet. It is not
+	// a failure: the console's first Connect deliberately carries no reason,
+	// because that probe is how it finds out the device is gated for THIS caller
+	// at all — every exemption above is invisible from the browser.
+	needsReason bool
 }
 
 // ConnectOptions carries what the requester said when asking for access.
@@ -61,6 +68,9 @@ func (s *Service) approvalGate(ctx context.Context, actor iam.Claims, ep access.
 		return gateOutcome{allow: true}, nil
 	}
 	now := s.clock.Now()
+	// Normalized once, here, so every check below means the same thing by "no
+	// reason" and the stored request carries the trimmed text. opts is a copy.
+	opts.Reason = strings.TrimSpace(opts.Reason)
 
 	// 1. Administrators. A permission rather than a role name, so a custom role
 	//    can be exempted without a code change and so the role editor SHOWS who
@@ -116,6 +126,9 @@ func (s *Service) approvalGate(ctx context.Context, actor iam.Claims, ep access.
 	// first — that pending request is *why* they are here — and letting it swallow
 	// the emergency would mean the door only works for people who never knocked.
 	if opts.Emergency {
+		if opts.Reason == "" {
+			return gateOutcome{needsReason: true}, nil
+		}
 		req, rerr := s.raiseRequest(ctx, actor, ep, deviceID, opts, now, true)
 		if rerr != nil {
 			return gateOutcome{}, rerr
@@ -140,7 +153,14 @@ func (s *Service) approvalGate(ctx context.Context, actor iam.Claims, ep access.
 		return gateOutcome{request: existing}, nil
 	}
 
-	// 7. Ask.
+	// 7. Ask — if we know what to tell the approver.
+	//
+	// Below the outstanding-request branch deliberately: pressing Connect a
+	// second time should surface the request already waiting, not demand a reason
+	// for one that has been given.
+	if opts.Reason == "" {
+		return gateOutcome{needsReason: true}, nil
+	}
 	req, err := s.raiseRequest(ctx, actor, ep, deviceID, opts, now, false)
 	if err != nil {
 		return gateOutcome{}, err
@@ -153,8 +173,11 @@ func (s *Service) approvalGate(ctx context.Context, actor iam.Claims, ep access.
 // raiseRequest validates and stores a new access request.
 func (s *Service) raiseRequest(ctx context.Context, actor iam.Claims, ep access.Endpoint,
 	deviceID uuid.UUID, opts ConnectOptions, now time.Time, emergency bool) (*access.Request, error) {
-	if opts.Reason == "" {
-		return nil, access.ErrInvalid
+	// Reachable only from an API client now — the gate answers a reasonless
+	// console probe long before this. Wrapped so the 400 says what is missing
+	// instead of "access: invalid".
+	if strings.TrimSpace(opts.Reason) == "" {
+		return nil, fmt.Errorf("%w: a reason is required to ask for access to this device", access.ErrInvalid)
 	}
 	// The rate limit exists so one frustrated operator cannot bury every approver
 	// in notifications. It must NOT apply to an emergency: somebody reaching for
