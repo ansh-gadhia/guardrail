@@ -40,6 +40,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          # Without this the action stops at the first local match: the runner
+          # ships a preinstalled 1.26.x, "1.26" accepts it, and no newer patch is
+          # ever fetched. That is how the security job ran on go1.26.5 and found
+          # six standard-library advisories that 1.26.6 had already fixed — a
+          # floating minor that silently pins to whatever the image happens to
+          # carry. check-latest resolves against the published list instead.
+          check-latest: true
           cache-dependency-path: backend/go.sum
       - name: Download modules
         run: go mod download
@@ -101,6 +108,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          # Without this the action stops at the first local match: the runner
+          # ships a preinstalled 1.26.x, "1.26" accepts it, and no newer patch is
+          # ever fetched. That is how the security job ran on go1.26.5 and found
+          # six standard-library advisories that 1.26.6 had already fixed — a
+          # floating minor that silently pins to whatever the image happens to
+          # carry. check-latest resolves against the published list instead.
+          check-latest: true
           cache-dependency-path: backend/go.sum
       - name: Create app role + apply migrations + seed
         env:
@@ -127,6 +141,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          # Without this the action stops at the first local match: the runner
+          # ships a preinstalled 1.26.x, "1.26" accepts it, and no newer patch is
+          # ever fetched. That is how the security job ran on go1.26.5 and found
+          # six standard-library advisories that 1.26.6 had already fixed — a
+          # floating minor that silently pins to whatever the image happens to
+          # carry. check-latest resolves against the published list instead.
+          check-latest: true
           cache-dependency-path: backend/go.sum
       - name: govulncheck
         run: |

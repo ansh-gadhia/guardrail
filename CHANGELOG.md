@@ -11,6 +11,30 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 `GET /api/v1/version`, `GET /healthz`, and in the web UI footer.
 
 ## [Unreleased]
+### Security
+- **The build floor is now a patch, not a minor.** `go.mod` said `go 1.26`, which
+  any 1.26.x satisfies, so a build host carrying an older patch produced a
+  vulnerable binary without complaint — and one was deployed that way. go1.26.5
+  and earlier carry six standard-library advisories this code reaches, through
+  `net/url`, `crypto/tls`, `net/http`, `encoding/xml`, `encoding/asn1` and the
+  vendored `x/net/idna`. The directive now reads `go 1.26.6`.
+
+  The patch has to sit on the `go` line specifically. A `toolchain` directive
+  does not work here: `GOTOOLCHAIN=local`, which is what the golang Docker images
+  set, ignores it — a 1.26.5 base image built clean while the file claimed a
+  1.26.6 floor. Verified both ways round: 1.26.5 now stops with `go.mod requires
+  go >= 1.26.6`, and the shipped binary reports go1.26.6.
+
+  CI resolved 1.26.5 for the same class of reason — `setup-go` accepts the
+  runner's preinstalled Go when the spec is a bare minor, and never looks for a
+  newer patch. All three jobs now set `check-latest: true`.
+
+- Dependency bumps for advisories that were present but not reached:
+  `github.com/Azure/go-ntlmssp` to v0.1.1 (GO-2026-5543, NTLM challenge panic,
+  pulled in by go-ldap) and `golang.org/x/net` to v0.56.0 (GO-2026-5942, SVCB/HTTPS
+  record parse panic). `golang.org/x/crypto/openpgp` (GO-2026-5932) has no fixed
+  version and is not imported; it stays reported and unactioned.
+
 ### Added
 - **Approvals.** A device can require a decision before anybody connects to it.
   Rank comes from roles (`roles.approval_level`, seeded Super Admin 100 →

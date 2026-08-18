@@ -1,6 +1,26 @@
 module github.com/guardrail/guardrail
 
-go 1.26
+// The patch is part of the FLOOR, not decoration.
+//
+// go1.26.5 and earlier carry six standard-library advisories this code reaches
+// (net/url, crypto/tls, net/http, encoding/xml, encoding/asn1, and the vendored
+// x/net/idna) — the security job in CI fails on them. Writing this as a bare
+// "go 1.26" is what let them through: any 1.26.x satisfies it, so a build host
+// with an older patch silently produced a vulnerable binary, and one was
+// deployed here that way.
+//
+// The patch has to live on THIS line to bite. A `toolchain` directive does not:
+// GOTOOLCHAIN=local — which is exactly what the golang Docker images set —
+// ignores it, and a 1.26.5 base image built clean while claiming a 1.26.6 floor.
+// The `go` directive is the one GOTOOLCHAIN=local still enforces, so an
+// underpowered build host now fails outright instead of shipping quietly.
+//
+// GOTOOLCHAIN=auto (a developer's default) reads the same line and fetches the
+// toolchain by itself.
+//
+// Raise it when the security job reports a new standard-library advisory, then
+// `docker pull golang:1.26-alpine` so the image catches up.
+go 1.26.6
 
 require (
 	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
@@ -14,11 +34,11 @@ require (
 	github.com/prometheus/client_golang v1.19.1
 	github.com/redis/go-redis/v9 v9.6.3
 	go.uber.org/zap v1.27.0
-	golang.org/x/crypto v0.52.0
+	golang.org/x/crypto v0.53.0
 )
 
 require (
-	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358 // indirect
+	github.com/Azure/go-ntlmssp v0.1.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bytedance/sonic v1.11.6 // indirect
 	github.com/bytedance/sonic/loader v0.1.1 // indirect
@@ -56,9 +76,9 @@ require (
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

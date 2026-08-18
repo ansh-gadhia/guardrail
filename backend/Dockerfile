@@ -1,9 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
 # --- build stage -----------------------------------------------------------
-# Must satisfy the `go` directive in go.mod (currently 1.26). GOTOOLCHAIN=local
-# in the base image means a lower tag fails the build outright rather than
-# quietly fetching a newer toolchain.
+# Must satisfy the `toolchain` directive in go.mod, not just the `go` one —
+# go.mod names an exact minimum patch because older 1.26.x releases carry
+# standard-library advisories this code reaches.
+#
+# The tag stays floating so a fresh pull picks up each patch release on its own.
+# GOTOOLCHAIN=local in the base image is what makes that safe: a stale cached
+# base below the floor fails the build outright, rather than quietly producing a
+# binary built with a toolchain that is known to be affected. If this build stops
+# with "go.mod requires go >= 1.26.x", the fix is `docker pull golang:1.26-alpine`
+# — not lowering the floor.
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 
