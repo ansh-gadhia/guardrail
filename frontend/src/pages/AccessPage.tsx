@@ -133,12 +133,14 @@ export function AccessPage() {
                       {u.is_bootstrap_admin ? (
                         /* Say WHY rather than hiding the controls. A missing button
                            sends somebody hunting for a permission they already have;
-                           this account is refused to everyone, including them. */
+                           this account's roles and password are refused to everyone,
+                           including them. Removal is not — see the trash button
+                           below, which stays available on every row. */
                         <span
                           className="flex items-center gap-1.5 text-xs text-faint"
-                          title="This is the account GuardRail was installed with. It is how you get back in if every other administrator is lost, so its roles cannot be changed and it cannot be removed — by anyone. Replace it with `guardrail seed-admin` on the server."
+                          title="This is the account GuardRail was installed with. It is how you get back in if every other administrator is lost, so its roles cannot be changed and its password cannot be reset — by anyone. It can still be removed; `guardrail seed-admin` on the server puts it back."
                         >
-                          <IconLock size={13} /> Installation account — locked
+                          <IconLock size={13} /> Installation account — roles locked
                         </span>
                       ) : (
                         <>
@@ -148,20 +150,31 @@ export function AccessPage() {
                           <button className="btn-subtle" onClick={() => setResetFor(u)}>
                             Reset password
                           </button>
-                          {u.user_id !== me?.user_id && (
-                            <button
-                              className="btn-subtle text-faint hover:text-danger"
-                              disabled={remove.isPending}
-                              aria-label={`Remove user ${u.email}`}
-                              title="Remove user"
-                              onClick={() => {
-                                if (window.confirm(`Remove user "${u.email}"?`)) remove.mutate(u.user_id);
-                              }}
-                            >
-                              <IconTrash size={15} />
-                            </button>
-                          )}
                         </>
+                      )}
+                      {/* Outside the branch above: removal is allowed for the
+                          installation account too. Self-deletion is not, for
+                          anybody — signing yourself out of your own console is
+                          never the intent behind a click on a bin. */}
+                      {u.user_id !== me?.user_id && (
+                        <button
+                          className="btn-subtle text-faint hover:text-danger"
+                          disabled={remove.isPending}
+                          aria-label={`Remove user ${u.email}`}
+                          title={u.is_bootstrap_admin ? "Remove the installation account" : "Remove user"}
+                          onClick={() => {
+                            /* The installation account gets a different sentence,
+                               because the consequence is different: if it is the
+                               last super admin, the way back in is on the server,
+                               not in this window. */
+                            const ask = u.is_bootstrap_admin
+                              ? `Remove "${u.email}"?\n\nThis is the account GuardRail was installed with. If it is your last super admin, the only way back in is to run \`guardrail seed-admin\` on the server.`
+                              : `Remove user "${u.email}"?`;
+                            if (window.confirm(ask)) remove.mutate(u.user_id);
+                          }}
+                        >
+                          <IconTrash size={15} />
+                        </button>
                       )}
                     </div>
                   )}

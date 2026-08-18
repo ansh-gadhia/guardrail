@@ -50,7 +50,32 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   carry the account name, so GuardRail's trail can be joined to the target's own
   logs. Migration `0026`.
 
+- **Member role editing, a protected installation account, and admin password
+  reset.** The console can now escalate or downgrade a member's roles from the
+  Members list; the dialog states the approval rank before and after, warns when
+  Super Admin is granted or removed, warns when the last role is unticked, and
+  says that saving signs the person out. Administrators can issue a **temporary
+  password** for somebody who is locked out — generated, shown once, forced to
+  change at next sign-in, and revoking every existing session. The password
+  avoids `0/O`, `1/l/I` and `5/S`, because a reset password gets read aloud.
+
+  The account `seed-admin` creates cannot have its **roles changed or its
+  password reset**, by anybody, including other super admins and itself: it is
+  the recovery path, and a demoted or reset copy of it lets nobody back in. It
+  **can** be removed — removal frees the email address, so `guardrail seed-admin`
+  on the server puts it back. That is the difference: deletion is the one change
+  to this account that can be undone from outside the product.
+  Identified by the `is_super_admin` column, not by holding the Super Admin role,
+  so console-promoted super admins stay fully manageable. Refused attempts are
+  audited.
+
 ### Fixed
+- **The approval hierarchy was inert.** The query that loads a user's roles never
+  selected `roles.approval_level`, so every principal and every JWT carried rank
+  0 — and because an approver must outrank the requester strictly, `0 > 0` meant
+  **no non-super-admin could approve anything**. Earlier tests missed it because
+  they passed levels in at the repository layer, and every end-to-end approval
+  was performed by a super admin, who bypasses rank.
 - The device credential pre-flight asked a device-wide question while resolution
   asks a per-person one. On a per-user device that let a connect pass on somebody
   else's account, create the session, emit the audit event, and only fail when

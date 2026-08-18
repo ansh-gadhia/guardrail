@@ -81,12 +81,17 @@ func (s *Service) GetUser(ctx context.Context, actor iam.Claims, id iam.ID) (*Pr
 }
 
 // DeleteUser soft-deletes a user.
+//
+// The installation account is deliberately NOT exempt, unlike role changes and
+// password resets. Removal is the one change to it that survives being wrong:
+// the email uniqueness index is partial on deleted_at IS NULL, so the address
+// comes free again and `guardrail seed-admin` recreates the account on the
+// server. Demoting it or resetting its password leaves an account that still
+// exists and still cannot let anybody back in, which is the harder hole.
+//
+// Removing the last super admin therefore costs a trip to the server rather
+// than being unrecoverable. The console warns before it happens.
 func (s *Service) DeleteUser(ctx context.Context, actor iam.Claims, id iam.ID, meta ReqMeta) error {
-	// Deleting the installation account is the same lockout as demoting it, only
-	// harder to undo, so it answers to the same rule.
-	if err := s.guardBootstrapAdmin(ctx, actor, id, "deletion"); err != nil {
-		return err
-	}
 	if err := s.users.SoftDelete(ctx, actor.Scope(), id); err != nil {
 		return err
 	}
@@ -97,14 +102,15 @@ func (s *Service) DeleteUser(ctx context.Context, actor iam.Claims, id iam.ID, m
 	return nil
 }
 
-// guardBootstrapAdmin refuses any change to the account the platform was
-// installed with.
+// guardBootstrapAdmin refuses to change the ROLES or PASSWORD of the account the
+// platform was installed with. Deletion is a separate question and is allowed —
+// see DeleteUser for why the two differ.
 //
 // It applies to EVERYBODY, including other super admins and the account itself.
 // That is the point: a rule that a sufficiently privileged person can switch off
-// is not a protection, it is a speed bump — and the failure it prevents (nobody
-// can administer the platform any more) is one that cannot be repaired from
-// inside the platform.
+// is not a protection, it is a speed bump — and the failure it prevents (an
+// account that still exists but can no longer administer anything) is one that
+// cannot be repaired from inside the platform.
 //
 // The escape hatch is deliberately outside the product: somebody with shell
 // access to the server can re-run `guardrail seed-admin`. Locking yourself out
@@ -188,10 +194,11 @@ type ResetPasswordResult struct {
 //     resetting a super admin's password is account takeover with extra steps —
 //     it hands them a credential for an account that outranks them — so it is
 //     refused, mirroring guardSuperAdminGrant.
-//   - The installation account is refused to everybody, like every other change
-//     to it. Its recovery lives on the server (`guardrail seed-admin`), which is
-//     the point: the account that can restore everything must not be resettable
-//     by anyone who happens to be signed in.
+//   - The installation account is refused to everybody. Its recovery lives on
+//     the server (`guardrail seed-admin`), which is the point: the account that
+//     can restore everything must not be resettable by anyone who happens to be
+//     signed in — a reset here would hand whoever performed it the keys to the
+//     one account that outranks every rule in this file.
 //   - The new password is TEMPORARY. must_change_password is set, so the person
 //     replaces it at next sign-in and the administrator never keeps working
 //     knowledge of somebody else's credential.

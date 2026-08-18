@@ -119,12 +119,17 @@ func (u *User) Permissions() []string {
 // exists because the platform exists" from "somebody an administrator promoted",
 // and only the first is protected.
 //
-// It has to be protected because it is the recovery path. Every other privileged
-// account can be recreated by it; nothing can recreate it except shell access to
-// the server. An administrator who demotes or deletes it — by accident, or
-// because somebody talked them into it — has locked the organization out of its
-// own privileged-access platform, and no amount of remaining permission puts it
-// back.
+// Its roles and password are protected because it is the recovery path. Every
+// other privileged account can be recreated by it; nothing can recreate it
+// except shell access to the server. An administrator who demotes it or resets
+// its password — by accident, or because somebody talked them into it — is left
+// with an account that still exists and still cannot administer anything, and no
+// amount of remaining permission puts it back.
+//
+// Deletion is NOT refused. A removed account frees its email address (the
+// uniqueness index is partial on deleted_at), so `guardrail seed-admin` puts it
+// back on the server; that is a trip to the console-less side of the box, not a
+// dead end. See app/iam.DeleteUser.
 func (u *User) IsBootstrapAdmin() bool { return u.IsSuperAdmin }
 
 // ApprovalLevel is the user's rank: the highest of their roles'.

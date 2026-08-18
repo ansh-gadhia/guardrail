@@ -174,11 +174,13 @@ func TestNonSuperAdminCanGrantOrdinaryRoles(t *testing.T) {
 	}
 }
 
-// The account GuardRail was installed with is refused to everybody, including a
-// super admin. It is the recovery path: nothing inside the product can recreate
-// it, so a rule a privileged person could switch off would be a speed bump
-// rather than a protection.
-func TestBootstrapAdminIsProtectedFromEveryone(t *testing.T) {
+// The roles of the account GuardRail was installed with are refused to
+// everybody, including a super admin. It is the recovery path: nothing inside
+// the product can recreate it, so a rule a privileged person could switch off
+// would be a speed bump rather than a protection.
+//
+// Deletion is the deliberate exception — see the sibling test below.
+func TestBootstrapAdminRolesAreProtectedFromEveryone(t *testing.T) {
 	h := newHarness(t)
 	orgID := h.addOrg("acme")
 	root := iam.Claims{
@@ -195,10 +197,6 @@ func TestBootstrapAdminIsProtectedFromEveryone(t *testing.T) {
 	if err := h.svc.AssignRoles(context.Background(), root, boot.ID, []iam.ID{iam.NewID()}, ReqMeta{}); !errors.Is(err, iam.ErrProtectedAccount) {
 		t.Fatalf("a super admin must not be able to change its roles, got %v", err)
 	}
-	if err := h.svc.DeleteUser(context.Background(), root, boot.ID, ReqMeta{}); !errors.Is(err, iam.ErrProtectedAccount) {
-		t.Fatalf("a super admin must not be able to delete it, got %v", err)
-	}
-
 	// Its own holder cannot demote it either — self-service lockout is still
 	// lockout.
 	self := iam.Claims{UserID: boot.ID, OrganizationID: orgID, Email: boot.Email.String(), IsSuperAdmin: true}
@@ -215,5 +213,34 @@ func TestBootstrapAdminIsProtectedFromEveryone(t *testing.T) {
 	}
 	if err := h.svc.AssignRoles(context.Background(), root, promoted.ID, nil, ReqMeta{}); err != nil {
 		t.Fatalf("a console-promoted super admin must remain demotable: %v", err)
+	}
+}
+
+// Deletion is the one change to the installation account that is allowed.
+//
+// It is allowed because it is the only one that can be undone from outside: the
+// email uniqueness index is partial on deleted_at, so removing the account frees
+// the address and `guardrail seed-admin` recreates it. Demoting it or resetting
+// its password leaves an account that exists and cannot let anybody back in,
+// which is why those two stay refused — including here, so that relaxing the
+// delete rule cannot quietly relax them as well.
+func TestBootstrapAdminCanBeRemovedButNotDemotedOrReset(t *testing.T) {
+	h := newHarness(t)
+	orgID := h.addOrg("acme")
+	root := iam.Claims{
+		UserID: iam.NewID(), OrganizationID: orgID, Email: "root@acme.com", IsSuperAdmin: true,
+	}
+
+	boot := h.addUserInOrg(t, orgID, "installed@acme.com", "BootPass123456!")
+	boot.IsSuperAdmin = true
+	if err := h.users.Create(context.Background(), iam.TenantScope{OrganizationID: orgID}, boot); err != nil {
+		t.Fatalf("store bootstrap admin: %v", err)
+	}
+
+	if _, err := h.svc.ResetPassword(context.Background(), root, boot.ID, "", ReqMeta{}); !errors.Is(err, iam.ErrProtectedAccount) {
+		t.Fatalf("resetting its password must stay refused, got %v", err)
+	}
+	if err := h.svc.DeleteUser(context.Background(), root, boot.ID, ReqMeta{}); err != nil {
+		t.Fatalf("removing the installation account must be allowed, got %v", err)
 	}
 }

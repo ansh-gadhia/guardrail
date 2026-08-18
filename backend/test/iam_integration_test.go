@@ -110,7 +110,7 @@ func TestIntegration_UserLifecycleAndAuth(t *testing.T) {
 // it, and nothing inside the product can recreate it. A rule that a sufficiently
 // privileged person can switch off is not a protection, so this is checked for
 // the strongest caller there is.
-func TestIntegration_BootstrapAdminCannotBeDemotedOrDeleted(t *testing.T) {
+func TestIntegration_BootstrapAdminCannotBeDemotedButCanBeRemoved(t *testing.T) {
 	svc, closeDB := newService(t)
 	defer closeDB()
 	ctx := context.Background()
@@ -134,8 +134,8 @@ func TestIntegration_BootstrapAdminCannotBeDemotedOrDeleted(t *testing.T) {
 	if err := svc.AssignRoles(ctx, actor, boot.UserID, nil, appiam.ReqMeta{}); !errors.Is(err, iam.ErrProtectedAccount) {
 		t.Fatalf("stripping its roles must be refused, got %v", err)
 	}
-	if err := svc.DeleteUser(ctx, actor, boot.UserID, appiam.ReqMeta{}); !errors.Is(err, iam.ErrProtectedAccount) {
-		t.Fatalf("deleting the installation account must be refused, got %v", err)
+	if _, err := svc.ResetPassword(ctx, actor, boot.UserID, "", appiam.ReqMeta{}); !errors.Is(err, iam.ErrProtectedAccount) {
+		t.Fatalf("resetting the installation account's password must be refused, got %v", err)
 	}
 
 	// It is still there, still a super admin.
@@ -145,6 +145,27 @@ func TestIntegration_BootstrapAdminCannotBeDemotedOrDeleted(t *testing.T) {
 	}
 	if !still.IsSuperAdmin || !still.IsBootstrapAdmin {
 		t.Fatal("the installation account lost its standing despite the change being refused")
+	}
+
+	// Removal, by contrast, is allowed: it is the one change that can be undone
+	// from outside the product. The soft delete frees the email address, because
+	// the uniqueness index is partial on deleted_at — which is what makes
+	// `guardrail seed-admin` able to put the same account back afterwards.
+	if err := svc.DeleteUser(ctx, actor, boot.UserID, appiam.ReqMeta{}); err != nil {
+		t.Fatalf("removing the installation account must be allowed: %v", err)
+	}
+	if _, err := svc.GetUser(ctx, actor, boot.UserID); !errors.Is(err, iam.ErrNotFound) {
+		t.Fatalf("the removed account should be gone, got %v", err)
+	}
+	// The address is free again — the recovery path seed-admin depends on.
+	again, err := svc.CreateUser(ctx, actor, appiam.CreateUserInput{
+		Email: boot.Email, Username: "boot", Password: "IntegrationPass123!", IsSuperAdmin: true,
+	})
+	if err != nil {
+		t.Fatalf("re-seeding the same address after removal must work: %v", err)
+	}
+	if !again.IsBootstrapAdmin {
+		t.Fatal("the re-seeded account should be the installation account again")
 	}
 }
 

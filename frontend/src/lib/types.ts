@@ -234,8 +234,10 @@ export interface UserRow {
   username: string;
   is_super_admin: boolean;
   // The account this GuardRail was installed with. Its roles cannot be changed
-  // and it cannot be removed — by anyone, including other super admins — because
-  // it is the way back in if every other administrator is lost.
+  // and its password cannot be reset — by anyone, including other super admins —
+  // because it is the way back in if every other administrator is lost. It CAN
+  // be removed: that frees the email address, so `guardrail seed-admin` on the
+  // server puts it back, which is what makes removal the one recoverable change.
   is_bootstrap_admin: boolean;
   roles: string[];
   permissions: string[];

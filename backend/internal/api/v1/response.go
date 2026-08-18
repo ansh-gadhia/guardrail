@@ -53,9 +53,10 @@ func fail(c *gin.Context, err error) {
 		// "iam: this account is protected: ...", and a Go error string is not a
 		// sentence to show somebody. The account is named on the row they clicked.
 		problem(c, http.StatusForbidden, "Protected Account",
-			"This is the account GuardRail was installed with. Its roles cannot be changed and "+
-				"it cannot be removed, by anyone — it is how you get back in if every other "+
-				"administrator is lost. To replace it, run `guardrail seed-admin` on the server.")
+			"This is the account GuardRail was installed with. Its roles and its password cannot "+
+				"be changed, by anyone — it is how you get back in if every other administrator "+
+				"is lost, and a demoted or reset copy of it is no way back in. It can still be "+
+				"removed; to replace it, remove it and run `guardrail seed-admin` on the server.")
 	// Named separately from ErrPermissionDenied: the caller is allowed to issue
 	// tokens, they just asked for a permission no token may carry. Saying
 	// "permission denied" would send them to check their own role, which is not
