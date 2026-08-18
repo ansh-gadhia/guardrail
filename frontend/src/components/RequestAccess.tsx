@@ -89,6 +89,10 @@ export function RequestAccessModal({
       }
       setPending(out.request);
     },
+    // problemDetail surfaces the server's sentence verbatim, which for a spent
+    // quota names when the next one frees up. Do not shorten it to "denied":
+    // during an incident the difference between four minutes and four days is
+    // the whole decision.
     onError: (e) => toast.error(problemDetail(e, "Could not raise the request")),
   });
 
@@ -166,6 +170,13 @@ export function RequestAccessModal({
             <p className="mt-1 text-sm text-muted">
               You get in immediately. Every approver is notified at once, the session is flagged, and
               somebody senior has to sign it off afterwards. Use it when waiting would cause real harm.
+            </p>
+            {/* Said before the click, not only on refusal. Somebody finding out
+                mid-incident that they used their last one a fortnight ago has
+                been told too late to do anything with it. */}
+            <p className="mt-1.5 text-xs text-faint">
+              Emergency access is rationed. Taking one uses up part of your allowance for the period, and it
+              does not reset when the session ends — if you are not sure this is an emergency, ask instead.
             </p>
             <div className="mt-3 flex justify-end gap-2">
               <Button variant="ghost" size="sm" onClick={() => setConfirmEmergency(false)}>

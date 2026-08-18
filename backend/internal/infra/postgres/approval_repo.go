@@ -365,6 +365,33 @@ func (r *RequestRepo) PendingFor(ctx context.Context, s access.Scope, userID, de
 }
 
 // CountPending counts a user's outstanding requests.
+// CountEmergenciesSince counts emergency accesses this user actually took in the
+// window, and returns the oldest one's timestamp so the caller can say when the
+// quota frees up.
+//
+// session_id IS NOT NULL is the "actually took" part: an emergency that never
+// became a session gave nobody access, and charging for it would spend a week's
+// quota on a device with no credential bound. min(created_at) is the one that
+// ages out first, so oldest + window is when the next slot opens.
+func (r *RequestRepo) CountEmergenciesSince(ctx context.Context, s access.Scope, userID uuid.UUID,
+	since time.Time) (int, time.Time, error) {
+	var n int
+	var oldest *time.Time
+	err := r.db.WithScopeIDs(ctx, s.OrganizationID, s.IsSuperAdmin, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT COUNT(*), MIN(created_at) FROM access_requests
+			WHERE user_id=$1 AND is_emergency AND session_id IS NOT NULL AND created_at >= $2`,
+			userID, since).Scan(&n, &oldest)
+	})
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if oldest == nil {
+		return n, time.Time{}, nil
+	}
+	return n, *oldest, nil
+}
+
 func (r *RequestRepo) CountPending(ctx context.Context, s access.Scope, userID uuid.UUID) (int, error) {
 	var n int
 	err := r.db.WithScopeIDs(ctx, s.OrganizationID, s.IsSuperAdmin, func(tx pgx.Tx) error {

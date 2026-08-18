@@ -42,6 +42,20 @@ var ErrTooManyRequests = errors.New("access: too many pending requests")
 // somebody waiting on a decision that cannot arrive.
 var ErrNoApprover = errors.New("access: nobody can approve this request")
 
+// ErrEmergencyQuota reports that somebody has taken emergency access as often as
+// policy allows in the current window.
+//
+// This is what stops break-glass from quietly replacing the approval workflow.
+// Emergency access is deliberately reachable by anybody the gate applies to —
+// a door people can see beats a wall they climb by sharing the break-glass
+// credential — but "reachable" and "unlimited" are different settings, and only
+// the second one makes asking optional.
+//
+// The quota is sized so that routine use runs out and genuine use does not:
+// somebody in a real incident takes emergency access rarely, somebody avoiding
+// the queue takes it every day.
+var ErrEmergencyQuota = errors.New("access: emergency access quota reached")
+
 // ---- values ---------------------------------------------------------------
 
 // RequestStatus is where a request sits in its lifecycle.
@@ -286,6 +300,15 @@ type RequestRepository interface {
 	PendingFor(ctx context.Context, s Scope, userID, deviceID uuid.UUID, now time.Time) (*Request, error)
 	// CountPending counts a user's outstanding requests, for rate limiting.
 	CountPending(ctx context.Context, s Scope, userID uuid.UUID) (int, error)
+	// CountEmergenciesSince counts the emergency accesses a user actually TOOK in
+	// a window, and returns the oldest of them so the caller can say when the
+	// quota frees up.
+	//
+	// Taken, not raised: an emergency that never became a session — the device
+	// had no credential bound, the gateway refused — cost nobody any access, and
+	// charging for it would burn a week's quota on a misconfiguration and lock
+	// somebody out of the door during the incident it exists for.
+	CountEmergenciesSince(ctx context.Context, s Scope, userID uuid.UUID, since time.Time) (int, time.Time, error)
 	// Escalate raises unanswered requests one rank and returns how many moved.
 	// Runs unscoped across tenants, like the session reaper.
 	Escalate(ctx context.Context, now time.Time) (int, error)

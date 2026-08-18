@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	appiam "github.com/guardrail/guardrail/internal/app/iam"
 	domaccess "github.com/guardrail/guardrail/internal/domain/access"
@@ -23,6 +24,7 @@ import (
 )
 
 type approvalFixture struct {
+	db       *postgres.DB
 	requests *postgres.RequestRepo
 	grants   *postgres.GrantRepo
 	sessions *postgres.AccessSessionRepo
@@ -37,6 +39,7 @@ type approvalFixture struct {
 func newApprovalFixture(t *testing.T, pg *postgres.DB) *approvalFixture {
 	t.Helper()
 	return &approvalFixture{
+		db:       pg,
 		requests: postgres.NewRequestRepo(pg),
 		grants:   postgres.NewGrantRepo(pg),
 		sessions: postgres.NewAccessSessionRepo(pg),
@@ -90,6 +93,34 @@ func (f *approvalFixture) request(t *testing.T, ctx context.Context, user, devic
 		t.Fatalf("create request: %v", err)
 	}
 	return r
+}
+
+// markEmergency flags a request as break-glass and backdates it. Written
+// directly because no application path produces a request that was taken days
+// ago, and the quota query is entirely about how long ago things happened.
+func (f *approvalFixture) markEmergency(t *testing.T, ctx context.Context, id uuid.UUID, at time.Time) {
+	t.Helper()
+	err := f.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `UPDATE access_requests
+			SET is_emergency = true, status = 'approved', created_at = $2 WHERE id = $1`, id, at)
+		return e
+	})
+	if err != nil {
+		t.Fatalf("mark emergency: %v", err)
+	}
+}
+
+// attachSession records that a request was actually redeemed into a session,
+// which is what separates access somebody took from access they only asked for.
+func (f *approvalFixture) attachSession(t *testing.T, ctx context.Context, id, sessionID uuid.UUID) {
+	t.Helper()
+	err := f.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `UPDATE access_requests SET session_id = $2 WHERE id = $1`, id, sessionID)
+		return e
+	})
+	if err != nil {
+		t.Fatalf("attach session: %v", err)
+	}
 }
 
 // session creates a real brokered session row.
@@ -622,5 +653,64 @@ func TestIntegration_NonSuperAdminApproverCarriesRealRank(t *testing.T) {
 	if _, err := f.requests.AddDecision(ctx, f.scope, req2.ID, peer.UserID,
 		domaccess.Decision{Decision: domaccess.DecisionApprove}, peer.ApprovalLevel, false); !errors.Is(err, domaccess.ErrCannotDecide) {
 		t.Fatalf("an equal rank must not approve, got %v", err)
+	}
+}
+
+// The emergency quota counts break-glass accesses somebody actually TOOK, inside
+// the window, and reports the oldest so the refusal can say when it frees up.
+//
+// Tested against the database because every clause is load-bearing and none of
+// them is visible from the application layer: the session_id predicate is what
+// stops a misconfigured device burning a week's quota on connects that gave
+// nobody access, and MIN(created_at) is what makes the refusal a sentence rather
+// than a wall.
+func TestIntegration_EmergencyQuotaCountsOnlyAccessesTaken(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+	f := newApprovalFixture(t, pg)
+
+	user := f.user(t, ctx, "breaker")
+	device := f.device(t, ctx, 1)
+	now := time.Now()
+
+	// Taken 2 days ago: counts.
+	taken := f.request(t, ctx, user, device.ID, 10, 1)
+	f.markEmergency(t, ctx, taken.ID, now.Add(-48*time.Hour))
+	f.attachSession(t, ctx, taken.ID, f.session(t, ctx, user, device.ID))
+
+	// Raised but never became a session — the device had no credential bound.
+	// Cost nobody any access, so it must not spend quota.
+	failed := f.request(t, ctx, user, device.ID, 10, 1)
+	f.markEmergency(t, ctx, failed.ID, now.Add(-24*time.Hour))
+
+	// Taken, but older than the window: aged out.
+	old := f.request(t, ctx, user, device.ID, 10, 1)
+	f.markEmergency(t, ctx, old.ID, now.Add(-30*24*time.Hour))
+	f.attachSession(t, ctx, old.ID, f.session(t, ctx, user, device.ID))
+
+	// An ordinary approved request that was used is not an emergency at all.
+	ordinary := f.request(t, ctx, user, device.ID, 10, 1)
+	f.attachSession(t, ctx, ordinary.ID, f.session(t, ctx, user, device.ID))
+
+	since := now.Add(-7 * 24 * time.Hour)
+	n, oldest, err := f.requests.CountEmergenciesSince(ctx, f.scope, user, since)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("count = %d, want 1 — only the taken, in-window emergency counts", n)
+	}
+	if oldest.IsZero() {
+		t.Fatal("no oldest timestamp; the refusal cannot say when the quota frees up")
+	}
+	if drift := oldest.Sub(now.Add(-48 * time.Hour)); drift > time.Second || drift < -time.Second {
+		t.Errorf("oldest = %v, want the 48h-old emergency", oldest)
+	}
+
+	// Somebody who has taken none is unaffected.
+	clean := f.user(t, ctx, "careful")
+	if n, _, err := f.requests.CountEmergenciesSince(ctx, f.scope, clean, since); err != nil || n != 0 {
+		t.Errorf("count for a user with no emergencies = %d (err %v), want 0", n, err)
 	}
 }

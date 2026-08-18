@@ -356,6 +356,11 @@ type opts struct {
 	minApprovals int
 	// pendingRequest models this caller already having a request in flight.
 	pendingRequest *access.Request
+	// emergenciesTaken models break-glass connects this caller already made, for
+	// the quota.
+	emergenciesTaken []time.Time
+	// noEmergencyQuota models a deployment that has turned the limit off.
+	noEmergencyQuota bool
 	// approversAbove overrides how many people could decide. Nil means one, so
 	// the ordinary case is "somebody can approve this".
 	approversAbove *int
@@ -402,6 +407,9 @@ func newHarness(o opts) *harness {
 		Node:   "test-node",
 		Config: DefaultConfig(),
 	}
+	if o.noEmergencyQuota {
+		deps.Config.EmergencyQuota = 0
+	}
 	if !o.noAuthorizer {
 		deps.Authorizer = authz
 	}
@@ -411,7 +419,7 @@ func newHarness(o opts) *harness {
 	// Wired only for gated devices, so every existing test keeps running against
 	// a service with no approval collaborators at all — which is also the shape a
 	// deployment that never turns approvals on actually has.
-	requests := &fakeRequests{pending: o.pendingRequest}
+	requests := &fakeRequests{pending: o.pendingRequest, emergenciesTaken: o.emergenciesTaken}
 	if o.requiresApproval {
 		above := 1
 		if o.approversAbove != nil {
@@ -498,10 +506,13 @@ func (f fakeCreds) CredentialInherited(context.Context, access.Scope, uuid.UUID,
 // four of them.
 
 type fakeRequests struct {
-	mu       sync.Mutex
-	created  []*access.Request
-	pending  *access.Request
-	countErr error
+	mu      sync.Mutex
+	created []*access.Request
+	pending *access.Request
+	// emergenciesTaken are the timestamps of break-glass connects this user has
+	// already made, for the quota check.
+	emergenciesTaken []time.Time
+	countErr         error
 }
 
 func (f *fakeRequests) Create(_ context.Context, _ access.Scope, r *access.Request) error {
@@ -528,6 +539,26 @@ func (f *fakeRequests) CountPending(context.Context, access.Scope, uuid.UUID) (i
 }
 
 func (f *fakeRequests) Cancel(context.Context, access.Scope, uuid.UUID, uuid.UUID) error { return nil }
+
+// CountEmergenciesSince counts the emergencies this fake was told the user has
+// already TAKEN — mirroring the repository, which only counts the ones that
+// became a session.
+func (f *fakeRequests) CountEmergenciesSince(_ context.Context, _ access.Scope, _ uuid.UUID,
+	since time.Time) (int, time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n, oldest := 0, time.Time{}
+	for _, t := range f.emergenciesTaken {
+		if t.Before(since) {
+			continue
+		}
+		n++
+		if oldest.IsZero() || t.Before(oldest) {
+			oldest = t
+		}
+	}
+	return n, oldest, nil
+}
 
 func (f *fakeRequests) GetByID(context.Context, access.Scope, uuid.UUID) (*access.Request, error) {
 	return nil, access.ErrNotFound

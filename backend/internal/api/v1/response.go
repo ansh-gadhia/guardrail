@@ -216,6 +216,15 @@ func failAccess(c *gin.Context, err error) {
 		c.Header("Retry-After", "60")
 		problem(c, http.StatusTooManyRequests, "Too Many Requests",
 			"you already have the maximum number of access requests waiting; cancel one or wait for a decision")
+	// 429 like the pending-request limit, because it is the same kind of answer:
+	// not "you may not", but "not again yet". Retry-After is deliberately absent —
+	// the wait is days, not seconds, and a header telling a client to retry in a
+	// week would be read by nobody and obeyed by nothing. The detail names the
+	// moment instead, and names the way round it, which is to ask.
+	case errors.Is(err, access.ErrEmergencyQuota):
+		problem(c, http.StatusTooManyRequests, "Emergency Quota Reached",
+			detailFor(err, access.ErrEmergencyQuota,
+				"you have taken emergency access as often as policy allows; ask for approval instead"))
 	case errors.Is(err, access.ErrNoApprover):
 		// A configuration fault, surfaced at the moment somebody trips over it
 		// rather than left to expire silently thirty minutes later.

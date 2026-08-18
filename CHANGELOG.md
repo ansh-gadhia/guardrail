@@ -94,6 +94,28 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   audited.
 
 ### Changed
+- **Emergency access is rationed.** The break-glass button is reachable by
+  anybody the approval gate applies to, on purpose — a door people can see beats
+  a wall they climb by sharing the break-glass credential — but reachable and
+  unlimited are different settings, and only the second one made the whole
+  approval workflow advisory. Nobody had to ask for anything.
+
+  One person may now take `GUARDRAIL_EMERGENCY_QUOTA` emergency accesses per
+  `GUARDRAIL_EMERGENCY_QUOTA_WINDOW` (default **2 per 7 days**), sized so routine
+  use runs out and genuine use does not. Past the limit the connect is refused
+  with 429 and a sentence naming **when the next one frees up**, because "denied"
+  during the incident somebody pressed that button in does not tell them whether
+  to wait or to go and wake an approver. Asking for approval is unaffected — the
+  point is to push people back to it, not to lock them out. Refusals are audited
+  as `approval.emergency_refused`. Set the quota to 0 to remove the limit.
+
+  It counts accesses **taken**, not attempted: an emergency that never became a
+  session — no credential bound, gateway refused — gave nobody access, and
+  charging for it would spend a week's allowance on a misconfiguration and shut
+  the door during the incident it exists for. The console says the allowance
+  exists *before* the click, since finding out mid-incident that you spent your
+  last one a fortnight ago is being told too late to act on it.
+
 - **A session in continuous use is no longer cut off after an hour.** Two limits
   govern session length and they had been conflated. The per-device idle timeout
   (`idle_timeout_minutes`, default 60) is measured from the last keystroke or

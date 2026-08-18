@@ -31,15 +31,26 @@ type Config struct {
 	// last keystroke or proxied request, so somebody working is never cut off
 	// mid-task. This only stops a session living forever because something keeps
 	// touching it.
-	MaxWindow          time.Duration
+	MaxWindow time.Duration
+	// EmergencyQuota is how many emergency accesses one person may TAKE inside
+	// EmergencyWindow. Zero means unlimited, which is the old behaviour and makes
+	// the approval gate advisory — anybody who would rather not wait simply never
+	// waits.
+	EmergencyQuota  int
+	EmergencyWindow time.Duration
+
 	RecordingRetention time.Duration
 }
 
 // DefaultConfig returns sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		DefaultWindow:      time.Hour,
-		MaxWindow:          12 * time.Hour,
+		DefaultWindow: time.Hour,
+		MaxWindow:     12 * time.Hour,
+		// Two a week: an operator in a genuine incident is nowhere near it, and
+		// somebody using break-glass instead of asking hits it inside a week.
+		EmergencyQuota:     2,
+		EmergencyWindow:    7 * 24 * time.Hour,
 		RecordingRetention: 90 * 24 * time.Hour,
 	}
 }

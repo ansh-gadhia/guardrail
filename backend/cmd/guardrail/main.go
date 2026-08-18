@@ -720,5 +720,11 @@ func accessConfig(cfg *config.Config) appaccess.Config {
 	if cfg.Session.ApprovalFallback > 0 {
 		c.DefaultWindow = cfg.Session.ApprovalFallback
 	}
+	// Zero is meaningful here — it turns the break-glass quota off — so this is
+	// assigned rather than guarded like the two above.
+	c.EmergencyQuota = cfg.Session.EmergencyQuota
+	if cfg.Session.EmergencyWindow > 0 {
+		c.EmergencyWindow = cfg.Session.EmergencyWindow
+	}
 	return c
 }

@@ -230,6 +230,10 @@ services:
       # session in normal use — that is the per-device idle timeout.
       GUARDRAIL_MAX_SESSION_WINDOW: ${GUARDRAIL_MAX_SESSION_WINDOW:-12h}
       GUARDRAIL_APPROVAL_WINDOW: ${GUARDRAIL_APPROVAL_WINDOW:-1h}
+      # How many break-glass connects one person may TAKE per window. 0 turns the
+      # limit off, which makes the approval gate advisory.
+      GUARDRAIL_EMERGENCY_QUOTA: ${GUARDRAIL_EMERGENCY_QUOTA:-2}
+      GUARDRAIL_EMERGENCY_QUOTA_WINDOW: ${GUARDRAIL_EMERGENCY_QUOTA_WINDOW:-168h}
       GUARDRAIL_SERVICE_NAME: ${GUARDRAIL_SERVICE_NAME:-guardrail-api}
       # These default to empty in Go, so forwarding empty is the same as unset.
       GUARDRAIL_FEDERATION_ORG_ID: ${GUARDRAIL_FEDERATION_ORG_ID:-}

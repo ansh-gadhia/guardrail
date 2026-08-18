@@ -129,6 +129,11 @@ func (s *Service) approvalGate(ctx context.Context, actor iam.Claims, ep access.
 		if opts.Reason == "" {
 			return gateOutcome{needsReason: true}, nil
 		}
+		if err := s.emergencyQuota(ctx, actor, now); err != nil {
+			s.recordAuditDetail(ctx, actor, "approval.emergency_refused", &access.Session{DeviceID: deviceID}, meta,
+				audit.ResultDenied, map[string]any{"reason": opts.Reason})
+			return gateOutcome{}, err
+		}
 		req, rerr := s.raiseRequest(ctx, actor, ep, deviceID, opts, now, true)
 		if rerr != nil {
 			return gateOutcome{}, rerr
@@ -168,6 +173,55 @@ func (s *Service) approvalGate(ctx context.Context, actor iam.Claims, ep access.
 	s.recordAuditDetail(ctx, actor, "approval.requested", &access.Session{DeviceID: deviceID}, meta,
 		audit.ResultDenied, map[string]any{"request_id": req.ID.String(), "reason": opts.Reason})
 	return gateOutcome{request: req}, nil
+}
+
+// emergencyQuota refuses a break-glass connect from somebody who has already
+// taken as many as policy allows this window.
+//
+// This is what keeps the approval gate from being advisory. Emergency access
+// stays reachable by anybody the gate applies to, on purpose — a door people can
+// see beats a wall they climb by sharing the break-glass credential — but a door
+// with no counter on it means nobody ever has to ask for anything.
+//
+// The refusal names the moment the quota frees up. "Denied" on its own, during
+// the incident somebody reached for this button in, is the least useful thing
+// the platform could say: they need to know whether to wait four minutes or four
+// days before deciding to go and wake an approver instead.
+func (s *Service) emergencyQuota(ctx context.Context, actor iam.Claims, now time.Time) error {
+	if s.cfg.EmergencyQuota <= 0 || s.cfg.EmergencyWindow <= 0 {
+		return nil
+	}
+	since := now.Add(-s.cfg.EmergencyWindow)
+	n, oldest, err := s.requests.CountEmergenciesSince(ctx, scopeOf(actor), actor.UserID, since)
+	if err != nil {
+		return err
+	}
+	if n < s.cfg.EmergencyQuota {
+		return nil
+	}
+	// Fail closed if the oldest is somehow missing: a count at the limit with no
+	// timestamp still means the limit is reached.
+	if oldest.IsZero() {
+		return fmt.Errorf("%w: you have taken emergency access %d times in the last %s, which is the limit. "+
+			"Ask for approval instead", access.ErrEmergencyQuota, n, humanDuration(s.cfg.EmergencyWindow))
+	}
+	return fmt.Errorf("%w: you have taken emergency access %d times in the last %s, which is the limit. "+
+		"The next one frees up %s. Ask for approval instead, or have an administrator review the ones outstanding",
+		access.ErrEmergencyQuota, n, humanDuration(s.cfg.EmergencyWindow),
+		oldest.Add(s.cfg.EmergencyWindow).UTC().Format("on 2 Jan at 15:04 UTC"))
+}
+
+// humanDuration renders a policy window the way somebody would say it, so a
+// refusal reads as a sentence rather than "168h0m0s".
+func humanDuration(d time.Duration) string {
+	switch {
+	case d >= 48*time.Hour:
+		return fmt.Sprintf("%d days", int(d.Hours()/24))
+	case d >= 2*time.Hour:
+		return fmt.Sprintf("%d hours", int(d.Hours()))
+	default:
+		return d.String()
+	}
 }
 
 // raiseRequest validates and stores a new access request.

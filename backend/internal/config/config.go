@@ -62,6 +62,12 @@ type SessionConfig struct {
 	// thirty minutes gets thirty minutes, and activity does not extend it,
 	// because a granted window that stretches while you type is not a window.
 	ApprovalFallback time.Duration
+	// EmergencyQuota is how many break-glass connects one person may take inside
+	// EmergencyWindow. Zero disables the limit, which makes the approval gate
+	// advisory: emergency access is reachable by anybody it applies to, so with
+	// no counter on it nobody ever has to ask.
+	EmergencyQuota  int
+	EmergencyWindow time.Duration
 }
 
 // RecordingConfig controls where session recordings are stored.
@@ -254,6 +260,8 @@ func Load() (*Config, error) {
 		Session: SessionConfig{
 			MaxWindow:        getDuration("GUARDRAIL_MAX_SESSION_WINDOW", 12*time.Hour),
 			ApprovalFallback: getDuration("GUARDRAIL_APPROVAL_WINDOW", time.Hour),
+			EmergencyQuota:   getInt("GUARDRAIL_EMERGENCY_QUOTA", 2),
+			EmergencyWindow:  getDuration("GUARDRAIL_EMERGENCY_QUOTA_WINDOW", 7*24*time.Hour),
 		},
 		Recording: RecordingConfig{
 			Dir:      getEnv("GUARDRAIL_RECORDING_DIR", "/var/lib/guardrail/recordings"),

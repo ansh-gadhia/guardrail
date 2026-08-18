@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,6 +234,95 @@ func TestConnect_SessionWindow(t *testing.T) {
 		}
 		if got := res.GrantedUntil.Sub(fixedNow); got != DefaultConfig().DefaultWindow {
 			t.Errorf("window = %v, want the %v approval fallback", got, DefaultConfig().DefaultWindow)
+		}
+	})
+}
+
+// The emergency button is what keeps people from routing around approvals by
+// sharing the break-glass credential — so it stays reachable by anybody the gate
+// applies to. Reachable and unlimited are different settings though, and only
+// the second one makes asking optional. The quota is the difference.
+func TestConnect_EmergencyQuota(t *testing.T) {
+	const reason = "site outage, need the switch now"
+
+	t.Run("under the quota it still lets you in", func(t *testing.T) {
+		h := newHarness(opts{
+			entitled: true, hasCredential: true, requiresApproval: true,
+			emergenciesTaken: []time.Time{fixedNow.Add(-48 * time.Hour)},
+		})
+		res, err := h.svc.ConnectWith(context.Background(), actorClaims(), uuid.New(), ReqMeta{},
+			ConnectOptions{Emergency: true, Reason: reason})
+		if err != nil {
+			t.Fatalf("one prior emergency must not block the second: %v", err)
+		}
+		if res.Session == nil {
+			t.Fatal("emergency access did not produce a session")
+		}
+	})
+
+	t.Run("at the quota it is refused", func(t *testing.T) {
+		h := newHarness(opts{
+			entitled: true, hasCredential: true, requiresApproval: true,
+			emergenciesTaken: []time.Time{
+				fixedNow.Add(-48 * time.Hour),
+				fixedNow.Add(-24 * time.Hour),
+			},
+		})
+		_, err := h.svc.ConnectWith(context.Background(), actorClaims(), uuid.New(), ReqMeta{},
+			ConnectOptions{Emergency: true, Reason: reason})
+		if !errors.Is(err, access.ErrEmergencyQuota) {
+			t.Fatalf("err = %v, want ErrEmergencyQuota", err)
+		}
+		// The refusal has to say when it frees up. During the incident somebody
+		// pressed this button in, "denied" alone does not tell them whether to
+		// wait or to go and wake an approver.
+		if msg := err.Error(); !strings.Contains(msg, "frees up") {
+			t.Errorf("refusal does not name when the quota frees up: %q", msg)
+		}
+		if n := len(h.requests.created); n != 0 {
+			t.Errorf("%d request(s) raised despite the refusal, want 0", n)
+		}
+	})
+
+	t.Run("emergencies outside the window have aged out", func(t *testing.T) {
+		h := newHarness(opts{
+			entitled: true, hasCredential: true, requiresApproval: true,
+			emergenciesTaken: []time.Time{
+				fixedNow.Add(-8 * 24 * time.Hour),
+				fixedNow.Add(-9 * 24 * time.Hour),
+			},
+		})
+		if _, err := h.svc.ConnectWith(context.Background(), actorClaims(), uuid.New(), ReqMeta{},
+			ConnectOptions{Emergency: true, Reason: reason}); err != nil {
+			t.Fatalf("emergencies older than the window must not count: %v", err)
+		}
+	})
+
+	t.Run("the ordinary request path is unaffected by a spent quota", func(t *testing.T) {
+		// The whole point is to push somebody back to asking. If the quota also
+		// blocked the ordinary route it would be a lockout, not a limit.
+		h := newHarness(opts{
+			entitled: true, hasCredential: true, requiresApproval: true,
+			emergenciesTaken: []time.Time{fixedNow.Add(-1 * time.Hour), fixedNow.Add(-2 * time.Hour)},
+		})
+		res, err := h.svc.ConnectWith(context.Background(), actorClaims(), uuid.New(), ReqMeta{},
+			ConnectOptions{Reason: reason})
+		if err != nil {
+			t.Fatalf("asking properly must still work: %v", err)
+		}
+		if res.Pending == nil {
+			t.Error("no request raised; somebody out of emergencies has no route left at all")
+		}
+	})
+
+	t.Run("quota of zero disables the limit", func(t *testing.T) {
+		h := newHarness(opts{
+			entitled: true, hasCredential: true, requiresApproval: true, noEmergencyQuota: true,
+			emergenciesTaken: []time.Time{fixedNow, fixedNow, fixedNow, fixedNow, fixedNow},
+		})
+		if _, err := h.svc.ConnectWith(context.Background(), actorClaims(), uuid.New(), ReqMeta{},
+			ConnectOptions{Emergency: true, Reason: reason}); err != nil {
+			t.Fatalf("quota 0 means unlimited: %v", err)
 		}
 	})
 }
