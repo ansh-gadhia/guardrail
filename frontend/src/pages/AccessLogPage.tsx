@@ -331,9 +331,12 @@ export function AccessLogPage() {
                 { label: "Signed-in users", value: stats.users },
                 { label: "Unique IPs", value: stats.ips },
                 {
-                  label: "Failed · 24h",
-                  value: summary.data?.failed_logins_24h ?? 0,
-                  tone: (summary.data?.failed_logins_24h ?? 0) > 0 ? "warn" : undefined,
+                  // "—" rather than 0 when the number is unknown. Defaulting a
+                  // failed-login count to zero on a load failure is a security
+                  // console reporting "all clear" because it could not ask.
+                  label: summary.data && principal?.is_super_admin ? "Failed · 24h · all orgs" : "Failed · 24h",
+                  value: summary.isSuccess ? summary.data.failed_logins_24h : "—",
+                  tone: summary.isSuccess && summary.data.failed_logins_24h > 0 ? "warn" : undefined,
                 },
               ]}
             />
@@ -388,7 +391,20 @@ export function AccessLogPage() {
             </div>
           }
         >
-          {recent.isLoading ? (
+          {/* Not allowed to look is not the same as nothing to see. This query is
+              disabled without log:read, and a disabled query in React Query is
+              pending-but-not-fetching: isLoading is false and data is undefined,
+              so it fell through to the empty state and told somebody with no
+              permission "no failed sign-in attempts — all clear". On a security
+              console that is the worst available answer — it asserts safety on
+              the strength of a permission check. The stat above is served by an
+              endpoint that needs no permission, so the same screen was reading
+              "Failed · 24h: 2" and "all clear" at the same time. */}
+          {!has("log:read") ? (
+            <EmptyState message="You do not have permission to view sign-in history. Ask an administrator for the audit-log permission." />
+          ) : recent.isError ? (
+            <ErrorNote message="Couldn't load sign-in attempts. Try reloading." />
+          ) : recent.isLoading ? (
             <Skeleton className="h-40" />
           ) : (
             (() => {

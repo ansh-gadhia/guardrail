@@ -141,6 +141,22 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   list and leaving short ones in it after they ended.
 
 ### Fixed
+- **The Access Log told people without permission that everything was fine.** The
+  sign-in history query is disabled without `log:read`, and a disabled query in
+  React Query is pending-but-not-fetching — `isLoading` false, `data` undefined —
+  so it fell through to the empty state and rendered "No failed sign-in attempts
+  — all clear." to somebody who simply was not allowed to look. Meanwhile the
+  stat above it is served by `/dashboard/summary`, which requires no permission
+  at all, so the same screen could read **"Failed · 24h: 2"** and **"all clear"**
+  simultaneously. It now says the permission is missing. On a security console,
+  asserting safety on the strength of a failed authorization check is the worst
+  available answer.
+- The same panel's failed-login stat defaulted to **0** when the summary request
+  failed, which is a security console reporting all-clear because it could not
+  ask. It shows "—" when the number is unknown.
+- The failed-login count is cross-tenant for a super admin and org-scoped for
+  everybody else, so two people reading the same label saw different numbers. The
+  super admin's is now labelled **"Failed · 24h · all orgs"**.
 - **Connecting to an approval-gated device returned 500 "unexpected error".**
   Every first click, for anybody not exempt. The console connects with an empty
   body to find out whether the gate applies — it cannot know from the device row,
