@@ -101,85 +101,110 @@ export function AccessPage() {
           {users.data && users.data.length === 0 && <EmptyState icon={IconUsers} message="No users found." />}
           {users.data && users.data.length > 0 && (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {users.data.map((u) => (
-                <div key={u.user_id} className="group relative flex flex-col overflow-hidden rounded-xl card-grad p-4 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-line-strong hover:shadow-md">
-                  <div className="flex items-start gap-3">
-                    <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full accent-grad text-xs font-semibold text-white shadow-sm ring-1 ring-white/20">
-                      {u.email.slice(0, 2).toUpperCase()}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium text-fg">{u.email}</div>
-                      <div className="truncate text-xs text-faint">{u.username || "—"}</div>
+              {users.data.map((u) => {
+                // Named once: it gates the delete button and the sentence that
+                // explains why the button is off.
+                const isSelf = u.user_id === me?.user_id;
+                return (
+                  <div key={u.user_id} className="group relative flex flex-col overflow-hidden rounded-xl card-grad p-4 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-line-strong hover:shadow-md">
+                    <div className="flex items-start gap-3">
+                      <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full accent-grad text-xs font-semibold text-white shadow-sm ring-1 ring-white/20">
+                        {u.email.slice(0, 2).toUpperCase()}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-medium text-fg">{u.email}</div>
+                        <div className="truncate text-xs text-faint">{u.username || "—"}</div>
+                      </div>
                     </div>
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    {u.is_super_admin ? (
-                      <>
-                        <Badge tone="accent">Super Admin</Badge>
-                        {u.is_bootstrap_admin && <Badge tone="neutral">installation account</Badge>}
-                      </>
-                    ) : u.roles.length ? (
-                      u.roles.map((r) => (
-                        <Badge key={r} tone="neutral">
-                          {r}
-                        </Badge>
-                      ))
-                    ) : (
-                      <span className="text-xs text-faint">no roles</span>
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {u.is_super_admin ? (
+                        <>
+                          <Badge tone="accent">Super Admin</Badge>
+                          {u.is_bootstrap_admin && <Badge tone="neutral">installation account</Badge>}
+                        </>
+                      ) : u.roles.length ? (
+                        u.roles.map((r) => (
+                          <Badge key={r} tone="neutral">
+                            {r}
+                          </Badge>
+                        ))
+                      ) : (
+                        <span className="text-xs text-faint">no roles</span>
+                      )}
+                    </div>
+                    {canWrite && (
+                      <div className="mt-4 flex items-center justify-end gap-2 border-t border-line pt-3">
+                        {u.is_bootstrap_admin ? (
+                          /* Say WHY rather than hiding the controls. A missing button
+                             sends somebody hunting for a permission they already have;
+                             this account's roles and password are refused to everyone,
+                             including them. Removal is not — see the trash button
+                             below, which stays available on every row. */
+                          <span
+                            className="flex items-center gap-1.5 text-xs text-faint"
+                            title="This is the account GuardRail was installed with. It is how you get back in if every other administrator is lost, so its roles cannot be changed and its password cannot be reset — by anyone. It can still be removed; `guardrail seed-admin` on the server puts it back."
+                          >
+                            <IconLock size={13} /> Installation account — roles locked
+                          </span>
+                        ) : (
+                          <>
+                            <button className="btn-subtle" onClick={() => setEditRolesFor(u)}>
+                              Edit roles
+                            </button>
+                            <button className="btn-subtle" onClick={() => setResetFor(u)}>
+                              Reset password
+                            </button>
+                          </>
+                        )}
+                        {/* Outside the branch above: removal IS allowed for the
+                            installation account, unlike its roles and password.
+
+                            Rendered on every row including your own, where it is
+                            disabled rather than absent — same reasoning as the
+                            locked note beside it. A control that simply vanishes
+                            reads as a permission you are missing, and sends
+                            somebody hunting for a grant they already hold.
+
+                            The title sits on the wrapper, not the button: .btn
+                            carries disabled:pointer-events-none, so a disabled
+                            button never receives hover and would show no tooltip
+                            at all — which is the whole point of leaving it on
+                            screen. */}
+                        <span
+                          className="inline-flex"
+                          title={
+                            isSelf
+                              ? "You cannot remove the account you are signed in as. Sign in as another super admin to remove this one."
+                              : u.is_bootstrap_admin
+                                ? "Remove the installation account"
+                                : "Remove user"
+                          }
+                        >
+                          <button
+                            className="btn-subtle text-faint hover:text-danger"
+                            disabled={remove.isPending || isSelf}
+                            aria-label={
+                              isSelf ? `Cannot remove ${u.email}: it is the account you are signed in as` : `Remove user ${u.email}`
+                            }
+                            onClick={() => {
+                              /* The installation account gets a different sentence,
+                                 because the consequence is different: if it is the
+                                 last super admin, the way back in is on the server,
+                                 not in this window. */
+                              const ask = u.is_bootstrap_admin
+                                ? `Remove "${u.email}"?\n\nThis is the account GuardRail was installed with. If it is your last super admin, the only way back in is to run \`guardrail seed-admin\` on the server.`
+                                : `Remove user "${u.email}"?`;
+                              if (window.confirm(ask)) remove.mutate(u.user_id);
+                            }}
+                          >
+                            <IconTrash size={15} />
+                          </button>
+                        </span>
+                      </div>
                     )}
                   </div>
-                  {canWrite && (
-                    <div className="mt-4 flex items-center justify-end gap-2 border-t border-line pt-3">
-                      {u.is_bootstrap_admin ? (
-                        /* Say WHY rather than hiding the controls. A missing button
-                           sends somebody hunting for a permission they already have;
-                           this account's roles and password are refused to everyone,
-                           including them. Removal is not — see the trash button
-                           below, which stays available on every row. */
-                        <span
-                          className="flex items-center gap-1.5 text-xs text-faint"
-                          title="This is the account GuardRail was installed with. It is how you get back in if every other administrator is lost, so its roles cannot be changed and its password cannot be reset — by anyone. It can still be removed; `guardrail seed-admin` on the server puts it back."
-                        >
-                          <IconLock size={13} /> Installation account — roles locked
-                        </span>
-                      ) : (
-                        <>
-                          <button className="btn-subtle" onClick={() => setEditRolesFor(u)}>
-                            Edit roles
-                          </button>
-                          <button className="btn-subtle" onClick={() => setResetFor(u)}>
-                            Reset password
-                          </button>
-                        </>
-                      )}
-                      {/* Outside the branch above: removal is allowed for the
-                          installation account too. Self-deletion is not, for
-                          anybody — signing yourself out of your own console is
-                          never the intent behind a click on a bin. */}
-                      {u.user_id !== me?.user_id && (
-                        <button
-                          className="btn-subtle text-faint hover:text-danger"
-                          disabled={remove.isPending}
-                          aria-label={`Remove user ${u.email}`}
-                          title={u.is_bootstrap_admin ? "Remove the installation account" : "Remove user"}
-                          onClick={() => {
-                            /* The installation account gets a different sentence,
-                               because the consequence is different: if it is the
-                               last super admin, the way back in is on the server,
-                               not in this window. */
-                            const ask = u.is_bootstrap_admin
-                              ? `Remove "${u.email}"?\n\nThis is the account GuardRail was installed with. If it is your last super admin, the only way back in is to run \`guardrail seed-admin\` on the server.`
-                              : `Remove user "${u.email}"?`;
-                            if (window.confirm(ask)) remove.mutate(u.user_id);
-                          }}
-                        >
-                          <IconTrash size={15} />
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </>

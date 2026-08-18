@@ -95,6 +95,18 @@ func (s *Service) DeleteUser(ctx context.Context, actor iam.Claims, id iam.ID, m
 	if err := s.users.SoftDelete(ctx, actor.Scope(), id); err != nil {
 		return err
 	}
+	// Sign the removed person out, the way a role change and a password reset
+	// already do. Without this their refresh family stays open and the console's
+	// active-sessions list keeps showing somebody who no longer exists — an
+	// offboarded account that still reads as signed in is the wrong answer to the
+	// one question that list is asked.
+	//
+	// It does not shorten the access token they are already holding: the auth
+	// middleware verifies the JWT signature and never re-reads the user, so a
+	// removed person keeps working requests until it expires (default 15 minutes,
+	// GUARDRAIL_ACCESS_TOKEN_TTL). Cutting that to zero needs a revocation check
+	// on every request, which is a separate change.
+	_ = s.sessions.RevokeAllForUser(ctx, id, s.clock.Now())
 	s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "user.delete",
 		Category: audit.CategoryUser, ActorID: &actor.UserID, ActorEmail: actor.Email,
 		TargetType: "user", TargetID: id.String(), IP: meta.IP, UserAgent: meta.UserAgent,

@@ -169,6 +169,60 @@ func TestIntegration_BootstrapAdminCannotBeDemotedButCanBeRemoved(t *testing.T) 
 	}
 }
 
+// Removing somebody signs them out. The console's active-session list is the
+// answer to "who is in the platform right now", and an offboarded account that
+// still appears there is the wrong answer to exactly that question.
+//
+// Note what this does NOT prove: the access token the removed person already
+// holds keeps working until it expires, because the auth middleware verifies the
+// JWT and never re-reads the user. This covers the refresh family only.
+func TestIntegration_DeletingAUserRevokesTheirSessions(t *testing.T) {
+	svc, closeDB := newService(t)
+	defer closeDB()
+	ctx := context.Background()
+	actor := superAdmin()
+
+	email := "gone-" + uuid.NewString()[:8] + "@example.com"
+	const password = "IntegrationPass123!"
+	u, err := svc.CreateUser(ctx, actor, appiam.CreateUserInput{Email: email, Username: "gone", Password: password})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if _, err := svc.Login(ctx, appiam.LoginInput{Email: email, Password: password}); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	live, err := svc.ListSessions(ctx, actor, "", false)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if countSessionsFor(live, u.UserID) == 0 {
+		t.Fatal("the sign-in did not produce a session to revoke")
+	}
+
+	if err := svc.DeleteUser(ctx, actor, u.UserID, appiam.ReqMeta{}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	after, err := svc.ListSessions(ctx, actor, "", false)
+	if err != nil {
+		t.Fatalf("list sessions after delete: %v", err)
+	}
+	if n := countSessionsFor(after, u.UserID); n != 0 {
+		t.Fatalf("a removed user still has %d live session(s)", n)
+	}
+}
+
+func countSessionsFor(views []appiam.SessionView, userID iam.ID) int {
+	n := 0
+	for i := range views {
+		if views[i].UserID == userID {
+			n++
+		}
+	}
+	return n
+}
+
 // An ordinary account can be escalated and downgraded freely — the protection is
 // narrow on purpose, or it would be an excuse not to manage roles at all.
 func TestIntegration_OrdinaryUserRolesCanBeChangedBothWays(t *testing.T) {
