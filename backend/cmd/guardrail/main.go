@@ -561,7 +561,7 @@ func run() error {
 		Audit:            auditRec,
 		Notifier:         notifySvc,
 		Node:             cfg.Telemetry.ServiceName,
-		Config:           appaccess.DefaultConfig(),
+		Config:           accessConfig(cfg),
 		Log:              log,
 	})
 	// The grant key signs the short-lived tokens that bootstrap a tunnel cookie
@@ -704,4 +704,21 @@ func run() error {
 	}
 	log.Info("shutdown complete")
 	return err
+}
+
+// accessConfig turns the process configuration into the broker's session limits.
+//
+// The window an ordinary session gets is a ceiling, not a countdown: what ends
+// one is the device's idle timeout, so somebody working is never cut off
+// mid-task. The approval fallback is separate and stays absolute — an approver
+// who grants thirty minutes has granted thirty minutes.
+func accessConfig(cfg *config.Config) appaccess.Config {
+	c := appaccess.DefaultConfig()
+	if cfg.Session.MaxWindow > 0 {
+		c.MaxWindow = cfg.Session.MaxWindow
+	}
+	if cfg.Session.ApprovalFallback > 0 {
+		c.DefaultWindow = cfg.Session.ApprovalFallback
+	}
+	return c
 }

@@ -175,6 +175,11 @@ func TestConnect_RecordingEnabledDevice_StartsRecording(t *testing.T) {
 	}
 }
 
+// Every brokered session is time-boxed. The box is the CEILING, not a stopwatch:
+// what ends an ordinary session is the device's idle timeout, measured from the
+// last keystroke, so somebody working is never cut off mid-task. This used to
+// assert the one-hour approval fallback, which is what put a hard sixty-minute
+// stop on a session in continuous use.
 func TestConnect_GrantIsTimeBoxed(t *testing.T) {
 	h := newHarness(opts{entitled: true, hasCredential: true})
 
@@ -185,8 +190,13 @@ func TestConnect_GrantIsTimeBoxed(t *testing.T) {
 	if res.Session.GrantedUntil == nil {
 		t.Fatal("session has no expiry; a brokered grant must be time-boxed")
 	}
-	if got := res.GrantedUntil.Sub(*res.Session.GrantedFrom); got != DefaultConfig().DefaultWindow {
-		t.Errorf("grant window = %v, want %v", got, DefaultConfig().DefaultWindow)
+	if got := res.GrantedUntil.Sub(*res.Session.GrantedFrom); got != DefaultConfig().MaxWindow {
+		t.Errorf("grant window = %v, want the %v ceiling", got, DefaultConfig().MaxWindow)
+	}
+	// Bounded is the point — an unbounded privileged session is what this
+	// platform exists not to hand out.
+	if DefaultConfig().MaxWindow <= 0 {
+		t.Error("the ceiling is unset; a session with no upper bound never ends on its own")
 	}
 }
 

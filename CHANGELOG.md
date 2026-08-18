@@ -93,6 +93,31 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   so console-promoted super admins stay fully manageable. Refused attempts are
   audited.
 
+### Changed
+- **A session in continuous use is no longer cut off after an hour.** Two limits
+  govern session length and they had been conflated. The per-device idle timeout
+  (`idle_timeout_minutes`, default 60) is measured from the last keystroke or
+  proxied request and is what ends an ordinary session — every gateway stamps
+  activity, so somebody working is never cut off mid-task. The access window was
+  a flat hour that ignored activity entirely, and the gateway holds that deadline
+  too and refuses to proxy past it, so it was not a formality: an operator with
+  work in progress lost the session at sixty minutes.
+
+  An ordinary session now runs to a **ceiling** instead — `GUARDRAIL_MAX_SESSION_WINDOW`,
+  default 12h — with the idle timeout as the operative control. Bounded rather
+  than unlimited on purpose: an unbounded privileged session is what a
+  privileged-access platform should not hand out, and a forgotten tab held open
+  by a background poll would otherwise live forever.
+
+  **Approved windows are unchanged and stay absolute.** An approver who grants
+  thirty minutes grants thirty minutes; activity does not extend it, or the
+  window would not be one. `GUARDRAIL_APPROVAL_WINDOW` (default 1h) is only the
+  fallback for an approved request that named no duration.
+
+  The live-session index TTL now follows the session's actual window rather than
+  a flat hour, which had been dropping long approved sessions out of the active
+  list and leaving short ones in it after they ended.
+
 ### Fixed
 - **Connecting to an approval-gated device returned 500 "unexpected error".**
   Every first click, for anybody not exempt. The console connects with an empty

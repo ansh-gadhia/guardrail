@@ -29,6 +29,7 @@ type Config struct {
 	Desktop    DesktopConfig
 	Health     HealthConfig
 	Recording  RecordingConfig
+	Session    SessionConfig
 	Log        LogConfig
 	Telemetry  TelemetryConfig
 }
@@ -39,6 +40,28 @@ type HealthConfig struct {
 	PollInterval time.Duration
 	ProbeTimeout time.Duration
 	Concurrency  int
+}
+
+// SessionConfig bounds how long a brokered session may live.
+//
+// Two limits, and they answer different questions. The one that ends a session
+// in practice is neither of these — it is the per-device idle timeout
+// (devices.idle_timeout_minutes, default 60), which is measured from the last
+// keystroke or proxied request and so never cuts somebody off mid-task.
+//
+// These are the outer bounds around that.
+type SessionConfig struct {
+	// MaxWindow is the ceiling on a session with no approved window: the longest
+	// it may run no matter how busy it is. It exists because an unbounded
+	// privileged session is precisely what a privileged-access platform should
+	// not hand out — a forgotten tab held open by a background poll would
+	// otherwise live forever.
+	MaxWindow time.Duration
+	// ApprovalFallback is the window an approved request gets when neither the
+	// requester nor the approver named one. Not a ceiling: an approver who says
+	// thirty minutes gets thirty minutes, and activity does not extend it,
+	// because a granted window that stretches while you type is not a window.
+	ApprovalFallback time.Duration
 }
 
 // RecordingConfig controls where session recordings are stored.
@@ -227,6 +250,10 @@ func Load() (*Config, error) {
 			Addr:     getEnv("GUARDRAIL_REDIS_ADDR", "localhost:6379"),
 			Password: getEnv("GUARDRAIL_REDIS_PASSWORD", ""),
 			DB:       getInt("GUARDRAIL_REDIS_DB", 0),
+		},
+		Session: SessionConfig{
+			MaxWindow:        getDuration("GUARDRAIL_MAX_SESSION_WINDOW", 12*time.Hour),
+			ApprovalFallback: getDuration("GUARDRAIL_APPROVAL_WINDOW", time.Hour),
 		},
 		Recording: RecordingConfig{
 			Dir:      getEnv("GUARDRAIL_RECORDING_DIR", "/var/lib/guardrail/recordings"),

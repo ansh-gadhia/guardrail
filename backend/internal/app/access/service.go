@@ -21,13 +21,27 @@ import (
 
 // Config holds broker policy.
 type Config struct {
-	DefaultWindow      time.Duration // how long a session stays valid
+	// DefaultWindow is the window an approved request falls back to when neither
+	// the requester nor the approver named one.
+	DefaultWindow time.Duration
+	// MaxWindow is the ceiling on a session with no approved window.
+	//
+	// It is a ceiling, not a timer. What ends an ordinary session is the device's
+	// idle timeout (devices.idle_timeout_minutes, default 60), measured from the
+	// last keystroke or proxied request, so somebody working is never cut off
+	// mid-task. This only stops a session living forever because something keeps
+	// touching it.
+	MaxWindow          time.Duration
 	RecordingRetention time.Duration
 }
 
 // DefaultConfig returns sensible defaults.
 func DefaultConfig() Config {
-	return Config{DefaultWindow: time.Hour, RecordingRetention: 90 * 24 * time.Hour}
+	return Config{
+		DefaultWindow:      time.Hour,
+		MaxWindow:          12 * time.Hour,
+		RecordingRetention: 90 * 24 * time.Hour,
+	}
 }
 
 // Notifier receives broker events for fan-out to notification channels. It is
@@ -306,13 +320,25 @@ func (s *Service) ConnectWith(ctx context.Context, actor iam.Claims, deviceID uu
 		DeviceAddress: net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port)),
 	}
 	sess.Watermark = watermarkFor(actor, sess.ID)
-	// An approved request sets the window. "I need thirty minutes" has to mean
-	// thirty minutes, not the organization default of several hours — otherwise
-	// asking for a short window is a courtesy with no effect, and the approver
-	// who shortened it was answering a question nobody acted on.
-	window := s.cfg.DefaultWindow
+	// Two different things, deliberately.
+	//
+	// An approved request sets an ABSOLUTE window. "I need thirty minutes" has to
+	// mean thirty minutes — otherwise asking for a short window is a courtesy
+	// with no effect, and the approver who shortened it was answering a question
+	// nobody acted on. Activity does not extend it: a granted window that
+	// stretches while you type is not a window.
+	//
+	// Everything else gets the ceiling, because the control for an ordinary
+	// session is the device's idle timeout, not a stopwatch that starts when you
+	// connect. This used to be a flat one hour, which meant a session in
+	// continuous use died at sixty minutes with work in it — the gateway holds
+	// this deadline too and refuses to proxy past it, so it was not a formality.
+	window := s.cfg.MaxWindow
+	if window <= 0 {
+		window = s.cfg.DefaultWindow
+	}
 	if gate.redeem != nil {
-		window = gate.redeem.Window(window)
+		window = gate.redeem.Window(s.cfg.DefaultWindow)
 	}
 	until := now.Add(window)
 	sess.GrantedFrom, sess.GrantedUntil, sess.GatewayNode, sess.StartedAt = &now, &until, s.node, &now
@@ -385,7 +411,19 @@ func (s *Service) establish(ctx context.Context, actor iam.Claims, sess *access.
 		return nil, err
 	}
 	if s.registry != nil {
-		_ = s.registry.Add(ctx, actor.OrganizationID, sess.ID, s.cfg.DefaultWindow)
+		// The session's own window, not a flat default. Indexing an eight-hour
+		// approved session for one hour drops a live session out of the active
+		// list; indexing a thirty-minute one for an hour leaves a dead entry
+		// behind. Sessions are removed explicitly when they end, so this TTL is
+		// only the backstop — but a backstop that disagrees with the thing it is
+		// backing is worse than none.
+		ttl := s.cfg.MaxWindow
+		if sess.GrantedUntil != nil {
+			ttl = sess.GrantedUntil.Sub(s.clock.Now())
+		}
+		if ttl > 0 {
+			_ = s.registry.Add(ctx, actor.OrganizationID, sess.ID, ttl)
+		}
 	}
 	s.recordAudit(ctx, actor, "session.start", sess, meta, audit.ResultSuccess)
 	until := s.clock.Now().Add(s.cfg.DefaultWindow)

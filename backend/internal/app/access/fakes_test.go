@@ -365,6 +365,10 @@ type opts struct {
 	protocol access.Protocol
 }
 
+// fixedNow is the instant every harness clock is pinned to, so a test can assert
+// a session window as an exact duration rather than a tolerance.
+var fixedNow = time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+
 func newHarness(o opts) *harness {
 	if o.protocol == "" {
 		o.protocol = access.ProtocolHTTPS
@@ -394,7 +398,7 @@ func newHarness(o opts) *harness {
 		}},
 		Creds:  fakeCreds{has: o.hasCredential},
 		Audit:  aud,
-		Clock:  fixedClock{t: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)},
+		Clock:  fixedClock{t: fixedNow},
 		Node:   "test-node",
 		Config: DefaultConfig(),
 	}

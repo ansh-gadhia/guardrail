@@ -225,6 +225,11 @@ services:
       # fall back; keep them in step if that default ever changes.
       GUARDRAIL_ACCESS_TOKEN_TTL: ${GUARDRAIL_ACCESS_TOKEN_TTL:-15m}
       GUARDRAIL_REFRESH_TOKEN_TTL: ${GUARDRAIL_REFRESH_TOKEN_TTL:-720h}
+      # Ceiling on a session with no approved window, and the window an approved
+      # request falls back to when nobody named one. Neither is what ends a
+      # session in normal use — that is the per-device idle timeout.
+      GUARDRAIL_MAX_SESSION_WINDOW: ${GUARDRAIL_MAX_SESSION_WINDOW:-12h}
+      GUARDRAIL_APPROVAL_WINDOW: ${GUARDRAIL_APPROVAL_WINDOW:-1h}
       GUARDRAIL_SERVICE_NAME: ${GUARDRAIL_SERVICE_NAME:-guardrail-api}
       # These default to empty in Go, so forwarding empty is the same as unset.
       GUARDRAIL_FEDERATION_ORG_ID: ${GUARDRAIL_FEDERATION_ORG_ID:-}

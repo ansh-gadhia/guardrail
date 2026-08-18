@@ -892,12 +892,15 @@ export function IdleTimeoutField({ value, onChange }: { value: string; onChange:
           <p className="mt-1 text-xs text-muted">
             {off
               ? "Sessions to this device are never ended for being idle — only when their access window runs out."
-              : `A session with no activity for ${mins || 0} minute${mins === 1 ? "" : "s"} is ended automatically.`}
+              : `A session with no activity for ${mins || 0} minute${mins === 1 ? "" : "s"} is ended automatically. Activity resets it, so somebody working is not cut off mid-task.`}
           </p>
           {off && (
             <p className="mt-1.5 flex items-start gap-1.5 text-2xs text-warn">
               <IconAlert size={13} className="mt-px shrink-0" />
-              <span>An abandoned session stays open, and logged in, until its access window expires.</span>
+              <span>
+                This is the control that ends an ordinary session. Turn it off and an abandoned session stays open, and
+                logged in, until it hits the server's maximum session length — hours, not minutes.
+              </span>
             </p>
           )}
         </div>

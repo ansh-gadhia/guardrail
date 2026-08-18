@@ -162,3 +162,77 @@ func TestConnect_GatedDevice_WithNoPossibleApproverIsRefused(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNoApprover", err)
 	}
 }
+
+// How long a session may run, and what actually ends one.
+//
+// Two limits with different jobs, and conflating them is what made a session in
+// continuous use die at sixty minutes with work in it:
+//
+//   - An ordinary session gets the CEILING. It is not a countdown — the control
+//     is the device's idle timeout, measured from the last keystroke, so nobody
+//     is cut off mid-task. The ceiling only stops a session living forever.
+//   - An approved session gets exactly the window that was granted, and activity
+//     does not extend it. A window that stretches while you type is not a window,
+//     and the approver who shortened it was answering a real question.
+func TestConnect_SessionWindow(t *testing.T) {
+	t.Run("an ordinary session runs to the ceiling, not the approval fallback", func(t *testing.T) {
+		h := newHarness(opts{entitled: true, hasCredential: true})
+
+		res, err := h.svc.ConnectWith(context.Background(), actorClaims(), uuid.New(),
+			ReqMeta{}, ConnectOptions{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got := res.GrantedUntil.Sub(fixedNow)
+		if got != DefaultConfig().MaxWindow {
+			t.Errorf("window = %v, want the %v ceiling — a busy session must not die on the approval fallback",
+				got, DefaultConfig().MaxWindow)
+		}
+	})
+
+	t.Run("an approved window is honoured exactly", func(t *testing.T) {
+		h := newHarness(opts{entitled: true, hasCredential: true, requiresApproval: true})
+		actor := actorClaims()
+		deviceID := uuid.New()
+
+		// Ask, then approve for a shorter window than was requested.
+		if _, err := h.svc.ConnectWith(context.Background(), actor, deviceID, ReqMeta{},
+			ConnectOptions{Reason: "swapping the uplink", Minutes: 240}); err != nil {
+			t.Fatalf("raise: %v", err)
+		}
+		raised := h.requests.created[0]
+		granted := 30
+		raised.Status, raised.GrantedMinutes = access.RequestApproved, &granted
+		h.requests.pending = raised
+
+		res, err := h.svc.ConnectWith(context.Background(), actor, deviceID, ReqMeta{}, ConnectOptions{})
+		if err != nil {
+			t.Fatalf("redeem: %v", err)
+		}
+		if res.Session == nil {
+			t.Fatal("no session from an approved request")
+		}
+		if got := res.GrantedUntil.Sub(fixedNow); got != 30*time.Minute {
+			t.Errorf("window = %v, want 30m — the approver shortened it and that has to bind", got)
+		}
+	})
+
+	t.Run("an approved request with no window named falls back, not to the ceiling", func(t *testing.T) {
+		h := newHarness(opts{entitled: true, hasCredential: true, requiresApproval: true})
+		actor := actorClaims()
+		deviceID := uuid.New()
+		approved := &access.Request{
+			ID: uuid.New(), Status: access.RequestApproved,
+			Reason: "already approved", ExpiresAt: fixedNow.Add(10 * time.Minute),
+		}
+		h.requests.pending = approved
+
+		res, err := h.svc.ConnectWith(context.Background(), actor, deviceID, ReqMeta{}, ConnectOptions{})
+		if err != nil {
+			t.Fatalf("redeem: %v", err)
+		}
+		if got := res.GrantedUntil.Sub(fixedNow); got != DefaultConfig().DefaultWindow {
+			t.Errorf("window = %v, want the %v approval fallback", got, DefaultConfig().DefaultWindow)
+		}
+	})
+}
