@@ -407,8 +407,17 @@ function OpenAccessTab({ canRevoke }: { canRevoke: boolean }) {
       ),
     [approved.data],
   );
+  // session_active, not session_id. The request keeps pointing at the session
+  // forever, and the request itself stays "approved" — a one-off is spent, not
+  // re-decided, when it is used. Filtering on the pointer therefore listed every
+  // one-off ever redeemed as though it were live: a screen that answers "who is
+  // in a gated device right now" was naming people who left yesterday, next to a
+  // window they were long past and a link to a session with nothing to end.
+  //
+  // A spent one-off is neither redeemable nor open, so it belongs to neither
+  // panel here. History is where it is kept.
   const inUse = useMemo(
-    () => (approved.data ?? []).filter((r) => r.grant_scope !== "always" && r.session_id),
+    () => (approved.data ?? []).filter((r) => r.grant_scope !== "always" && r.session_id && r.session_active),
     [approved.data],
   );
 
@@ -468,7 +477,7 @@ function OpenAccessTab({ canRevoke }: { canRevoke: boolean }) {
                     {r.requester} <span className="text-muted">on</span> {r.device}
                   </div>
                   <div className="mt-0.5 text-xs text-muted">
-                    {windowLabel(r)} · {decidedBy(r)}
+                    Allowed {windowLabel(r)} · {decidedBy(r)}
                   </div>
                 </div>
                 <Badge tone="warn">{countdown(r.expires_at)}</Badge>
@@ -492,7 +501,7 @@ function OpenAccessTab({ canRevoke }: { canRevoke: boolean }) {
                     {r.requester} <span className="text-muted">on</span> {r.device}
                   </div>
                   <div className="mt-0.5 text-xs text-muted">
-                    {windowLabel(r)} · {decidedBy(r)}
+                    Allowed {windowLabel(r)} · {decidedBy(r)}
                   </div>
                 </div>
                 {r.session_id && (

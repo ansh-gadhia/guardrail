@@ -141,6 +141,18 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   list and leaving short ones in it after they ended.
 
 ### Fixed
+- **Approvals → Open access listed every one-off ever used as still in use.** A
+  redeemed request keeps its `session_id` forever, and its status stays
+  `approved` — a one-off is spent when it is used, not re-decided — so nothing on
+  the request itself ever says the access is over. The "One-off — in use" panel
+  filtered on the pointer, and therefore claimed live access for sessions that
+  had ended a day earlier, next to the window they were long past and an "Open
+  session" link to a session with nothing left to end. A grants screen exists to
+  answer "who can reach a gated device right now", and that answer has to be
+  about now. Requests now carry `session_active`, resolved from the session
+  itself, and only genuinely open sessions are listed; a spent one-off appears
+  under History, where it belongs. The window is also labelled "Allowed 1 h"
+  rather than a bare "1 h", which read as a countdown.
 - **The Access Log told people without permission that everything was fine.** The
   sign-in history query is disabled without `log:read`, and a disabled query in
   React Query is pending-but-not-fetching — `isLoading` false, `data` undefined —

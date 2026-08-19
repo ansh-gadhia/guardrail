@@ -138,6 +138,13 @@ type Request struct {
 	Decisions      []Decision
 	RequesterEmail string
 	DeviceName     string
+	// SessionActive reports whether the session a one-off was redeemed into is
+	// still open. SessionID alone only says a session was once started: it is
+	// never cleared, so a console that reads it as "in use" goes on claiming
+	// live access long after the session ended. A grants screen exists to answer
+	// "who can reach a gated device right now", and that answer has to be about
+	// now.
+	SessionActive bool
 }
 
 // Decision is one approver's vote.

@@ -714,3 +714,95 @@ func TestIntegration_EmergencyQuotaCountsOnlyAccessesTaken(t *testing.T) {
 		t.Errorf("count for a user with no emergencies = %d (err %v), want 0", n, err)
 	}
 }
+
+// A one-off approval stops being "in use" when its session ends.
+//
+// The request keeps its session_id forever and stays status='approved' — a
+// spent one-off is never re-decided — so nothing in the request row itself ever
+// says the access is over. The grants console read the pointer as liveness and
+// therefore listed every one-off ever redeemed as currently open. This pins the
+// projection that answers the question properly.
+func TestIntegration_OneOffStopsBeingInUseWhenItsSessionEnds(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+	f := newApprovalFixture(t, pg)
+
+	user := f.user(t, ctx, "operator")
+	dev := f.device(t, ctx, 1)
+	req := f.request(t, ctx, user, dev.ID, 10, 1)
+	sessID := f.session(t, ctx, user, dev.ID)
+	f.attachSession(t, ctx, req.ID, sessID)
+
+	// While the session is open the request is genuinely live access.
+	got := f.findRequest(t, ctx, req.ID)
+	if got.SessionID == nil || *got.SessionID != sessID {
+		t.Fatalf("session_id = %v, want %v", got.SessionID, sessID)
+	}
+	if !got.SessionActive {
+		t.Fatal("a redeemed one-off with a live session did not read as active")
+	}
+	if one, err := f.requests.GetByID(ctx, f.scope, req.ID); err != nil {
+		t.Fatalf("get: %v", err)
+	} else if !one.SessionActive {
+		t.Fatal("GetByID disagreed with List about the session being live")
+	}
+
+	// Ending the session is the only thing that changes, and it has to be enough.
+	if err := f.sessions.UpdateStatus(ctx, f.scope, sessID, domaccess.StatusEnded,
+		"admin_terminate", time.Now()); err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+
+	got = f.findRequest(t, ctx, req.ID)
+	if got.SessionActive {
+		t.Fatal("a one-off whose session ended still reads as in use")
+	}
+	if got.SessionID == nil {
+		t.Fatal("session_id was cleared; the audit trail must still say which session it became")
+	}
+	if got.Status != domaccess.RequestApproved && got.Status != domaccess.RequestPending {
+		t.Fatalf("status = %q, want the request record left alone", got.Status)
+	}
+	if one, err := f.requests.GetByID(ctx, f.scope, req.ID); err != nil {
+		t.Fatalf("get: %v", err)
+	} else if one.SessionActive {
+		t.Fatal("GetByID still reads an ended session as live")
+	}
+}
+
+// An approval that was never redeemed has no session to be live, and must not
+// read as one.
+func TestIntegration_UnredeemedRequestIsNotInUse(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+	f := newApprovalFixture(t, pg)
+
+	req := f.request(t, ctx, f.user(t, ctx, "operator"), f.device(t, ctx, 1).ID, 10, 1)
+
+	got := f.findRequest(t, ctx, req.ID)
+	if got.SessionID != nil {
+		t.Fatalf("session_id = %v, want nil", got.SessionID)
+	}
+	if got.SessionActive {
+		t.Fatal("a request nobody redeemed read as an open session")
+	}
+}
+
+// findRequest pulls one request out of the list projection, which is the path
+// the grants console actually uses.
+func (f *approvalFixture) findRequest(t *testing.T, ctx context.Context, id uuid.UUID) *domaccess.Request {
+	t.Helper()
+	list, err := f.requests.List(ctx, f.scope, domaccess.RequestFilter{Limit: 200})
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	for i := range list {
+		if list[i].ID == id {
+			return &list[i]
+		}
+	}
+	t.Fatalf("request %s not in the listing", id)
+	return nil
+}

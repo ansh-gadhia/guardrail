@@ -40,24 +40,29 @@ type requestBody struct {
 	DeviceID string `json:"device_id"`
 	// Requester and Device are denormalized labels so a queue row needs no
 	// second call to be readable.
-	Requester        string         `json:"requester"`
-	Device           string         `json:"device"`
-	Status           string         `json:"status"`
-	Reason           string         `json:"reason"`
-	RequestedMinutes int            `json:"requested_minutes"`
-	GrantedMinutes   *int           `json:"granted_minutes,omitempty"`
-	GrantScope       *string        `json:"grant_scope,omitempty"`
-	Approvals        int            `json:"approvals"`
-	MinApprovals     int            `json:"min_approvals"`
-	RequesterLevel   int            `json:"requester_level"`
-	IsEmergency      bool           `json:"is_emergency"`
-	Reviewed         bool           `json:"reviewed"`
-	ReviewNote       string         `json:"review_note,omitempty"`
-	EscalatedLevel   *int           `json:"escalated_level,omitempty"`
-	SessionID        *string        `json:"session_id,omitempty"`
-	ExpiresAt        string         `json:"expires_at"`
-	CreatedAt        string         `json:"created_at"`
-	Decisions        []decisionBody `json:"decisions"`
+	Requester        string  `json:"requester"`
+	Device           string  `json:"device"`
+	Status           string  `json:"status"`
+	Reason           string  `json:"reason"`
+	RequestedMinutes int     `json:"requested_minutes"`
+	GrantedMinutes   *int    `json:"granted_minutes,omitempty"`
+	GrantScope       *string `json:"grant_scope,omitempty"`
+	Approvals        int     `json:"approvals"`
+	MinApprovals     int     `json:"min_approvals"`
+	RequesterLevel   int     `json:"requester_level"`
+	IsEmergency      bool    `json:"is_emergency"`
+	Reviewed         bool    `json:"reviewed"`
+	ReviewNote       string  `json:"review_note,omitempty"`
+	EscalatedLevel   *int    `json:"escalated_level,omitempty"`
+	SessionID        *string `json:"session_id,omitempty"`
+	// SessionActive says whether that session is still open. It is deliberately
+	// not omitempty: a console needs to tell "ended" from "this server is too
+	// old to know", and an absent field is the safer of the two to read as not
+	// live.
+	SessionActive bool           `json:"session_active"`
+	ExpiresAt     string         `json:"expires_at"`
+	CreatedAt     string         `json:"created_at"`
+	Decisions     []decisionBody `json:"decisions"`
 }
 
 // decisionBody is one approver's vote as it goes over the wire.
@@ -91,6 +96,7 @@ func requestView(r *access.Request) requestBody {
 	if r.SessionID != nil {
 		v := r.SessionID.String()
 		b.SessionID = &v
+		b.SessionActive = r.SessionActive
 	}
 	for i := range r.Decisions {
 		d := &r.Decisions[i]

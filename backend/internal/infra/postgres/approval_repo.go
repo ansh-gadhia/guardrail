@@ -79,13 +79,19 @@ func (r *RequestRepo) GetByID(ctx context.Context, s access.Scope, id uuid.UUID)
 }
 
 // loadProjections fills the display fields a console row needs.
+//
+// The session join carries liveness, not identity: r.session_id survives the
+// session it points at, so whether the redeemed access is still open can only
+// be answered by looking at the session itself.
 func loadProjections(ctx context.Context, tx pgx.Tx, q *access.Request) error {
 	return tx.QueryRow(ctx, `
-		SELECT COALESCE(u.email::text, ''), COALESCE(d.name, '')
+		SELECT COALESCE(u.email::text, ''), COALESCE(d.name, ''),
+			COALESCE(s.status = 'active', false)
 		FROM access_requests r
 		LEFT JOIN users u ON u.id = r.user_id
 		LEFT JOIN devices d ON d.id = r.device_id
-		WHERE r.id = $1`, q.ID).Scan(&q.RequesterEmail, &q.DeviceName)
+		LEFT JOIN access_sessions s ON s.id = r.session_id
+		WHERE r.id = $1`, q.ID).Scan(&q.RequesterEmail, &q.DeviceName, &q.SessionActive)
 }
 
 func loadDecisions(ctx context.Context, tx pgx.Tx, q *access.Request) error {
@@ -116,8 +122,11 @@ func (r *RequestRepo) List(ctx context.Context, s access.Scope, f access.Request
 	limit := normalizeLimit(f.Limit)
 	var out []access.Request
 	err := r.db.WithScopeIDs(ctx, s.OrganizationID, s.IsSuperAdmin, func(tx pgx.Tx) error {
-		q := `SELECT ` + requestCols + `, COALESCE(u.email::text, ''), COALESCE(d.name, '')` +
-			requestFrom + ` LEFT JOIN users u ON u.id = r.user_id LEFT JOIN devices d ON d.id = r.device_id WHERE 1=1`
+		q := `SELECT ` + requestCols + `, COALESCE(u.email::text, ''), COALESCE(d.name, ''),
+			COALESCE(s.status = 'active', false)` +
+			requestFrom + ` LEFT JOIN users u ON u.id = r.user_id
+			LEFT JOIN devices d ON d.id = r.device_id
+			LEFT JOIN access_sessions s ON s.id = r.session_id WHERE 1=1`
 		args := []any{}
 		if f.Status != "" {
 			args = append(args, string(f.Status))
@@ -154,7 +163,7 @@ func (r *RequestRepo) List(ctx context.Context, s access.Scope, f access.Request
 				&req.RequestedMinutes, &req.GrantedMinutes, &scope, &req.MinApprovals, &req.RequesterLevel,
 				&req.IsEmergency, &req.ReviewedBy, &req.ReviewedAt, &req.ReviewNote, &req.EscalatedLevel,
 				&req.SessionID, &req.ExpiresAt, &req.CreatedAt, &req.UpdatedAt,
-				&req.RequesterEmail, &req.DeviceName); e != nil {
+				&req.RequesterEmail, &req.DeviceName, &req.SessionActive); e != nil {
 				return e
 			}
 			req.Status = access.RequestStatus(status)

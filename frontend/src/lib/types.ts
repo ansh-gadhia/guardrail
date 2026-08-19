@@ -575,6 +575,11 @@ export interface AccessRequest {
   review_note?: string;
   escalated_level?: number;
   session_id?: string;
+  // session_active tells a live session from one that has already ended.
+  // session_id is never cleared, so it alone cannot answer that. Optional
+  // because a server older than the field simply omits it, and reading a
+  // missing answer as "not live" is the direction that does not invent access.
+  session_active?: boolean;
   expires_at: string;
   created_at: string;
   decisions: AccessDecision[];
