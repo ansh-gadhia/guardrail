@@ -140,6 +140,23 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   a flat hour, which had been dropping long approved sessions out of the active
   list and leaving short ones in it after they ended.
 
+### Added
+- **A device can be edited after it is registered.** The console could create a
+  device and never change what it *is*: name, host/IP, port, protocol, vendor,
+  type and description rendered as read-only text on the device page, so a box
+  that moved to a new address — or was typed in wrong — had to be deleted and
+  re-registered, taking its sessions, recordings and audit trail with it. The API
+  has accepted `PATCH /devices/:id` all along; only the form was missing. It is
+  behind `device:write`, the same permission that registers a device.
+
+  Changing the protocol warns first, because it can invalidate things settled
+  against the old one — a credential's injection method, isolated delivery on a
+  device that is no longer web. The server still refuses combinations it cannot
+  honour; the warning just means you find out before pressing Save.
+
+  Recording policy is deliberately not in this form. It stays owner-or-super-admin
+  and keeps its own control.
+
 ### Changed
 - **Bulk import of per-user accounts no longer asks for UUIDs.** It took
   hand-written CSV whose every row carried a raw `device_id` or `group_id` —
@@ -166,6 +183,18 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   groups, because the target is chosen once. Import once per target.
 
 ### Fixed
+- **Rotating a per-user account silently changed how its secret was injected.**
+  The Rotate dialog sends a username and a secret; it sent no injection method,
+  and the write path resolved an absent one to the protocol's default. So an
+  account bound with an SSH **private key** came back as `ssh-password` with the
+  PEM still in the vault — the rotation reported success and the next connect was
+  the first anybody heard of it. An omitted method now keeps the stored one
+  (empty never means "clear it" — `none` does), matching what `Rotate` on a
+  plain credential already did. The group dialog had the same bug from the other
+  end: its method picker was hardcoded to `ssh-password` regardless of what the
+  account was bound with, so opening it and pressing Save rewrote the method.
+  Both dialogs now show the bound method, and the device one offers only the
+  methods its protocol accepts.
 - **The asset-group picker was an empty dropdown with no explanation.** With no
   groups defined it rendered "Choose an asset group…" and nothing else, which
   looks identical to a list that failed to load or one you lack `group:read` to

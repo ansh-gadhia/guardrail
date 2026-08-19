@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
 import type { Account, CredentialMode, Device, Role, WhoAmI } from "@/lib/types";
+import { defaultInjectionFor, injectionMethodsFor } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import {
   Badge, Button, ErrorNote, Field, Hairline, Input, Modal, Select, Spinner, Switch,
@@ -261,7 +262,7 @@ function ApprovalCoverageWarning() {
 
 function AccountsModal({ device, onClose }: { device: Device; onClose: () => void }) {
   const qc = useQueryClient();
-  const [editing, setEditing] = useState<{ userID: string; username: string } | null>(null);
+  const [editing, setEditing] = useState<{ userID: string; username: string; injection: string } | null>(null);
 
   const accounts = useQuery({
     queryKey: ["device-accounts", device.id],
@@ -324,7 +325,7 @@ function AccountsModal({ device, onClose }: { device: Device; onClose: () => voi
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => setEditing({ userID: a.user_id!, username: a.username })}
+                          onClick={() => setEditing({ userID: a.user_id!, username: a.username, injection: a.injection })}
                         >
                           Rotate
                         </Button>
@@ -366,7 +367,10 @@ function AccountsModal({ device, onClose }: { device: Device; onClose: () => voi
                 <div className="mt-2">
                   <Select
                     value=""
-                    onChange={(e) => e.target.value && setEditing({ userID: e.target.value, username: "" })}
+                    onChange={(e) =>
+                      e.target.value &&
+                      setEditing({ userID: e.target.value, username: "", injection: defaultInjectionFor(device.scheme) })
+                    }
                   >
                     <option value="">Choose somebody…</option>
                     {unbound.map((p) => (
@@ -393,6 +397,7 @@ function AccountsModal({ device, onClose }: { device: Device; onClose: () => voi
           device={device}
           userID={editing.userID}
           initialUsername={editing.username}
+          initialInjection={editing.injection}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -409,17 +414,28 @@ function AccountEditor({
   device,
   userID,
   initialUsername,
+  initialInjection,
   onClose,
   onSaved,
 }: {
   device: Device;
   userID: string;
   initialUsername: string;
+  initialInjection: string;
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [username, setUsername] = useState(initialUsername);
   const [secret, setSecret] = useState("");
+  // Carried explicitly, and seeded from what this account is already bound with.
+  // The dialog used to send no method at all, and the server resolved an absent
+  // one to the protocol's default — so rotating an ssh-key account turned it
+  // into ssh-password with the PEM key still in the vault, reported success, and
+  // broke the next connect. The server now leaves an omitted method alone; this
+  // sends it anyway, because a rotation dialog that cannot show how the secret is
+  // used is asking somebody to change a thing they cannot see.
+  const [injection, setInjection] = useState(initialInjection || defaultInjectionFor(device.scheme));
+  const methods = injectionMethodsFor(device.scheme);
   const existing = !!initialUsername;
 
   const save = useMutation({
@@ -427,6 +443,7 @@ function AccountEditor({
       api.put(`/devices/${device.id}/accounts/${userID}`, {
         username,
         secret,
+        injection,
         name: username || "per-user account",
       }),
     onSuccess: () => {
@@ -446,6 +463,17 @@ function AccountEditor({
         <Field label="Account on the device" hint="The login that exists on the target, e.g. jsmith-admin.">
           <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="jsmith-admin" autoFocus />
         </Field>
+        {methods.length > 0 && (
+          <Field label="How it authenticates" hint={methods.find((m) => m.value === injection)?.hint}>
+            <Select value={injection} onChange={(e) => setInjection(e.target.value)}>
+              {methods.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
         <Field
           label="Secret"
           hint={existing ? "Leave blank to keep the current one." : "Stored encrypted and never shown again."}

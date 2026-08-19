@@ -36,7 +36,7 @@ export function AccountsAdmin() {
 // rows per person and nobody maintains that.
 function GroupAccounts() {
   const [groupID, setGroupID] = useState("");
-  const [editing, setEditing] = useState<{ userID: string; username: string } | null>(null);
+  const [editing, setEditing] = useState<{ userID: string; username: string; injection: string } | null>(null);
   const qc = useQueryClient();
 
   const groups = useQuery<AssetGroup[]>({
@@ -129,7 +129,7 @@ function GroupAccounts() {
                     </div>
                   </div>
                   <div className="flex shrink-0 gap-1">
-                    <Button size="sm" variant="ghost" onClick={() => setEditing({ userID: a.user_id!, username: a.username })}>
+                    <Button size="sm" variant="ghost" onClick={() => setEditing({ userID: a.user_id!, username: a.username, injection: a.injection })}>
                       Rotate
                     </Button>
                     <Button size="sm" variant="ghost" onClick={() => remove.mutate(a.user_id!)}>
@@ -142,7 +142,7 @@ function GroupAccounts() {
           )}
 
           {unbound.length > 0 && (
-            <Select value="" onChange={(e) => e.target.value && setEditing({ userID: e.target.value, username: "" })}>
+            <Select value="" onChange={(e) => e.target.value && setEditing({ userID: e.target.value, username: "", injection: "" })}>
               <option value="">Add somebody…</option>
               {unbound.map((p) => (
                 <option key={p.user_id} value={p.user_id}>
@@ -159,6 +159,7 @@ function GroupAccounts() {
           groupID={groupID}
           userID={editing.userID}
           initialUsername={editing.username}
+          initialInjection={editing.injection}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -174,18 +175,24 @@ function GroupAccountEditor({
   groupID,
   userID,
   initialUsername,
+  initialInjection,
   onClose,
   onSaved,
 }: {
   groupID: string;
   userID: string;
   initialUsername: string;
+  initialInjection: string;
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [username, setUsername] = useState(initialUsername);
   const [secret, setSecret] = useState("");
-  const [injection, setInjection] = useState("ssh-password");
+  // Seeded from what the account is already bound with. This was hardcoded to
+  // "ssh-password", so opening Rotate on an account bound with a private key or
+  // an API token and pressing Save silently rewrote the method — the dialog
+  // showed the wrong answer and then stored it.
+  const [injection, setInjection] = useState(initialInjection || "ssh-password");
   const existing = !!initialUsername;
 
   const save = useMutation({

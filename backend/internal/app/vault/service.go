@@ -305,7 +305,17 @@ func (s *Service) setBinding(ctx context.Context, actor iam.Claims, deviceID uui
 			cred.Name = in.Name
 		}
 		cred.Username = in.Username
-		cred.Injection = defaultInjection(in.Injection, in.Scheme)
+		// An absent injection method KEEPS the stored one. It used to fall back to
+		// the scheme's default, which quietly rewrote it on every rotation: an
+		// account bound with ssh-key came back as ssh-password, and the PEM key
+		// still in the vault was then offered to the device as a password. The
+		// rotation reported success and the next connect was the first anybody
+		// heard of it. Empty never means "clear it" here — InjectNone is how you
+		// say a credential injects nothing — so treating it as "leave alone" is
+		// unambiguous. Creating still resolves the scheme default, below.
+		if in.Injection != "" {
+			cred.Injection = in.Injection
+		}
 		if uerr := s.repo.Update(ctx, scopeOf(actor), cred); uerr != nil {
 			return uerr
 		}

@@ -7,12 +7,15 @@ import { plausibleDate } from "@/lib/dates";
 import type { AssetGroup, Device, Session, UserRow, RecordingKind } from "@/lib/types";
 import { RECORDING_KIND_INFO } from "@/lib/types";
 import { useAuth } from "@/store/auth";
-import { PageHero, Panel, Badge, StatusBadge, EmptyState, ErrorNote, Skeleton, cn } from "@/components/ui";
+import { PageHero, Panel, Badge, StatusBadge, EmptyState, ErrorNote, Field, Modal, Skeleton, cn } from "@/components/ui";
 import { DeviceStatusBadge } from "@/components/DeviceHealthDot";
 import { GroupPicker } from "@/components/GroupPicker";
 import { toast } from "@/components/Toast";
 import { DeviceAccessPolicy } from "@/components/DeviceAccessPolicy";
-import { deviceTypeLabel, RecordingToggle, DeliveryModeField, isWebScheme } from "./DevicesPage";
+import {
+  deviceTypeLabel, RecordingToggle, DeliveryModeField, isWebScheme,
+  PROTOCOLS, DEVICE_TYPES, defaultPortFor,
+} from "./DevicesPage";
 import { IconDevices, IconSessions, IconAudit, IconClock, IconGlobe, IconChevronRight, IconFilm, IconKey } from "@/components/icons";
 
 interface DeviceAuditRow {
@@ -266,10 +269,188 @@ function toDeviceBody(d: Device) {
   };
 }
 
+
+// ---- editing the device itself --------------------------------------------
+
+// EditDeviceModal changes what the device IS: where it lives and what it is.
+//
+// The console could register a device and never change it again. Everything on
+// this page was editable except the fields that actually identify the target —
+// so a box that moved to a new address, or was typed in wrong, had to be deleted
+// and re-registered, taking its sessions, recordings and audit trail with it.
+// The API has always accepted the change; only the form was missing.
+//
+// Recording policy is deliberately NOT here. It is owner-or-super-admin, decided
+// by the server, and lives in its own control above with that rule spelled out.
+function EditDeviceModal({ device, onClose }: { device: Device; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [f, setF] = useState({
+    name: device.name,
+    host: device.host,
+    port: String(device.port || ""),
+    scheme: device.scheme,
+    vendor: device.vendor,
+    device_type: device.device_type,
+    description: device.description,
+    verify_tls: device.verify_tls,
+  });
+  const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF((s) => ({ ...s, [k]: v }));
+
+  const save = useMutation({
+    mutationFn: async () =>
+      api.patch(`/devices/${device.id}`, {
+        ...toDeviceBody(device),
+        name: f.name.trim(),
+        host: f.host.trim(),
+        port: Number(f.port) || 0,
+        scheme: f.scheme,
+        vendor: f.vendor.trim(),
+        device_type: f.device_type.trim(),
+        description: f.description,
+        verify_tls: f.verify_tls,
+      }),
+    onSuccess: () => {
+      toast.success("Device updated");
+      void qc.invalidateQueries({ queryKey: ["device", device.id] });
+      void qc.invalidateQueries({ queryKey: ["devices"] });
+      onClose();
+    },
+    onError: (e) => toast.error(problemDetail(e, "Could not update the device")),
+  });
+
+  const schemeChanged = f.scheme !== device.scheme;
+  const known = DEVICE_TYPES.includes(f.device_type);
+
+  return (
+    <Modal
+      title={`Edit ${device.name}`}
+      icon={IconDevices}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn-ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            className="btn-primary"
+            disabled={save.isPending || !f.name.trim() || !f.host.trim()}
+            onClick={() => save.mutate()}
+          >
+            {save.isPending ? "Saving…" : "Save changes"}
+          </button>
+        </>
+      }
+    >
+      {save.isError && (
+        <div className="mb-4">
+          <ErrorNote message={problemDetail(save.error, "Could not update the device")} />
+        </div>
+      )}
+      <Field label="Name">
+        <input className="input" value={f.name} onChange={(e) => set("name", e.target.value)} autoFocus />
+      </Field>
+      <div className="grid grid-cols-3 gap-3">
+        <div className="col-span-2">
+          <Field label="Host / IP" hint="Do not include the port here.">
+            <input className="input" value={f.host} onChange={(e) => set("host", e.target.value)} />
+          </Field>
+        </div>
+        <Field label="Port">
+          <input
+            className="input"
+            inputMode="numeric"
+            value={f.port}
+            onChange={(e) => set("port", e.target.value.replace(/\D/g, "").slice(0, 5))}
+            placeholder={defaultPortFor(f.scheme) || "443"}
+          />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Protocol" hint={PROTOCOLS.find((p) => p.value === f.scheme)?.hint}>
+          <select
+            className="input"
+            value={f.scheme}
+            onChange={(e) => {
+              // The stored port belonged to the old protocol. Keeping 443 on a
+              // device just switched to SSH produces a connection that times out
+              // for no visible reason; the field stays editable for odd cases.
+              const next = e.target.value;
+              setF((s) => ({ ...s, scheme: next, port: defaultPortFor(next) }));
+            }}
+          >
+            {PROTOCOLS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Device type">
+          <div className="space-y-2">
+            <select
+              className="input"
+              value={known ? f.device_type : "other"}
+              onChange={(e) => set("device_type", e.target.value === "other" ? "" : e.target.value)}
+            >
+              {DEVICE_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {deviceTypeLabel(t)}
+                </option>
+              ))}
+              <option value="other">Other…</option>
+            </select>
+            {!known && (
+              <input
+                className="input"
+                value={f.device_type}
+                onChange={(e) => set("device_type", e.target.value)}
+                placeholder="Custom device type"
+              />
+            )}
+          </div>
+        </Field>
+      </div>
+      <Field label="Vendor">
+        <input className="input" value={f.vendor} onChange={(e) => set("vendor", e.target.value)} />
+      </Field>
+      <Field label="Description">
+        <input className="input" value={f.description} onChange={(e) => set("description", e.target.value)} />
+      </Field>
+      {isWebScheme(f.scheme) && (
+        <Field label="TLS" hint="Off accepts a self-signed or otherwise unverifiable certificate.">
+          <label className="flex items-center gap-2 text-sm text-fg">
+            <input
+              type="checkbox"
+              checked={f.verify_tls}
+              onChange={(e) => set("verify_tls", e.target.checked)}
+            />
+            Verify the device's certificate
+          </label>
+        </Field>
+      )}
+      {/* Changing the protocol can invalidate things settled against the old one
+          — a credential's injection method, the delivery mode, what a recording
+          captures. The server refuses the combinations it cannot honour, so this
+          is a warning rather than a block, but being refused after pressing Save
+          is a worse way to learn it. */}
+      {schemeChanged && (
+        <p className="mt-1 text-xs text-warn">
+          Changing the protocol from {device.scheme} to {f.scheme}
+          {device.has_credential ? " may invalidate this device's credential — check how it authenticates after saving." : "."}
+          {device.delivery_mode === "isolated" && !isWebScheme(f.scheme)
+            ? " Isolated delivery is web-only, so this device will move back to the proxy."
+            : ""}
+        </p>
+      )}
+    </Modal>
+  );
+}
+
 export function DeviceDetailPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const has = useAuth((s) => s.has);
+  const [editing, setEditing] = useState(false);
 
   const device = useQuery<Device>({
     queryKey: ["device", id],
@@ -331,7 +512,17 @@ export function DeviceDetailPage() {
             }
           />
 
-          <Panel title="Details" icon={IconDevices}>
+          <Panel
+            title="Details"
+            icon={IconDevices}
+            actions={
+              has("device:write") ? (
+                <button className="btn-subtle" onClick={() => setEditing(true)}>
+                  Edit
+                </button>
+              ) : undefined
+            }
+          >
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
               <DField label="Endpoint" wide>
                 <span className="font-mono text-xs">{d.url}</span>
@@ -438,6 +629,8 @@ export function DeviceDetailPage() {
           </Panel>
         </>
       )}
+
+      {editing && d && <EditDeviceModal device={d} onClose={() => setEditing(false)} />}
     </div>
   );
 }
