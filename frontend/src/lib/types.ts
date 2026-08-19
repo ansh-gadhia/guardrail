@@ -227,6 +227,25 @@ export function defaultInjectionFor(scheme: string): string {
 // INJECTION_METHODS is the web set, kept for surfaces that are web-only.
 export const INJECTION_METHODS = WEB_INJECTION;
 
+// MIXED_INJECTION is what to offer when the protocol genuinely is not known at
+// bind time — an asset group holds devices of several schemes, so the method is
+// taken as given here and checked per device when it is actually used.
+//
+// Written out rather than derived from the per-scheme lists, because two entries
+// share a value: SSH's password is "ssh-password" and a desktop's is "password",
+// and a de-duplicated union would offer "Password" twice with no way to tell
+// which was which. The labels name the protocol for the same reason. Where the
+// scheme IS known, use injectionMethodsFor — offering a method the device cannot
+// accept produces a binding that looks configured and refuses every connection.
+export const MIXED_INJECTION: InjectionMethod[] = [
+  { value: "ssh-password", label: "SSH password", hint: "the account's password, used for the SSH login" },
+  { value: "ssh-key", label: "SSH private key", hint: "the secret is the PEM private key itself; passphrase-protected keys are not supported" },
+  { value: "password", label: "Desktop or telnet password", hint: "RDP, VNC and telnet. For a local Windows account use .\\Administrator; for a domain account use DOMAIN\\user" },
+  { value: "basic", label: "HTTP Basic auth", hint: "username + password sent as an Authorization: Basic header" },
+  { value: "header", label: "Authorization header", hint: 'the secret is the full header value, e.g. "Bearer <token>"' },
+  { value: "form", label: "Login form fill", hint: "a browser on the server types the credential into the device's login page — requires isolated delivery" },
+];
+
 export interface UserRow {
   user_id: string;
   organization_id: string;

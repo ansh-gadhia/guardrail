@@ -1,12 +1,14 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
-import type { Account, AssetGroup, UserRow } from "@/lib/types";
+import type { Account, AssetGroup, Device, UserRow } from "@/lib/types";
+import { MIXED_INJECTION, injectionMethodsFor } from "@/lib/types";
 import {
   Badge, Button, EmptyState, ErrorNote, Field, Hairline, Input, Modal, Panel,
-  Select, Spinner, Textarea,
+  Select, Skeleton, Spinner, Textarea,
 } from "@/components/ui";
-import { IconAlert, IconFolder, IconKey, IconTrash, IconUsers, IconClock } from "@/components/icons";
+import { IconAlert, IconClock, IconFolder, IconKey, IconPlus, IconTrash, IconUsers } from "@/components/icons";
 import { toast } from "@/components/Toast";
 
 // Per-user accounts, administered across the estate.
@@ -71,16 +73,37 @@ function GroupAccounts() {
       icon={IconFolder}
       subtitle="Bind a person's account once on a group and it works on every device beneath it — including devices added later"
     >
-      <Field label="Group" hint="Nearest group wins: an account bound on “Datacentre / Core” beats one bound on “Datacentre”.">
-        <Select value={groupID} onChange={(e) => setGroupID(e.target.value)}>
-          <option value="">Choose an asset group…</option>
-          {(groups.data ?? []).map((g) => (
-            <option key={g.id} value={g.id}>
-              {g.name}
-            </option>
-          ))}
-        </Select>
-      </Field>
+      {/* An empty picker is not an answer. It looks identical whether there are
+          no groups, the list failed to load, or you are not allowed to see it,
+          and the operator is left clicking a control that does nothing. Each
+          case says which it is. */}
+      {groups.isLoading ? (
+        <Skeleton className="h-9" />
+      ) : groups.error ? (
+        <ErrorNote message={problemDetail(groups.error, "Could not load asset groups")} />
+      ) : (groups.data ?? []).length === 0 ? (
+        <EmptyState
+          icon={IconFolder}
+          title="No asset groups yet"
+          message="Group accounts need a group to bind to. Groups are created on a device — open any device, and add it to a new group from the Groups field."
+          action={
+            <Link to="/devices" className="text-sm font-medium text-accent hover:underline">
+              Go to devices
+            </Link>
+          }
+        />
+      ) : (
+        <Field label="Group" hint="Nearest group wins: an account bound on “Datacentre / Core” beats one bound on “Datacentre”.">
+          <Select value={groupID} onChange={(e) => setGroupID(e.target.value)}>
+            <option value="">Choose an asset group…</option>
+            {(groups.data ?? []).map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      )}
 
       {!groupID ? null : accounts.isLoading ? (
         <div className="mt-4">
@@ -188,16 +211,21 @@ function GroupAccountEditor({
         <Field label="Account on the devices" hint="The login that exists on the targets, e.g. jsmith-admin.">
           <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="jsmith-admin" autoFocus />
         </Field>
+        {/* The list comes from MIXED_INJECTION rather than being written out
+            here: this copy was missing the Authorization-header method, so a
+            group of API-token devices could not be bound from this dialog at
+            all. A group holds devices of mixed protocols, so the choice is
+            checked per device when it is actually used. */}
         <Field
           label="How it authenticates"
-          hint="A group holds devices of mixed protocols, so this is checked per device when it is actually used."
+          hint={MIXED_INJECTION.find((m) => m.value === injection)?.hint}
         >
           <Select value={injection} onChange={(e) => setInjection(e.target.value)}>
-            <option value="ssh-password">SSH password</option>
-            <option value="ssh-key">SSH private key</option>
-            <option value="password">Desktop / telnet password</option>
-            <option value="basic">HTTP Basic</option>
-            <option value="form">Login form</option>
+            {MIXED_INJECTION.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
           </Select>
         </Field>
         <Field label="Secret" hint={existing ? "Leave blank to keep the current one." : "Stored encrypted and never shown again."}>
@@ -228,64 +256,315 @@ interface ImportResult {
   failed: { index: number; error: string }[];
 }
 
-// Forty people across twenty devices is not a form-fill job. CSV because that is
-// what comes out of whatever system already knows which account belongs to whom.
+// PersonRow is one line of the import as it is being built. key exists so a row
+// keeps its identity across removals — index-keyed inputs swap their contents
+// when a row above them is deleted, which with secrets in them is worse than
+// cosmetic.
+interface PersonRow {
+  key: number;
+  userID: string;
+  username: string;
+  secret: string;
+}
+
+// BulkImport binds many per-user accounts at once.
+//
+// It used to ask for hand-written CSV whose rows each carried a raw device_id or
+// group_id — UUIDs nobody has memorized and which this console is the only place
+// to look up, so using the feature meant copying identifiers out of one screen
+// into a text box on another and counting commas. The target and the injection
+// method are the same for every row of a real import anyway, so they are chosen
+// once, by name, and a row carries only what actually differs per person.
+//
+// Pasting a list still works, because that is what comes out of whatever system
+// already knows which account belongs to whom — but it is three columns of
+// things a human knows, not six with two identifiers.
 function BulkImport() {
   const qc = useQueryClient();
-  const [csv, setCsv] = useState("");
+  const [target, setTarget] = useState("");
+  const [injection, setInjection] = useState("");
+  const [rows, setRows] = useState<PersonRow[]>([{ key: 1, userID: "", username: "", secret: "" }]);
+  const nextKey = useRef(2);
+  const [pasting, setPasting] = useState(false);
+  const [paste, setPaste] = useState("");
+  const [pasteNote, setPasteNote] = useState("");
   const [result, setResult] = useState<ImportResult | null>(null);
+  // The rows as sent, kept so a failure that comes back as "row 3" can be
+  // reported against the person on it. Counting lines in a textarea to find out
+  // who did not get an account is not a report.
+  const [sent, setSent] = useState<PersonRow[]>([]);
 
-  const rows = useMemo(() => parseCSV(csv), [csv]);
+  const groups = useQuery<AssetGroup[]>({
+    queryKey: ["asset-groups"],
+    queryFn: async () => (await api.get<{ data: AssetGroup[] }>("/asset-groups")).data.data ?? [],
+  });
+  const devices = useQuery<Device[]>({
+    queryKey: ["devices"],
+    queryFn: async () => (await api.get<{ data: Device[] }>("/devices")).data.data ?? [],
+  });
+  const people = useQuery<UserRow[]>({
+    queryKey: ["users"],
+    queryFn: async () => (await api.get<{ data: UserRow[] }>("/users")).data.data ?? [],
+  });
+
+  const [kind, targetID] = splitTarget(target);
+  const device = kind === "device" ? (devices.data ?? []).find((d) => d.id === targetID) : undefined;
+  // A device knows its protocol, so only the methods that can authenticate it
+  // are offered. A group does not — it holds devices of mixed schemes — so the
+  // method is taken as given and checked per device at connect time.
+  const methods = kind === "device" ? injectionMethodsFor(device?.scheme ?? "") : MIXED_INJECTION;
+  const method = methods.find((m) => m.value === injection);
+
+  const ready = useMemo(
+    () => rows.filter((r) => r.userID && r.username.trim() && r.secret),
+    [rows],
+  );
+  const incomplete = rows.length - ready.length;
 
   const run = useMutation({
-    mutationFn: async () => (await api.post<ImportResult>("/accounts/import", { accounts: rows.rows })).data,
+    mutationFn: async () => {
+      const accounts = ready.map((r) => ({
+        user_id: r.userID,
+        ...(kind === "device" ? { device_id: targetID } : { group_id: targetID }),
+        username: r.username.trim(),
+        secret: r.secret,
+        injection,
+        name: r.username.trim(),
+      }));
+      setSent(ready);
+      return (await api.post<ImportResult>("/accounts/import", { accounts })).data;
+    },
     onSuccess: (r) => {
       setResult(r);
       if (r.imported > 0) {
         toast.success(`Bound ${r.imported} account${r.imported === 1 ? "" : "s"}`);
         void qc.invalidateQueries({ queryKey: ["device-accounts"] });
         void qc.invalidateQueries({ queryKey: ["group-accounts"] });
+        // Secrets do not linger in the form after they have been stored. The
+        // rows that failed stay, because those are the ones still to fix.
+        const failed = new Set(r.failed.map((f) => f.index));
+        const keep = ready.filter((_, i) => failed.has(i));
+        setRows(keep.length > 0 ? keep : [{ key: nextKey.current++, userID: "", username: "", secret: "" }]);
       }
     },
     onError: (e) => toast.error(problemDetail(e, "Import failed")),
   });
 
+  const setRow = (key: number, patch: Partial<PersonRow>) =>
+    setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+
+  const addRow = () =>
+    setRows((rs) => [...rs, { key: nextKey.current++, userID: "", username: "", secret: "" }]);
+
+  const applyPaste = () => {
+    const byEmail = new Map((people.data ?? []).map((p) => [p.email.toLowerCase(), p.user_id]));
+    const parsed: PersonRow[] = [];
+    const unknown: string[] = [];
+    for (const line of paste.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t) continue;
+      const [email, username, ...rest] = t.split(",").map((c) => c.trim());
+      // "email,username,secret" — and the secret keeps any commas in it, because
+      // splitting a password on punctuation would store a truncated one and the
+      // failure would not show up until somebody could not log in.
+      const secret = rest.join(",");
+      const id = byEmail.get((email ?? "").toLowerCase());
+      if (!id) {
+        if (email) unknown.push(email);
+        continue;
+      }
+      parsed.push({ key: nextKey.current++, userID: id, username: username ?? "", secret });
+    }
+    // Rows are replaced rather than appended: pasting twice after a correction
+    // should not leave the first attempt behind to be imported alongside it.
+    setRows(parsed.length > 0 ? parsed : [{ key: nextKey.current++, userID: "", username: "", secret: "" }]);
+    setPaste("");
+    setPasting(false);
+    setResult(null);
+    // Unmatched addresses are named here rather than sent and rejected: the
+    // secret on that line would otherwise cross the wire to fail server-side.
+    setPasteNote(
+      unknown.length > 0
+        ? `${parsed.length} row(s) added. No GuardRail user matches: ${unknown.join(", ")}`
+        : `${parsed.length} row(s) added.`,
+    );
+  };
+
+  const chooseTarget = (v: string) => {
+    setTarget(v);
+    setResult(null);
+    const [k, id] = splitTarget(v);
+    const d = k === "device" ? (devices.data ?? []).find((x) => x.id === id) : undefined;
+    const list = k === "device" ? injectionMethodsFor(d?.scheme ?? "") : k === "group" ? MIXED_INJECTION : [];
+    setInjection(list[0]?.value ?? "");
+  };
+
+  const noTargets = (groups.data ?? []).length === 0 && (devices.data ?? []).length === 0;
+
   return (
     <Panel title="Bulk import" icon={IconUsers} subtitle="Bind many accounts at once">
-      <p className="text-sm text-muted">
-        One row per account. Header required. Give each row either a <span className="font-mono">device_id</span> or a{" "}
-        <span className="font-mono">group_id</span>.
-      </p>
-      <pre className="mt-2 overflow-x-auto rounded-lg border border-line bg-surface-2 p-2 text-2xs text-muted">
-user_email,device_id,group_id,username,secret,injection{"\n"}
-alice@corp.com,,4f1c…,alice-admin,s3cret,ssh-password
-      </pre>
-      <div className="mt-3">
-        <Textarea
-          rows={6}
-          className="font-mono text-xs"
-          value={csv}
-          onChange={(e) => {
-            setCsv(e.target.value);
-            setResult(null);
-          }}
-          placeholder="user_email,device_id,group_id,username,secret,injection"
+      {groups.isLoading || devices.isLoading ? (
+        <Skeleton className="h-24" />
+      ) : noTargets ? (
+        <EmptyState
+          icon={IconFolder}
+          title="Nothing to bind to"
+          message="Register a device first. Accounts are bound to a device, or to an asset group covering several."
         />
-      </div>
-      {rows.error && <p className="mt-2 text-xs text-danger">{rows.error}</p>}
-      {!rows.error && rows.rows.length > 0 && (
-        <p className="mt-2 text-xs text-muted">{rows.rows.length} row(s) ready.</p>
+      ) : (
+        <>
+          <Field
+            label="Bind these accounts on"
+            hint="A group covers every device beneath it, including ones added later. A device binds just that one."
+          >
+            <Select value={target} onChange={(e) => chooseTarget(e.target.value)}>
+              <option value="">Choose a group or device…</option>
+              {(groups.data ?? []).length > 0 && (
+                <optgroup label="Asset groups">
+                  {(groups.data ?? []).map((g) => (
+                    <option key={g.id} value={`group:${g.id}`}>
+                      {g.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {(devices.data ?? []).length > 0 && (
+                <optgroup label="Devices">
+                  {(devices.data ?? []).map((d) => (
+                    <option key={d.id} value={`device:${d.id}`}>
+                      {d.name} ({d.scheme})
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </Select>
+          </Field>
+
+          {target && (
+            <Field label="How the secret authenticates" hint={method?.hint}>
+              {methods.length === 0 ? (
+                <ErrorNote
+                  message={`GuardRail has no injection method for ${device?.scheme || "this protocol"}, so an account cannot be bound here.`}
+                />
+              ) : (
+                <Select value={injection} onChange={(e) => setInjection(e.target.value)}>
+                  {methods.map((m) => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          )}
+
+          {target && methods.length > 0 && (
+            <>
+              <Hairline />
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <span className="label mb-0">People</span>
+                <button
+                  type="button"
+                  className="text-xs font-medium text-accent hover:underline"
+                  onClick={() => {
+                    setPasting((v) => !v);
+                    setPasteNote("");
+                  }}
+                >
+                  {pasting ? "Cancel paste" : "Paste a list"}
+                </button>
+              </div>
+
+              {pasting ? (
+                <div className="mt-2">
+                  <Textarea
+                    rows={5}
+                    autoFocus
+                    className="font-mono text-xs"
+                    value={paste}
+                    onChange={(e) => setPaste(e.target.value)}
+                    placeholder={"alice@corp.com,alice-admin,s3cret\nbob@corp.com,bob-admin,hunter2"}
+                  />
+                  <p className="mt-1.5 text-xs text-faint">
+                    One person per line: email, the account name on the device, then the secret. No header.
+                  </p>
+                  <div className="mt-2 flex justify-end">
+                    <Button size="sm" variant="primary" disabled={!paste.trim()} onClick={applyPaste}>
+                      Add rows
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 space-y-2">
+                  {/* The email identifies the row, so it gets the widest column: a
+                      select truncated mid-address makes two people sharing a prefix
+                      indistinguishable. */}
+                  {rows.map((r) => (
+                    <div
+                      key={r.key}
+                      className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
+                    >
+                      <Select value={r.userID} onChange={(e) => setRow(r.key, { userID: e.target.value })}>
+                        <option value="">Person…</option>
+                        {(people.data ?? []).map((p) => (
+                          <option key={p.user_id} value={p.user_id}>
+                            {p.email}
+                          </option>
+                        ))}
+                      </Select>
+                      <Input
+                        value={r.username}
+                        placeholder="account on the device"
+                        onChange={(e) => setRow(r.key, { username: e.target.value })}
+                      />
+                      <Input
+                        type="password"
+                        value={r.secret}
+                        placeholder="secret"
+                        onChange={(e) => setRow(r.key, { secret: e.target.value })}
+                      />
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label="Remove row"
+                        disabled={rows.length === 1}
+                        onClick={() => setRows((rs) => rs.filter((x) => x.key !== r.key))}
+                      >
+                        <IconTrash size={14} />
+                      </Button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+                    onClick={addRow}
+                  >
+                    <IconPlus size={12} /> Add another
+                  </button>
+                </div>
+              )}
+
+              {pasteNote && <p className="mt-2 text-xs text-muted">{pasteNote}</p>}
+
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <span className="text-xs text-muted">
+                  {ready.length} ready
+                  {incomplete > 0 && <span className="text-faint"> · {incomplete} incomplete, skipped</span>}
+                  {ready.length > 500 && <span className="text-danger"> · at most 500 at a time</span>}
+                </span>
+                <Button
+                  variant="primary"
+                  disabled={ready.length === 0 || ready.length > 500}
+                  loading={run.isPending}
+                  onClick={() => run.mutate()}
+                >
+                  Import {ready.length || ""}
+                </Button>
+              </div>
+            </>
+          )}
+        </>
       )}
-      <div className="mt-3 flex justify-end">
-        <Button
-          variant="primary"
-          disabled={rows.rows.length === 0 || !!rows.error}
-          loading={run.isPending}
-          onClick={() => run.mutate()}
-        >
-          Import {rows.rows.length || ""}
-        </Button>
-      </div>
 
       {result && (
         <>
@@ -295,14 +574,15 @@ alice@corp.com,,4f1c…,alice-admin,s3cret,ssh-password
               <Badge tone="success">{result.imported} imported</Badge>{" "}
               {result.failed.length > 0 && <Badge tone="danger">{result.failed.length} failed</Badge>}
             </div>
-            {/* Every failure is named with its row. An import that quietly binds
-                thirty-nine of forty is worse than one that says which line was
-                wrong. */}
+            {/* Every failure is named with the person it belongs to. An import
+                that quietly binds thirty-nine of forty is worse than one that
+                says who was left out. */}
             {result.failed.length > 0 && (
               <ul className="mt-2 space-y-1 text-xs text-muted">
                 {result.failed.map((f) => (
                   <li key={f.index}>
-                    Row {f.index + 1}: <span className="text-danger">{f.error}</span>
+                    {emailOf(people.data, sent[f.index]?.userID) ?? `Row ${f.index + 1}`}:{" "}
+                    <span className="text-danger">{f.error}</span>
                   </li>
                 ))}
               </ul>
@@ -314,44 +594,17 @@ alice@corp.com,,4f1c…,alice-admin,s3cret,ssh-password
   );
 }
 
-interface ImportRow {
-  user_email?: string;
-  user_id?: string;
-  device_id?: string;
-  group_id?: string;
-  username?: string;
-  secret?: string;
-  injection?: string;
-  name?: string;
+// splitTarget turns "group:<uuid>" into ["group", "<uuid>"]. The kind is carried
+// in the value because one picker listing both groups and devices is one fewer
+// control than a kind toggle beside a list, and the two are never ambiguous.
+function splitTarget(v: string): [string, string] {
+  const i = v.indexOf(":");
+  return i < 0 ? ["", ""] : [v.slice(0, i), v.slice(i + 1)];
 }
 
-// parseCSV is deliberately strict about the header and forgiving about
-// whitespace: a header typo should be reported here, not discovered as forty
-// failed rows after the secrets have already crossed the wire.
-function parseCSV(text: string): { rows: ImportRow[]; error?: string } {
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-  if (lines.length === 0) return { rows: [] };
-  const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
-  const known = ["user_email", "user_id", "device_id", "group_id", "username", "secret", "injection", "name"];
-  const unknown = header.filter((h) => h && !known.includes(h));
-  if (unknown.length > 0) return { rows: [], error: `Unknown column(s): ${unknown.join(", ")}` };
-  if (!header.includes("user_email") && !header.includes("user_id")) {
-    return { rows: [], error: "Needs a user_email or user_id column" };
-  }
-  const rows: ImportRow[] = [];
-  for (const line of lines.slice(1)) {
-    const cells = line.split(",");
-    const row: ImportRow = {};
-    header.forEach((h, i) => {
-      const v = (cells[i] ?? "").trim();
-      if (v) (row as Record<string, string>)[h] = v;
-    });
-    rows.push(row);
-  }
-  return { rows };
+function emailOf(people: UserRow[] | undefined, userID: string | undefined): string | undefined {
+  if (!userID) return undefined;
+  return (people ?? []).find((p) => p.user_id === userID)?.email;
 }
 
 // ---- rotation age ---------------------------------------------------------

@@ -140,7 +140,41 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   a flat hour, which had been dropping long approved sessions out of the active
   list and leaving short ones in it after they ended.
 
+### Changed
+- **Bulk import of per-user accounts no longer asks for UUIDs.** It took
+  hand-written CSV whose every row carried a raw `device_id` or `group_id` —
+  identifiers nobody has memorized and which this console is the only place to
+  look up, so using the feature meant copying UUIDs out of one screen into a text
+  box on another and counting commas to find the row a failure referred to. The
+  target and the injection method are the same for every row of a real import, so
+  they are now chosen once from a picker that lists groups and devices **by
+  name**, and a row carries only what differs per person: who, the account name
+  on the device, the secret.
+
+  Choosing a device also filters the injection methods to the ones its protocol
+  can actually accept, so the mismatch the server rejects (`"basic" cannot
+  authenticate a ssh device`) can no longer be built in the first place.
+
+  Pasting a list still works — it is what comes out of whatever system already
+  knows which account belongs to whom — but it is now `email,username,secret`
+  with no header. An address matching no GuardRail user is named in the console
+  instead of being sent and rejected, so that line's secret never leaves the
+  browser. Failures come back against the person rather than a row number, and a
+  successful import clears the secrets out of the form.
+
+  One capability is lost: a single import can no longer span several devices or
+  groups, because the target is chosen once. Import once per target.
+
 ### Fixed
+- **The asset-group picker was an empty dropdown with no explanation.** With no
+  groups defined it rendered "Choose an asset group…" and nothing else, which
+  looks identical to a list that failed to load or one you lack `group:read` to
+  see — three different problems, one blank control, no way to tell which you
+  had. Each case now says what it is, and the empty one points at where groups
+  are actually created (on a device).
+- The group-account dialog's injection list was written out by hand and was
+  missing the Authorization-header method, so a group of API-token devices could
+  not be bound from it. Both surfaces now share one list.
 - **Approvals → Open access listed every one-off ever used as still in use.** A
   redeemed request keeps its `session_id` forever, and its status stays
   `approved` — a one-off is spent when it is used, not re-decided — so nothing on
