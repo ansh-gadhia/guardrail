@@ -32,6 +32,15 @@ const (
 	ResultSuccess Result = "success"
 	ResultFailure Result = "failure"
 	ResultDenied  Result = "denied"
+	// ResultPending is an action whose outcome is not this event's to report,
+	// because somebody else has yet to decide it. Raising an access request is
+	// the case it exists for: the request was filed successfully, and it was
+	// neither granted nor refused at that moment. Recording it as denied — which
+	// is what happened before — makes the log say the opposite of what the
+	// approver went on to do, and the row keeps saying it forever, because the
+	// chain is append-only. The outcome arrives as its own approval.granted or
+	// approval.denied event carrying the same request_id.
+	ResultPending Result = "pending"
 )
 
 // Event is a single audit record. Every mandated field is present; PrevHash and

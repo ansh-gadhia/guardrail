@@ -180,8 +180,8 @@ func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UU
 	// nothing at all.
 	if in.RecordSessions != nil && *in.RecordSessions != d.RecordSessions {
 		if !d.CanSetRecording(actor.UserID, actor.IsSuperAdmin) {
-			s.recordAsset(ctx, actor, "device.recording_denied", "device", d.ID,
-				map[string]any{"requested": *in.RecordSessions})
+			s.recordAssetResult(ctx, actor, "device.recording_denied", "device", d.ID,
+				audit.ResultDenied, map[string]any{"requested": *in.RecordSessions})
 			return nil, assets.ErrForbidden
 		}
 		d.RecordSessions = *in.RecordSessions
@@ -193,8 +193,8 @@ func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UU
 		next := assets.NormalizeRecordingKinds(schemeOf(in.Scheme, d.Scheme), *in.RecordingKinds)
 		if !sameStrings(next, d.RecordingKinds) {
 			if !d.CanSetRecording(actor.UserID, actor.IsSuperAdmin) {
-				s.recordAsset(ctx, actor, "device.recording_denied", "device", d.ID,
-					map[string]any{"requested_kinds": next})
+				s.recordAssetResult(ctx, actor, "device.recording_denied", "device", d.ID,
+					audit.ResultDenied, map[string]any{"requested_kinds": next})
 				return nil, assets.ErrForbidden
 			}
 			d.RecordingKinds = next
@@ -330,10 +330,22 @@ func (s *Service) recordDevice(ctx context.Context, actor iam.Claims, action str
 	})
 }
 
-// recordAsset audits an asset-management action (groups and other asset changes
-// whose service methods don't carry request metadata). Best-effort like the
-// other recorders.
+// recordAsset audits a successful asset-management action (groups and other
+// asset changes whose service methods don't carry request metadata).
+// Best-effort like the other recorders.
 func (s *Service) recordAsset(ctx context.Context, actor iam.Claims, action, targetType string, targetID uuid.UUID, detail map[string]any) {
+	s.recordAssetResult(ctx, actor, action, targetType, targetID, audit.ResultSuccess, detail)
+}
+
+// recordAssetResult is recordAsset for the outcomes that are not successes.
+//
+// It exists because recordAsset hardcoded success, and the only two refusals in
+// this package went through it: a blocked attempt to switch recording off, or to
+// drop the transcript, was written to the log as "device.recording_denied —
+// success". Filtering the Audit Log for denials found nothing, and the row a
+// reviewer did see claimed the change had gone through when it had been refused.
+func (s *Service) recordAssetResult(ctx context.Context, actor iam.Claims, action, targetType string,
+	targetID uuid.UUID, result audit.Result, detail map[string]any) {
 	if s.audit == nil {
 		return
 	}
@@ -342,7 +354,7 @@ func (s *Service) recordAsset(ctx context.Context, actor iam.Claims, action, tar
 	_ = s.audit.Record(ctx, audit.Event{
 		ID: uuid.New(), OrganizationID: &org, ActorID: &uid, ActorEmail: actor.Email,
 		Action: action, Category: audit.CategoryDevice, TargetType: targetType, TargetID: targetID.String(),
-		Result: audit.ResultSuccess, Detail: detail,
+		Result: result, Detail: detail,
 	})
 }
 

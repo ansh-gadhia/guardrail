@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/guardrail/guardrail/internal/domain/access"
+	"github.com/guardrail/guardrail/internal/domain/audit"
 )
 
 // The console's first Connect on a gated device carries no reason. That is not a
@@ -325,4 +326,53 @@ func TestConnect_EmergencyQuota(t *testing.T) {
 			t.Fatalf("quota 0 means unlimited: %v", err)
 		}
 	})
+}
+
+// Raising a request is not a denial. It used to be recorded as one, so the Audit
+// Log showed "approval.requested — denied" immediately above the
+// "approval.granted — success" for the same request_id: the log said access was
+// refused and granted at once, and the row cannot be corrected afterwards
+// because the chain is append-only.
+func TestConnect_GatedDevice_RequestIsAuditedAsPendingNotDenied(t *testing.T) {
+	h := newHarness(opts{entitled: true, hasCredential: true, requiresApproval: true})
+
+	if _, err := h.svc.ConnectWith(context.Background(), actorClaims(), uuid.New(),
+		ReqMeta{}, ConnectOptions{Reason: "investigating the outage"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ev := h.audit.find("approval.requested")
+	if ev == nil {
+		t.Fatal("no approval.requested audit event; asking for access must be visible")
+	}
+	if ev.Result == audit.ResultDenied {
+		t.Error("asking for access was recorded as denied; nobody has decided it yet")
+	}
+	if ev.Result != audit.ResultPending {
+		t.Errorf("audit result = %q, want %q", ev.Result, audit.ResultPending)
+	}
+}
+
+// An event that belongs to no session must not claim one. The approval paths
+// pass a bare Session to name the device, and taking its zero id unconditionally
+// stamped every one of them with the nil UUID — a session id that joins to
+// nothing, in the column whose only purpose is that join.
+func TestConnect_GatedDevice_RequestCarriesNoFabricatedSessionID(t *testing.T) {
+	h := newHarness(opts{entitled: true, hasCredential: true, requiresApproval: true})
+
+	if _, err := h.svc.ConnectWith(context.Background(), actorClaims(), uuid.New(),
+		ReqMeta{}, ConnectOptions{Reason: "investigating the outage"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ev := h.audit.find("approval.requested")
+	if ev == nil {
+		t.Fatal("no approval.requested audit event")
+	}
+	if ev.SessionID != nil && *ev.SessionID == uuid.Nil {
+		t.Error("the event names session 00000000-0000-0000-0000-000000000000, which has never existed")
+	}
+	if ev.SessionID != nil {
+		t.Errorf("a request that started no session carries session %s", *ev.SessionID)
+	}
 }

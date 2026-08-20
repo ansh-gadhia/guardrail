@@ -170,8 +170,13 @@ func (s *Service) approvalGate(ctx context.Context, actor iam.Claims, ep access.
 	if err != nil {
 		return gateOutcome{}, err
 	}
+	// Pending, not denied. Nobody has refused anything here: a request has been
+	// filed and is waiting on an approver, who very often goes on to approve it
+	// seconds later. Recorded as denied, this row sat in the Audit Log
+	// contradicting the approval.granted row directly beneath it, and no
+	// correction is possible after the fact — the chain is append-only.
 	s.recordAuditDetail(ctx, actor, "approval.requested", &access.Session{DeviceID: deviceID}, meta,
-		audit.ResultDenied, map[string]any{"request_id": req.ID.String(), "reason": opts.Reason})
+		audit.ResultPending, map[string]any{"request_id": req.ID.String(), "reason": opts.Reason})
 	return gateOutcome{request: req}, nil
 }
 

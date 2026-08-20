@@ -161,6 +161,7 @@ export function AuditPage() {
                 <option value="success">Success</option>
                 <option value="failure">Failure</option>
                 <option value="denied">Denied</option>
+                <option value="pending">Pending</option>
               </Select>
             </>
           }

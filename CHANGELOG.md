@@ -183,6 +183,31 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   groups, because the target is chosen once. Import once per target.
 
 ### Fixed
+- **The Audit Log said access was denied when it had been approved.** Raising an
+  access request was recorded as `approval.requested` with the outcome `denied`,
+  so the log showed "approval.requested — denied" directly above the
+  "approval.granted — success" for the same `request_id`: it contradicted itself
+  about access that an approver had allowed seconds later. Nobody had refused
+  anything at that point, and the row could never be corrected, because the log
+  is an append-only hash chain. Asking for access is now recorded as `pending` —
+  a fourth outcome added for exactly this, since the vocabulary is a closed
+  `CHECK` in the schema (migration `0029`) — and the Audit Log gains a Pending
+  filter. The two rows already written keep saying `denied`; rewriting them is
+  what the chain exists to prevent.
+- **A refused attempt to switch recording off was logged as a success.** Only a
+  device's owner or a super admin may change its recording policy, and a refusal
+  audits as `device.recording_denied` — through a helper that hardcoded
+  `success`. Filtering the Audit Log for denials never surfaced it, and the row a
+  reviewer did see read as though the change had gone through. Recording is
+  evidence, so an attempt to remove it is precisely the row that has to be
+  accurate. It now records `denied`.
+- **Audit events that belong to no session claimed one.** The approval and denial
+  paths pass a bare session to name the device, and the recorder took its id
+  unconditionally, stamping every one of those events with
+  `00000000-0000-0000-0000-000000000000` — a session that has never existed, in
+  the column whose only purpose is joining an event back to a session.
+  `approval.reviewed`, which carries no device either, additionally named
+  device `00000000-…`. Both are left NULL now.
 - **Rotating a per-user account silently changed how its secret was injected.**
   The Rotate dialog sends a username and a secret; it sent no injection method,
   and the write path resolved an absent one to the protocol's default. So an

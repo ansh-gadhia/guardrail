@@ -742,10 +742,24 @@ func (s *Service) recordAuditDetail(ctx context.Context, actor iam.Claims, actio
 	}
 	org := actor.OrganizationID
 	uid := actor.UserID
-	sid := sess.ID
-	_ = s.audit.Record(ctx, audit.Event{
+	e := audit.Event{
 		ID: uuid.New(), OrganizationID: &org, ActorID: &uid, ActorEmail: actor.Email,
 		Action: action, Category: audit.CategorySession, TargetType: "device", TargetID: sess.DeviceID.String(),
-		SessionID: &sid, IP: meta.IP, UserAgent: meta.UserAgent, Result: result, Detail: detail,
-	})
+		IP: meta.IP, UserAgent: meta.UserAgent, Result: result, Detail: detail,
+	}
+	// Only events that belong to a session carry one. The approval and denial
+	// paths pass a bare Session to name the device, so taking its zero id
+	// unconditionally stamped every one of them with
+	// 00000000-0000-0000-0000-000000000000 — a session id that has never existed,
+	// joining to nothing, in a column whose whole purpose is that join.
+	if sess.ID != uuid.Nil {
+		sid := sess.ID
+		e.SessionID = &sid
+	}
+	// Same for the device: approval.reviewed carries no device at all, and a
+	// target of all-zeros reads as a real device that cannot be looked up.
+	if sess.DeviceID == uuid.Nil {
+		e.TargetType, e.TargetID = "", ""
+	}
+	_ = s.audit.Record(ctx, e)
 }
