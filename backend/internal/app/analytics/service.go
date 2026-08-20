@@ -83,9 +83,14 @@ type AuditRow struct {
 	Category   string
 	TargetType string
 	TargetID   string
-	IP         string
-	UserAgent  string
-	Result     string
+	// TargetLabel is the target resolved to the name a person recognises — a
+	// device name, a user's email, a credential name. Empty when the target has
+	// since been purged, or when the action has no target at all; the console
+	// falls back to the id rather than showing nothing.
+	TargetLabel string
+	IP          string
+	UserAgent   string
+	Result      string
 	// Detail is the structured payload recorded with the event (e.g. the failure
 	// reason, a device name, an approval decision). Shape varies by action; the
 	// delivery layer passes it through verbatim for inspection.
@@ -148,11 +153,11 @@ func (s *Service) GenerateCSV(ctx context.Context, actor iam.Claims, t ReportTyp
 
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"timestamp", "actor", "action", "category", "target_type", "target_id", "ip", "result"})
+	_ = w.Write([]string{"timestamp", "actor", "action", "category", "target_type", "target_id", "target", "ip", "result"})
 	for _, r := range rows {
 		_ = w.Write([]string{
 			r.Timestamp.UTC().Format(time.RFC3339), r.ActorEmail, r.Action, r.Category,
-			r.TargetType, r.TargetID, r.IP, r.Result,
+			r.TargetType, r.TargetID, r.TargetLabel, r.IP, r.Result,
 		})
 	}
 	w.Flush()

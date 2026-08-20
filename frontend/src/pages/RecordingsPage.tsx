@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
-import { plausibleDate } from "@/lib/dates";
-import type { Session, SessionEvent, RecordingMeta, Paged, SessionStats } from "@/lib/types";
+import { plausibleDate, sessionSpan } from "@/lib/dates";
+import type { Session, SessionEvent, RecordingMeta, Paged, SessionStats, AccessRequest } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, StatCluster, Panel, Badge, StatusBadge, Modal, EmptyState, ErrorNote, Skeleton, cn } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
@@ -176,12 +176,15 @@ export function RecordingsPage() {
     },
     {
       key: "duration",
-      header: "Duration",
+      header: "Held",
       value: (s) => {
         const st = startedOf(s);
-        return st ? new Date(s.ended_at ?? Date.now()).getTime() - new Date(st).getTime() : 0;
+        if (!st) return 0;
+        const close = new Date(s.ended_at ?? Date.now()).getTime();
+        const until = s.granted_until ? new Date(s.granted_until).getTime() : Infinity;
+        return Math.max(0, Math.min(close, until) - new Date(st).getTime());
       },
-      cell: (s) => <span className="font-mono text-xs tabular-nums text-muted">{duration(startedOf(s), s.ended_at)}</span>,
+      cell: (s) => <HeldCell session={s} />,
     },
     {
       key: "ip",
@@ -452,7 +455,7 @@ function RecordingPopup({
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge value={session.status} />
             <Badge tone="neutral">{session.protocol}</Badge>
-            <span className="text-xs text-muted">{duration(started, session.ended_at)}</span>
+            <HeldCell session={session} />
           </div>
 
           <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
@@ -460,6 +463,12 @@ function RecordingPopup({
             <DField label="Device" wide>{deviceLabel ?? <span className="font-mono text-xs">{session.device_id}</span>}</DField>
             <DField label="Started">{absLocal(started)}</DField>
             <DField label="Ended">{session.ended_at ? absLocal(session.ended_at) : "—"}</DField>
+            <DField label="Last activity">
+              {session.last_activity_at ? absLocal(session.last_activity_at) : <span className="text-faint">none recorded</span>}
+            </DField>
+            <DField label="Authorized until">
+              {session.granted_until ? absLocal(session.granted_until) : <span className="text-faint">no fixed window</span>}
+            </DField>
             <DField label="Client IP"><span className="font-mono text-xs">{session.client_ip || "—"}</span></DField>
             <DField label="Gateway"><span className="font-mono text-xs">{session.gateway_node || "—"}</span></DField>
             {session.end_reason && <DField label="End reason" wide>{session.end_reason}</DField>}
@@ -469,6 +478,11 @@ function RecordingPopup({
               </DField>
             )}
           </dl>
+
+          <div>
+            <div className="mb-2 text-2xs font-semibold uppercase tracking-wider text-faint">Authorization</div>
+            <Authorization session={session} />
+          </div>
 
           <div>
             <div className="mb-2 flex items-center justify-between">
@@ -655,6 +669,112 @@ function DField({ label, children, wide }: { label: string; children: ReactNode;
     <div className={cn(wide && "col-span-2")}>
       <dt className="text-2xs font-semibold uppercase tracking-wider text-faint">{label}</dt>
       <dd className="mt-0.5 text-sm text-fg">{children}</dd>
+    </div>
+  );
+}
+
+/* ---- How long access was actually held --------------------------------------
+   Not `ended_at - started_at`. See sessionSpan in lib/dates: the reaper that
+   closes a lapsed session only runs while the API does, so a record closed after
+   an outage reports the outage as access. The span is measured to whichever came
+   first — the record closing, or authorization running out — and any time the
+   record stayed open past its window is called out rather than folded in.
+
+   Calling it out rather than hiding it is the point: a session still sitting
+   open after its grant expired is a finding, and quietly capping the number
+   would bury exactly the thing worth seeing. */
+function HeldCell({ session }: { session: Session }) {
+  const span = sessionSpan(session);
+  if (!span) return <span className="text-xs text-faint">—</span>;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="font-mono text-xs tabular-nums text-muted">{span.label}</span>
+      {span.live && <span className="text-2xs text-success">live</span>}
+      {span.overrun && (
+        <span
+          className="cursor-help rounded border border-warn/30 bg-warn/10 px-1 py-px text-[10px] font-medium leading-none text-warn"
+          title={`The record stayed open ${span.overrun} after access expired. Nothing authorized that time — the session was closed late, which happens when the broker is not running to close it on time.`}
+        >
+          +{span.overrun} past window
+        </span>
+      )}
+    </span>
+  );
+}
+
+/* ---- How the session was authorized -----------------------------------------
+   A session record that says only "started, ended, by whom" cannot answer the
+   question a reviewer actually has: was this allowed, who allowed it, and when.
+   On a gated device that answer exists — the approval request carries it — and
+   it is linked to the session by session_id. */
+function Authorization({ session }: { session: Session }) {
+  const req = useQuery<AccessRequest[]>({
+    queryKey: ["session-approval", session.id],
+    // The approvals endpoint answers under `requests`, not `data` — the one
+    // listing in the API that does.
+    queryFn: async () =>
+      (await api.get<{ requests: AccessRequest[] }>("/access-requests", {
+        params: { session_id: session.id, limit: 1 },
+      })).data.requests ?? [],
+  });
+
+  if (req.isLoading) return <Skeleton className="h-16" />;
+  const r = (req.data ?? [])[0];
+
+  if (!r) {
+    return (
+      <p className="rounded-lg border border-line bg-surface-2/40 px-3 py-2 text-xs text-muted">
+        No approval was needed — this device does not require one, or the person connecting was exempt.
+      </p>
+    );
+  }
+
+  const asked = plausibleDate(r.created_at);
+  // The decision that settled it is the last one recorded — under a two-person
+  // rule the earlier votes are steps toward it, not the moment access was given.
+  const last = r.decisions?.[r.decisions.length - 1];
+  const decided = plausibleDate(last?.decided_at);
+  return (
+    <div className="space-y-2 rounded-lg border border-line bg-surface-2/40 px-3 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusBadge value={r.status} />
+        {r.is_emergency && <Badge tone="danger">emergency — taken first, reviewed after</Badge>}
+        {r.granted_minutes ? <Badge tone="neutral">{r.granted_minutes}m granted</Badge> : null}
+      </div>
+      <dl className="space-y-1.5 text-xs">
+        <div className="flex gap-2">
+          <dt className="w-20 shrink-0 text-faint">Reason</dt>
+          <dd className="min-w-0 flex-1 text-fg">{r.reason || "—"}</dd>
+        </div>
+        <div className="flex gap-2">
+          <dt className="w-20 shrink-0 text-faint">Asked</dt>
+          <dd className="min-w-0 flex-1 text-fg">{asked ? asked.toLocaleString() : "—"}</dd>
+        </div>
+        <div className="flex gap-2">
+          <dt className="w-20 shrink-0 text-faint">Decided</dt>
+          <dd className="min-w-0 flex-1 text-fg">
+            {decided ? decided.toLocaleString() : "—"}
+            {asked && decided && (
+              <span className="ml-1.5 text-faint">· {Math.max(0, Math.round((decided.getTime() - asked.getTime()) / 60000))}m wait</span>
+            )}
+          </dd>
+        </div>
+        <div className="flex gap-2">
+          <dt className="w-20 shrink-0 text-faint">Approvers</dt>
+          <dd className="min-w-0 flex-1 text-fg">
+            {r.decisions && r.decisions.length > 0
+              ? r.decisions.map((d) => `${d.by || "unknown"} · ${d.decision === "approve" ? "approved" : "denied"}`).join(", ")
+              : `${r.approvals ?? 0} of ${r.min_approvals ?? 1} — nobody has decided yet`}</dd>
+        </div>
+        <div className="flex gap-2">
+          <dt className="w-20 shrink-0 text-faint">Window</dt>
+          <dd className="min-w-0 flex-1 text-fg">
+            {session.granted_until
+              ? `until ${new Date(session.granted_until).toLocaleString()}`
+              : "no fixed window"}
+          </dd>
+        </div>
+      </dl>
     </div>
   );
 }

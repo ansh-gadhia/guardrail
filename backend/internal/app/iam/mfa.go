@@ -53,6 +53,7 @@ func (s *Service) BeginTOTPEnrollment(ctx context.Context, actor iam.Claims) (*M
 	// disabled" cannot be answered from the log — only guessed at.
 	s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "mfa.enroll.begin",
 		Category: audit.CategoryAuth, ActorID: &actor.UserID, ActorEmail: actor.Email,
+		TargetType: "user", TargetID: actor.UserID.String(),
 		Result: audit.ResultSuccess})
 
 	uri := s.totp.ProvisioningURI(s.mfaIssuer, actor.Email, secret)
@@ -92,6 +93,7 @@ func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, actor iam.Claims, c
 	}
 	s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "mfa.enroll",
 		Category: audit.CategoryAuth, ActorID: &actor.UserID, ActorEmail: actor.Email,
+		TargetType: "user", TargetID: actor.UserID.String(),
 		Result: audit.ResultSuccess})
 	return codes, nil
 }
@@ -178,6 +180,7 @@ func (s *Service) DisableMFA(ctx context.Context, actor iam.Claims, code string)
 	if !ok {
 		s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "mfa.disable",
 			Category: audit.CategoryAuth, ActorID: &actor.UserID, ActorEmail: actor.Email,
+			TargetType: "user", TargetID: actor.UserID.String(),
 			Result: audit.ResultFailure, Detail: map[string]any{"reason": "mfa_bad_code"}})
 		return iam.ErrMFAInvalidCode
 	}
@@ -186,6 +189,7 @@ func (s *Service) DisableMFA(ctx context.Context, actor iam.Claims, code string)
 	}
 	s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "mfa.disable",
 		Category: audit.CategoryAuth, ActorID: &actor.UserID, ActorEmail: actor.Email,
+		TargetType: "user", TargetID: actor.UserID.String(),
 		Result: audit.ResultSuccess})
 	return nil
 }
@@ -209,6 +213,7 @@ func (s *Service) RegenerateRecoveryCodes(ctx context.Context, actor iam.Claims)
 	}
 	s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "mfa.recovery_regenerate",
 		Category: audit.CategoryAuth, ActorID: &actor.UserID, ActorEmail: actor.Email,
+		TargetType: "user", TargetID: actor.UserID.String(),
 		Result: audit.ResultSuccess})
 	return codes, nil
 }

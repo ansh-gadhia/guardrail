@@ -1,16 +1,51 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { plausibleDate } from "@/lib/dates";
 import type { AuditRow } from "@/lib/types";
-import { PageHero, ErrorNote, EmptyState, StatusBadge, Select, Button, Skeleton, Drawer } from "@/components/ui";
+import { PageHero, ErrorNote, EmptyState, StatusBadge, Select, Button, Skeleton, Drawer, cn } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
-import { IconAudit, IconDownload, IconGlobe } from "@/components/icons";
+import {
+  IconAudit,
+  IconDownload,
+  IconGlobe,
+  IconDevices,
+  IconUsers,
+  IconKey,
+  IconSessions,
+  IconClipboard,
+  IconCheck,
+  IconShield,
+  IconFolder,
+} from "@/components/icons";
 import { toast } from "@/components/Toast";
 
 // A stable key per row — the audit feed has no primary id, so we pair the row's
 // index with its timestamp to keep React keys and selection stable across sorts.
 type Row = AuditRow & { _k: string };
+
+/* ---- Outcome ----------------------------------------------------------------
+   The log is a record of decisions, so the outcome is the one thing a reviewer
+   scans for. It used to live only in a badge at the far right — the last thing
+   read on a row, a hundred rows down. Every row now also carries a rail on its
+   leading edge tinted by outcome, so refusals and failures form a visible rhythm
+   down the left of the table before a single word is read.
+
+   Deliberately per-row, not a continuous spine: the table sorts, and a rail that
+   implied the rows were still in chain order would become a lie the moment
+   somebody clicked a column header. */
+const RAIL: Record<string, string> = {
+  success: "border-l-2 border-l-success/40",
+  pending: "border-l-2 border-l-warn/70",
+  denied: "border-l-2 border-l-danger/70",
+  failure: "border-l-2 border-l-danger/70",
+};
+const NODE: Record<string, string> = {
+  success: "bg-success/55",
+  pending: "bg-warn",
+  denied: "bg-danger",
+  failure: "bg-danger",
+};
 
 export function AuditPage() {
   const [action, setAction] = useState("");
@@ -45,13 +80,18 @@ export function AuditPage() {
       key: "ts",
       header: "Time",
       value: (r) => r.ts,
-      cell: (r) => <span className="whitespace-nowrap text-xs tabular-nums text-faint">{fmtAbs(r.ts)}</span>,
+      cell: (r) => (
+        <span className="flex items-center gap-2.5">
+          <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", NODE[r.result] ?? "bg-line-strong")} />
+          <span className="whitespace-nowrap text-xs tabular-nums text-faint">{fmtAbs(r.ts)}</span>
+        </span>
+      ),
     },
     {
       key: "action",
       header: "Action",
       value: (r) => r.action,
-      cell: (r) => <span className="font-mono text-xs text-fg">{r.action}</span>,
+      cell: (r) => <ActionName action={r.action} />,
     },
     {
       key: "category",
@@ -69,12 +109,8 @@ export function AuditPage() {
     {
       key: "target",
       header: "Target",
-      value: (r) => (r.target_type ? `${r.target_type}:${r.target_id}` : ""),
-      cell: (r) => (
-        <span className="font-mono text-2xs text-faint">
-          {r.target_type ? `${r.target_type}:${r.target_id.slice(0, 8)}` : "—"}
-        </span>
-      ),
+      value: (r) => targetSortValue(r),
+      cell: (r) => <TargetCell row={r} />,
     },
     {
       key: "ip",
@@ -143,6 +179,7 @@ export function AuditPage() {
           columns={columns}
           rows={rows}
           rowKey={(r) => r._k}
+          rowClassName={(r) => RAIL[r.result] ?? "border-l-2 border-l-transparent"}
           searchPlaceholder="Search events…"
           pageSize={15}
           exportName="guardrail-audit"
@@ -173,6 +210,75 @@ export function AuditPage() {
   );
 }
 
+/* ---- Action name ------------------------------------------------------------
+   Actions are dotted keys — `approval.requested`, `auth.login`. Dimming the
+   namespace lets the eye land on the verb, which is the part that differs
+   between two adjacent rows in the same namespace. */
+function ActionName({ action }: { action: string }) {
+  const dot = action.indexOf(".");
+  if (dot < 0) return <span className="font-mono text-xs text-fg">{action}</span>;
+  return (
+    <span className="font-mono text-xs">
+      <span className="text-faint">{action.slice(0, dot + 1)}</span>
+      <span className="text-fg">{action.slice(dot + 1)}</span>
+    </span>
+  );
+}
+
+/* ---- Target -----------------------------------------------------------------
+   The target used to render as `device:baaf24df` — a type and eight hex
+   characters, which tells a reviewer nothing without going and looking it up
+   somewhere else. The server now resolves it to the name that same reviewer
+   would recognise, and this renders the name with a glyph for its kind.
+
+   Four states, all of them real, none of them an unexplained blank:
+     resolved   the name, with a kind glyph
+     purged     the subject is gone — the short id in mono, so it can still be
+                matched against a backup or an export
+     self       the target IS the actor (signing in, changing your own password).
+                Saying "self" is information; an em-dash reads as missing data,
+                which is what made the column look broken.
+     none       the action genuinely acts on no single record. */
+const TARGET_ICON: Record<string, ComponentType<{ size?: number; className?: string }>> = {
+  device: IconDevices,
+  user: IconUsers,
+  credential: IconKey,
+  session: IconSessions,
+  role: IconShield,
+  group: IconFolder,
+};
+
+function TargetCell({ row }: { row: Row }) {
+  const { target_type: type, target_id: id, target_label: label } = row;
+
+  if (!type || !id) return <span className="text-2xs text-faint">—</span>;
+  if (isSelf(row)) return <span className="text-xs italic text-faint">self</span>;
+
+  const Icon = TARGET_ICON[type];
+  return (
+    <span className="flex min-w-0 items-center gap-1.5">
+      {Icon && <Icon size={13} className="shrink-0 text-faint" />}
+      {label ? (
+        <span className="truncate text-sm text-fg">{label}</span>
+      ) : (
+        <span className="truncate font-mono text-2xs text-faint" title={`${type} ${id}`}>
+          {id.slice(0, 8)}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** A self-directed action: the thing acted on is the account doing the acting. */
+function isSelf(row: AuditRow): boolean {
+  return row.target_type === "user" && !!row.actor && row.target_label === row.actor;
+}
+
+function targetSortValue(row: Row): string {
+  if (isSelf(row)) return "self";
+  return row.target_label || (row.target_type ? `${row.target_type}:${row.target_id}` : "");
+}
+
 /* ---- Event detail drawer ---------------------------------------------------
    Click any row to inspect the whole event: who, what, from where, on what, and
    the structured payload the action recorded (a device name, a session id,
@@ -180,9 +286,10 @@ export function AuditPage() {
 function AuditDetailDrawer({ event, onClose }: { event: Row; onClose: () => void }) {
   const dt = plausibleDate(event.ts);
   const detailEntries = Object.entries(event.detail ?? {});
+  const TargetIcon = TARGET_ICON[event.target_type];
 
   return (
-    <Drawer title={event.action} subtitle={event.category || "event"} icon={IconAudit} onClose={onClose}>
+    <Drawer title={event.action} subtitle={event.category || "event"} icon={IconAudit} onClose={onClose} width="max-w-lg">
       <div className="space-y-5">
         <div className="flex items-center gap-2">
           <StatusBadge value={event.result} />
@@ -199,12 +306,21 @@ function AuditDetailDrawer({ event, onClose }: { event: Row; onClose: () => void
             <span className="font-mono text-xs text-fg">{event.action}</span>
           </DRow>
           <DRow label="Target">
-            {event.target_type ? (
-              <span className="break-all font-mono text-xs text-fg">
-                {event.target_type}:{event.target_id}
+            {!event.target_type || !event.target_id ? (
+              <span className="text-xs text-faint">
+                This action acts on no single record, so it has no target.
               </span>
             ) : (
-              "—"
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1.5">
+                  {TargetIcon && <TargetIcon size={14} className="shrink-0 text-faint" />}
+                  <span className="min-w-0 truncate text-sm text-fg">
+                    {event.target_label || <span className="text-faint">no longer exists</span>}
+                  </span>
+                  {isSelf(event) && <span className="shrink-0 text-2xs italic text-faint">· the actor's own account</span>}
+                </div>
+                <CopyableID label={event.target_type} value={event.target_id} />
+              </div>
             )}
           </DRow>
           <DRow label="Source IP">
@@ -236,6 +352,34 @@ function AuditDetailDrawer({ event, onClose }: { event: Row; onClose: () => void
         </p>
       </div>
     </Drawer>
+  );
+}
+
+/* The id is what you paste into a support ticket or another query, so it is kept
+   — but demoted below the name, and made copyable, because reading 36 hex
+   characters off a screen is not something anybody should be asked to do. */
+function CopyableID({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void navigator.clipboard?.writeText(value).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1400);
+        });
+      }}
+      className="group inline-flex max-w-full items-center gap-1.5 rounded-md border border-line bg-surface-2/50 px-1.5 py-0.5 text-left transition hover:border-line-strong"
+      title="Copy id"
+    >
+      <span className="shrink-0 text-2xs uppercase tracking-wider text-faint">{label}</span>
+      <span className="truncate font-mono text-2xs text-muted">{value}</span>
+      {copied ? (
+        <IconCheck size={11} className="shrink-0 text-success" />
+      ) : (
+        <IconClipboard size={11} className="shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100" />
+      )}
+    </button>
   );
 }
 

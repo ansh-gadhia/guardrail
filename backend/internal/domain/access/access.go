@@ -209,6 +209,14 @@ type Session struct {
 	EndedAt       *time.Time
 	EndReason     string
 	CreatedAt     time.Time
+	// LastActivityAt is the last time anything happened on this session. It is
+	// what the idle reaper measures from, and it is the only evidence that
+	// separates a session somebody worked in from one that was merely left open:
+	// a record closed twenty hours after its last activity was not twenty hours
+	// of access, and a console that shows only started/ended cannot tell the
+	// difference. Nil for protocols that do not report activity, and for sessions
+	// predating the column.
+	LastActivityAt *time.Time
 	// Watermark is the attribution text a gateway stamps over the device UI: who
 	// is in the session and which session it is. The broker fills it in from the
 	// acting principal at Connect time and it is stored with the session, so a

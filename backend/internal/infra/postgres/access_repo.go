@@ -24,7 +24,7 @@ const sessCols = `id, organization_id, user_id, device_id,
 	protocol, status,
 	granted_from, granted_until, COALESCE(host(client_ip),''), COALESCE(user_agent,''),
 	COALESCE(gateway_node,''), started_at, ended_at, COALESCE(end_reason,''), created_at,
-	COALESCE(watermark,'')`
+	COALESCE(watermark,''), last_activity_at`
 
 func scanSession(row pgx.Row) (*access.Session, error) {
 	var s access.Session
@@ -35,7 +35,7 @@ func scanSession(row pgx.Row) (*access.Session, error) {
 		&s.GatewayNode, &s.StartedAt, &s.EndedAt, &s.EndReason, &s.CreatedAt,
 		// Empty for a session predating the column; WatermarkOr then falls back to
 		// the session id, which is what those sessions were actually drawn with.
-		&s.Watermark); err != nil {
+		&s.Watermark, &s.LastActivityAt); err != nil {
 		return nil, err
 	}
 	s.Protocol = access.Protocol(proto)
@@ -84,7 +84,7 @@ const sessColsQ = `s.id, s.organization_id, s.user_id, s.device_id,
 	s.protocol, s.status,
 	s.granted_from, s.granted_until, COALESCE(host(s.client_ip),''), COALESCE(s.user_agent,''),
 	COALESCE(s.gateway_node,''), s.started_at, s.ended_at, COALESCE(s.end_reason,''), s.created_at,
-	COALESCE(s.watermark,'')`
+	COALESCE(s.watermark,''), s.last_activity_at`
 
 // sessDeviceNameSQL is the device label for a listing row.
 //
@@ -192,7 +192,7 @@ func (r *AccessSessionRepo) ListView(ctx context.Context, sc access.Scope, f acc
 				&v.DeviceName, &v.DeviceType, &v.DeviceAddress, &proto, &status,
 				&v.GrantedFrom, &v.GrantedUntil, &v.ClientIP, &v.UserAgent,
 				&v.GatewayNode, &v.StartedAt, &v.EndedAt, &v.EndReason, &v.CreatedAt,
-				&v.Watermark, &v.UserEmail, &total); err != nil {
+				&v.Watermark, &v.LastActivityAt, &v.UserEmail, &total); err != nil {
 				return err
 			}
 			v.Protocol = access.Protocol(proto)
@@ -310,9 +310,15 @@ func (r *AccessSessionRepo) CountActive(ctx context.Context, sc access.Scope) (i
 func (r *AccessSessionRepo) ExpireIdle(ctx context.Context, now time.Time) ([]access.ExpiredSession, error) {
 	var out []access.ExpiredSession
 	err := r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		// Same again: an idle session died one idle-timeout after the last thing
+		// that happened on it, which is a time the row already knows. The reaper is
+		// the thing that notices, not the thing that decides when it ended.
 		rows, err := tx.Query(ctx, `
 			UPDATE access_sessions s
-			SET status='expired', ended_at=$1, end_reason='idle_timeout'
+			SET status='expired',
+			    ended_at = COALESCE(s.last_activity_at, s.started_at, s.created_at)
+			               + make_interval(mins => d.idle_timeout_minutes),
+			    end_reason='idle_timeout'
 			FROM devices d
 			WHERE s.device_id = d.id
 			  AND s.status = 'active'
@@ -350,8 +356,15 @@ func (r *AccessSessionRepo) TouchActivity(ctx context.Context, id uuid.UUID, at 
 func (r *AccessSessionRepo) ExpireOverdue(ctx context.Context, now time.Time) (int, error) {
 	var n int
 	err := r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		// ended_at is granted_until, NOT the moment the reaper noticed. Access was
+		// authorized to exactly that instant and no further; stamping "now" records
+		// however long the reaper happened to be late as time the session was open.
+		// That is not a small error — the reaper only runs while the API does, so a
+		// host that is off overnight adds the whole outage to every session that
+		// lapsed during it. One session on this box reads as 21h when its window was
+		// an hour and its last activity was four seconds in.
 		ct, err := tx.Exec(ctx, `
-			UPDATE access_sessions SET status='expired', ended_at=$1, end_reason='window_expired'
+			UPDATE access_sessions SET status='expired', ended_at=granted_until, end_reason='window_expired'
 			WHERE status='active' AND granted_until IS NOT NULL AND granted_until < $1`, now)
 		if err != nil {
 			return err

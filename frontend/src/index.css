@@ -35,6 +35,10 @@
     --shadow-strength: 0.08;
     --aura-1: var(--accent);
     --aura-2: var(--info);
+    /* Dialog scrim. Tinted with the page's own ink rather than pure black, so
+       the surface behind a dialog reads as receding instead of as a hole. */
+    --scrim: 17 24 39;
+    --scrim-alpha: 0.42;
   }
 
   :root.dark {
@@ -60,6 +64,8 @@
     --grad-to: 6 182 212; /* cyan-500 */
     --shadow-color: 0 0 0;
     --shadow-strength: 0.4;
+    --scrim: 6 8 14;
+    --scrim-alpha: 0.66;
   }
 
   body {

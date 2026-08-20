@@ -35,7 +35,8 @@ func TestGenerateCSV_Audit(t *testing.T) {
 	ts := time.Date(2026, 7, 14, 10, 30, 0, 0, time.UTC)
 	store := &fakeStore{rows: []AuditRow{
 		{Timestamp: ts, ActorEmail: "op@corp", Action: "device.create", Category: "device",
-			TargetType: "device", TargetID: "d-1", IP: "10.0.0.1", Result: "success"},
+			TargetType: "device", TargetID: "d-1", TargetLabel: "core-switch-1",
+			IP: "10.0.0.1", Result: "success"},
 	}}
 	svc := NewService(store)
 
@@ -47,10 +48,10 @@ func TestGenerateCSV_Audit(t *testing.T) {
 		t.Fatalf("filename = %q", filename)
 	}
 	out := string(data)
-	if !strings.HasPrefix(out, "timestamp,actor,action,category,target_type,target_id,ip,result") {
+	if !strings.HasPrefix(out, "timestamp,actor,action,category,target_type,target_id,target,ip,result") {
 		t.Fatalf("missing header row: %q", out)
 	}
-	if !strings.Contains(out, "2026-07-14T10:30:00Z,op@corp,device.create,device,device,d-1,10.0.0.1,success") {
+	if !strings.Contains(out, "2026-07-14T10:30:00Z,op@corp,device.create,device,device,d-1,core-switch-1,10.0.0.1,success") {
 		t.Fatalf("missing data row: %q", out)
 	}
 }

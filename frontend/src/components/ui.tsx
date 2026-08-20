@@ -1,6 +1,7 @@
 import type { ReactNode, ComponentType, ButtonHTMLAttributes, InputHTMLAttributes, SelectHTMLAttributes, TextareaHTMLAttributes } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { IconX } from "./icons";
+import { Portal, useDialog, Z } from "./Overlay";
 
 type IconType = ComponentType<{ size?: number; className?: string }>;
 
@@ -339,39 +340,54 @@ export function Modal({
   icon?: IconType;
   size?: keyof typeof MODAL_WIDTH;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const panel = useDialog(onClose);
+  const titleID = useId();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-fadein" onClick={onClose} />
+    <Portal>
       <div
-        className={cn(
-          "relative z-10 w-full overflow-hidden rounded-2xl border border-line bg-surface shadow-md animate-slideup",
-          MODAL_WIDTH[size],
-        )}
+        className="fixed inset-0 flex items-center justify-center p-4"
+        style={{ zIndex: Z.dialog }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleID}
       >
-        <Hairline />
-        <div className="flex items-center justify-between border-b border-line px-5 py-4">
-          <div className="flex items-center gap-3">
-            {Icon && (
-              <span className="grid h-8 w-8 place-items-center rounded-lg bg-accent-soft text-accent ring-1 ring-inset ring-accent/15">
-                <Icon size={16} />
-              </span>
-            )}
-            <h2 className="text-base font-semibold text-fg">{title}</h2>
+        <div className="absolute inset-0 bg-scrim backdrop-blur-sm animate-fadein" onClick={onClose} />
+        <div
+          ref={panel}
+          tabIndex={-1}
+          className={cn(
+            "relative z-10 flex max-h-[min(85vh,52rem)] w-full flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-overlay outline-none animate-modal-in",
+            MODAL_WIDTH[size],
+          )}
+        >
+          <Hairline />
+          <div className="flex shrink-0 items-center justify-between border-b border-line px-5 py-4">
+            <div className="flex min-w-0 items-center gap-3">
+              {Icon && (
+                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent ring-1 ring-inset ring-accent/15">
+                  <Icon size={16} />
+                </span>
+              )}
+              <h2 id={titleID} className="truncate font-display text-base font-semibold tracking-tight text-fg">
+                {title}
+              </h2>
+            </div>
+            <button
+              className="rounded-lg p-1 text-faint transition hover:bg-surface-2 hover:text-fg"
+              onClick={onClose}
+              aria-label="Close"
+            >
+              <IconX size={18} />
+            </button>
           </div>
-          <button className="rounded-lg p-1 text-faint transition hover:bg-surface-2 hover:text-fg" onClick={onClose} aria-label="Close">
-            <IconX size={18} />
-          </button>
+          <div className="min-h-0 flex-1 overflow-auto px-5 py-4">{children}</div>
+          {footer && (
+            <div className="flex shrink-0 justify-end gap-2 border-t border-line bg-surface-2/40 px-5 py-4">{footer}</div>
+          )}
         </div>
-        <div className="max-h-[70vh] overflow-auto px-5 py-4">{children}</div>
-        {footer && <div className="flex justify-end gap-2 border-t border-line bg-surface-2/40 px-5 py-4">{footer}</div>}
       </div>
-    </div>
+    </Portal>
   );
 }
 
@@ -386,6 +402,7 @@ export function Drawer({
   children,
   footer,
   icon: Icon,
+  width = "max-w-md",
 }: {
   title: string;
   subtitle?: string;
@@ -393,37 +410,60 @@ export function Drawer({
   children: ReactNode;
   footer?: ReactNode;
   icon?: IconType;
+  /** Tailwind max-width for the panel. Detail panels read better wider. */
+  width?: string;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const panel = useDialog(onClose);
+  const titleID = useId();
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-fadein" onClick={onClose} />
-      <div className="relative z-10 flex h-full w-full max-w-md flex-col border-l border-line bg-surface shadow-overlay animate-drawer-in">
-        <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
-          <div className="flex min-w-0 items-center gap-3">
-            {Icon && (
-              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent ring-1 ring-inset ring-accent/15">
-                <Icon size={16} />
-              </span>
-            )}
-            <div className="min-w-0">
-              <h2 className="truncate font-display text-base font-semibold tracking-tight text-fg">{title}</h2>
-              {subtitle && <p className="truncate text-xs text-muted">{subtitle}</p>}
+    <Portal>
+      <div
+        className="fixed inset-0 flex justify-end"
+        style={{ zIndex: Z.dialog }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleID}
+      >
+        <div className="absolute inset-0 bg-scrim backdrop-blur-sm animate-fadein" onClick={onClose} />
+        <div
+          ref={panel}
+          tabIndex={-1}
+          className={cn(
+            "relative z-10 flex h-full w-full flex-col overflow-hidden border-l border-line bg-surface shadow-overlay outline-none animate-drawer-in",
+            width,
+          )}
+        >
+          <Hairline />
+          <div className="flex shrink-0 items-start justify-between gap-3 border-b border-line px-5 py-4">
+            <div className="flex min-w-0 items-center gap-3">
+              {Icon && (
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-accent-soft text-accent ring-1 ring-inset ring-accent/15">
+                  <Icon size={17} />
+                </span>
+              )}
+              <div className="min-w-0">
+                <h2 id={titleID} className="truncate font-display text-base font-semibold tracking-tight text-fg">
+                  {title}
+                </h2>
+                {subtitle && <p className="truncate text-xs text-muted">{subtitle}</p>}
+              </div>
             </div>
+            <button
+              className="rounded-lg p-1 text-faint transition hover:bg-surface-2 hover:text-fg"
+              onClick={onClose}
+              aria-label="Close"
+            >
+              <IconX size={18} />
+            </button>
           </div>
-          <button className="rounded-lg p-1 text-faint transition hover:bg-surface-2 hover:text-fg" onClick={onClose} aria-label="Close">
-            <IconX size={18} />
-          </button>
+          <div className="min-h-0 flex-1 overflow-auto px-5 py-4">{children}</div>
+          {footer && (
+            <div className="flex shrink-0 justify-end gap-2 border-t border-line bg-surface-2/40 px-5 py-3">{footer}</div>
+          )}
         </div>
-        <div className="flex-1 overflow-auto px-5 py-4">{children}</div>
-        {footer && <div className="flex justify-end gap-2 border-t border-line bg-surface-2/40 px-5 py-3">{footer}</div>}
       </div>
-    </div>
+    </Portal>
   );
 }
 

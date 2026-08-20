@@ -24,6 +24,8 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (*TokenPair, error) 
 	if s.throttle != nil {
 		ok, _, err := s.throttle.Allow(ctx, throttleKey)
 		if err == nil && !ok {
+			// No target: a throttled attempt names an email, and there may be no
+			// user behind it. Inventing one would be worse than leaving it blank.
 			s.record(ctx, audit.Event{Action: "auth.login", Category: audit.CategoryAuth,
 				ActorEmail: email.String(), IP: in.Meta.IP, UserAgent: in.Meta.UserAgent,
 				Result: audit.ResultDenied, Detail: map[string]any{"reason": "throttled"}})
@@ -157,7 +159,8 @@ func (s *Service) Refresh(ctx context.Context, rawToken string, meta ReqMeta) (*
 	if sess.RevokedAt != nil {
 		_ = s.sessions.RevokeFamily(ctx, sess.FamilyID, now)
 		s.record(ctx, audit.Event{Action: "auth.refresh", Category: audit.CategoryAuth,
-			ActorID: &sess.UserID, IP: meta.IP, UserAgent: meta.UserAgent,
+			ActorID: &sess.UserID, TargetType: "user", TargetID: sess.UserID.String(),
+			IP: meta.IP, UserAgent: meta.UserAgent,
 			Result: audit.ResultFailure, Detail: map[string]any{"reason": "refresh_reuse"}})
 		return nil, iam.ErrRefreshReuse
 	}
@@ -179,6 +182,7 @@ func (s *Service) Refresh(ctx context.Context, rawToken string, meta ReqMeta) (*
 	}
 	s.record(ctx, audit.Event{OrganizationID: &user.OrganizationID, Action: "auth.refresh",
 		Category: audit.CategoryAuth, ActorID: &user.ID, ActorEmail: user.Email.String(),
+		TargetType: "user", TargetID: user.ID.String(),
 		IP: meta.IP, UserAgent: meta.UserAgent, Result: audit.ResultSuccess})
 	return pair, nil
 }
@@ -191,7 +195,8 @@ func (s *Service) Logout(ctx context.Context, rawToken string, meta ReqMeta) err
 	}
 	_ = s.sessions.RevokeFamily(ctx, sess.FamilyID, s.clock.Now())
 	s.record(ctx, audit.Event{Action: "auth.logout", Category: audit.CategoryAuth,
-		ActorID: &sess.UserID, IP: meta.IP, UserAgent: meta.UserAgent, Result: audit.ResultSuccess})
+		ActorID: &sess.UserID, TargetType: "user", TargetID: sess.UserID.String(),
+		IP: meta.IP, UserAgent: meta.UserAgent, Result: audit.ResultSuccess})
 	return nil
 }
 
@@ -251,7 +256,9 @@ func (s *Service) pwEvent(u *iam.User, meta ReqMeta, result audit.Result, reason
 	}
 	return audit.Event{
 		OrganizationID: &u.OrganizationID, Action: "auth.password_change", Category: audit.CategoryAuth,
-		ActorID: &u.ID, ActorEmail: u.Email.String(), IP: meta.IP, UserAgent: meta.UserAgent,
+		ActorID: &u.ID, ActorEmail: u.Email.String(),
+		TargetType: "user", TargetID: u.ID.String(),
+		IP: meta.IP, UserAgent: meta.UserAgent,
 		Result: result, Detail: detail,
 	}
 }
@@ -300,7 +307,13 @@ func (s *Service) authEvent(u *iam.User, meta ReqMeta, result audit.Result, reas
 	}
 	return audit.Event{
 		OrganizationID: &u.OrganizationID, Action: "auth.login", Category: audit.CategoryAuth,
-		ActorID: &u.ID, ActorEmail: u.Email.String(), IP: meta.IP, UserAgent: meta.UserAgent,
+		ActorID: &u.ID, ActorEmail: u.Email.String(),
+		// The account being signed in to. Identical to the actor on a normal
+		// login, which is exactly what the console collapses to "self" — but it
+		// has to be recorded to be exported, and an SSO or admin-driven flow
+		// added later would make the two diverge.
+		TargetType: "user", TargetID: u.ID.String(),
+		IP: meta.IP, UserAgent: meta.UserAgent,
 		Result: result, Detail: detail,
 	}
 }

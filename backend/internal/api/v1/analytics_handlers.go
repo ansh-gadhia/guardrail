@@ -78,7 +78,8 @@ func (h *AnalyticsHandler) audit(c *gin.Context) {
 	for _, r := range rows {
 		out = append(out, gin.H{
 			"ts": r.Timestamp, "actor": r.ActorEmail, "action": r.Action, "category": r.Category,
-			"target_type": r.TargetType, "target_id": r.TargetID, "ip": r.IP,
+			"target_type": r.TargetType, "target_id": r.TargetID, "target_label": r.TargetLabel,
+			"ip":         r.IP,
 			"user_agent": r.UserAgent, "result": r.Result, "detail": r.Detail,
 		})
 	}

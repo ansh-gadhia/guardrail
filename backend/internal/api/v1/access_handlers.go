@@ -531,8 +531,17 @@ func sessionDTO(s *domaccess.Session) gin.H {
 	if s.EndedAt != nil {
 		dto["ended_at"] = rfc3339UTC(*s.EndedAt)
 	}
+	if s.GrantedFrom != nil {
+		dto["granted_from"] = rfc3339UTC(*s.GrantedFrom)
+	}
 	if s.GrantedUntil != nil {
 		dto["granted_until"] = rfc3339UTC(*s.GrantedUntil)
+	}
+	// The last thing that happened on the session. Without it the console can
+	// only show start and end, which for a session closed long after it went
+	// quiet describes a period of access that did not happen.
+	if s.LastActivityAt != nil {
+		dto["last_activity_at"] = rfc3339UTC(*s.LastActivityAt)
 	}
 	if s.EndReason != "" {
 		dto["end_reason"] = s.EndReason

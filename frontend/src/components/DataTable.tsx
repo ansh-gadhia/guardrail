@@ -63,6 +63,12 @@ interface DataTableProps<T> {
   exportName?: string;
   emptyMessage?: string;
   onRowClick?: (row: T) => void;
+  /**
+   * Extra classes per row, for tables where the row itself carries state the
+   * reader should see before reading any cell — an audit log's outcome, say.
+   * Returned classes are appended, so they win over the base row styling.
+   */
+  rowClassName?: (row: T) => string | undefined;
   toolbar?: ReactNode;
   /** When set, the server owns paging/search/sort. */
   server?: ServerMode<T>;
@@ -82,6 +88,7 @@ export function DataTable<T>({
   exportName,
   emptyMessage = "No results.",
   onRowClick,
+  rowClassName,
   toolbar,
   server,
 }: DataTableProps<T>) {
@@ -340,7 +347,12 @@ export function DataTable<T>({
                 return (
                   <tr
                     key={id}
-                    className={cn("transition hover:bg-surface-2/50", onRowClick && "cursor-pointer", selected.has(id) && "bg-accent/5")}
+                    className={cn(
+                      "transition hover:bg-surface-2/50",
+                      onRowClick && "cursor-pointer",
+                      selected.has(id) && "bg-accent/5",
+                      rowClassName?.(row),
+                    )}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
                   >
                     {selectable && (

@@ -183,6 +183,56 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   groups, because the target is chosen once. Import once per target.
 
 ### Fixed
+- **Modals and drawers were painted over by the header and the footer.** The
+  shell renders pages into `<main class="isolate">`, and `isolation: isolate`
+  creates a stacking context — so every overlay a page opened was sealed inside
+  it, and its `z-50` was only ever compared against its siblings in there. The
+  header (`z-30`) and footer (`z-20`) sit outside that context and therefore
+  painted above the whole of `<main>`, slicing the top and bottom off every
+  dialog in the application: ten files render a `<Modal>`, and all of them were
+  affected, not just the audit drawer that showed it. Raising the number could
+  not have fixed it, because the comparison never happened. Overlays now portal
+  to `document.body`, on one declared z-scale (dialog 80, palette 90, toast
+  100). They also lock the page behind them, return focus to whatever opened
+  them, and keep Tab inside the panel — which matters more once the panel is no
+  longer in the page's DOM order.
+- **The audit log's Target column was a type and eight hex characters.**
+  `device:baaf24df` tells a reviewer nothing without going and looking it up
+  somewhere else. The server now resolves the target to the name that reviewer
+  would recognise — device name, user email, credential name, session, role,
+  asset group — in the same query that reads the events, so the CSV export and
+  any API client get it too. Deleted subjects still resolve: naming what an event
+  happened to is the whole job, and a device being removed afterwards is exactly
+  when somebody comes looking. The console shows the name with a glyph for its
+  kind, keeps the id copyable in the detail panel, and distinguishes the three
+  cases that used to look identical — a resolved name, a subject that no longer
+  exists, and an action whose target is the actor's own account ("self").
+- **Most audit events had no target at all.** Sign-in, sign-out, token refresh,
+  password change and every MFA action recorded none, so the column was empty on
+  the large majority of rows with nothing to say whether that was a bug. They now
+  name the account they act on. `auth.session_revoke` gained the most: its target
+  is whoever was signed out, which is usually not the actor, and it was recorded
+  only inside the event's detail — blank in the column on precisely the rows
+  where it mattered.
+- **A session's duration counted time it was not authorized for.** It was
+  `ended_at - started_at`, and the reaper that closes a lapsed session only runs
+  while the API does — so a host that is off overnight leaves an expired session
+  sitting `active` until it comes back, and whatever closes it then stamps that
+  moment as the end. One session on this deployment read as **21h 11m** on a
+  one-hour window whose last recorded activity was four seconds in. Two fixes:
+  the reapers now stamp when access actually lapsed (`granted_until` for a window
+  expiry, last activity plus the idle timeout for an idle one) rather than
+  whenever they got round to noticing; and the console measures to whichever came
+  first, the record closing or authorization running out. Time past the window is
+  reported separately — "+21h past window" — rather than folded in or hidden,
+  because a session still open after its grant expired is a finding.
+- **A session could not say whether it had been approved.** Opening one showed
+  who and when but nothing about the decision that allowed it, even though the
+  approval request records exactly that and is linked by `session_id`. Sessions
+  now carry an Authorization panel — the reason given, when it was asked, when it
+  was decided and how long that took, who decided it, how long was granted, and
+  whether it was emergency access — alongside the last activity and the
+  authorized window.
 - **The Audit Log said access was denied when it had been approved.** Raising an
   access request was recorded as `approval.requested` with the outcome `denied`,
   so the log showed "approval.requested — denied" directly above the

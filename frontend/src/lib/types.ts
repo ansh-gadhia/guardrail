@@ -320,7 +320,12 @@ export interface Session {
   started_at?: string;
   ended_at?: string;
   created_at?: string;
+  granted_from?: string;
   granted_until?: string;
+  // The last time anything happened on the session. It is the only field that
+  // separates a session somebody worked in from one that was left open: a record
+  // closed long after this was not that long of access.
+  last_activity_at?: string;
   end_reason?: string;
 }
 
@@ -424,6 +429,12 @@ export interface AuditRow {
   category: string;
   target_type: string;
   target_id: string;
+  /**
+   * The target resolved to a name a person recognises — a device name, a user's
+   * email, a credential name. Empty when the target has been purged since, or
+   * when the action has no separate target; the console falls back to the id.
+   */
+  target_label?: string;
   ip: string;
   user_agent?: string;
   result: string;

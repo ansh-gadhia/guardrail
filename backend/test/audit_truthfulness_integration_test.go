@@ -9,8 +9,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"time"
+
 	"github.com/guardrail/guardrail/internal/app/analytics"
 	appassets "github.com/guardrail/guardrail/internal/app/assets"
+	domaccess "github.com/guardrail/guardrail/internal/domain/access"
 	domassets "github.com/guardrail/guardrail/internal/domain/assets"
 	"github.com/guardrail/guardrail/internal/domain/audit"
 	domiam "github.com/guardrail/guardrail/internal/domain/iam"
@@ -116,5 +119,89 @@ func TestIntegration_RefusingToDisableRecordingIsAuditedAsDenied(t *testing.T) {
 	}
 	if rows[0].Result != string(audit.ResultDenied) {
 		t.Errorf("stored result = %q, want %q", rows[0].Result, audit.ResultDenied)
+	}
+}
+
+// The paged session listing scans its own column list by hand, in parallel with
+// scanSession, and the two are coupled only by a comment asking whoever edits
+// one to edit the other. Adding last_activity_at to the shared SQL and not to
+// this scanner turned GET /sessions into a 500 with no log line — the console
+// showed "Couldn't load session recordings" and nothing said why.
+//
+// So: list sessions for real. Any future column added to one side and not the
+// other fails here instead of in front of an operator.
+func TestIntegration_SessionListingScansEveryColumnItSelects(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+
+	sessions := postgres.NewAccessSessionRepo(pg)
+	sc := domaccess.Scope{OrganizationID: defaultOrgID}
+
+	// A session whose window lapsed long before the record was closed — the shape
+	// that reports broker downtime as access if the duration is end minus start.
+	suffix := uuid.NewString()[:8]
+	owner := &domiam.User{
+		ID: domiam.ID(uuid.New()), OrganizationID: domiam.ID(defaultOrgID),
+		Email:    domiam.NewEmail("span-" + suffix + "@test.local"),
+		Username: "span-" + suffix, AuthProvider: domiam.ProviderLocal, Status: "active",
+	}
+	if err := postgres.NewUserRepo(pg).Create(ctx,
+		domiam.TenantScope{OrganizationID: domiam.ID(defaultOrgID)}, owner); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	dev := &domassets.Device{
+		ID: uuid.New(), OrganizationID: defaultOrgID, Name: "span-" + suffix,
+		Host: "span-" + suffix + ".test", Port: 443, Scheme: "https", Status: "active",
+	}
+	if err := postgres.NewDeviceRepo(pg).Create(ctx,
+		domassets.Scope{OrganizationID: defaultOrgID}, dev); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+
+	start := time.Now().Add(-48 * time.Hour)
+	until := start.Add(time.Hour)
+	activity := start.Add(4 * time.Second)
+	sess := &domaccess.Session{
+		ID: uuid.New(), OrganizationID: defaultOrgID, UserID: uuid.UUID(owner.ID), DeviceID: dev.ID,
+		Protocol: domaccess.ProtocolHTTPS, Status: domaccess.StatusActive,
+		GrantedFrom: &start, GrantedUntil: &until, StartedAt: &start, LastActivityAt: &activity,
+		DeviceName: dev.Name,
+	}
+	if err := sessions.Create(ctx, sc, sess); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	// Create does not persist activity — nothing has happened yet. TouchActivity
+	// is the real path, and it is what the idle reaper measures from.
+	if err := sessions.TouchActivity(ctx, sess.ID, activity); err != nil {
+		t.Fatalf("touch activity: %v", err)
+	}
+
+	views, _, err := sessions.ListView(ctx, sc, domaccess.SessionFilter{DeviceID: &dev.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("listing sessions failed — a selected column is not being scanned: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("listed %d sessions, want 1", len(views))
+	}
+	if views[0].LastActivityAt == nil {
+		t.Error("last_activity_at came back nil; the listing selects it but drops it on the floor")
+	}
+
+	// The reaper closes it at the moment authorization lapsed, not at the moment
+	// it noticed — which here is two days late.
+	if _, err := sessions.ExpireOverdue(ctx, time.Now()); err != nil {
+		t.Fatalf("ExpireOverdue: %v", err)
+	}
+	got, err := sessions.GetByID(ctx, sc, sess.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.EndedAt == nil {
+		t.Fatal("an overdue session was not expired")
+	}
+	if drift := got.EndedAt.Sub(until); drift > time.Second || drift < -time.Second {
+		t.Errorf("ended_at is %v from granted_until; a late reaper recorded %v of access that was never authorized",
+			drift, drift)
 	}
 }

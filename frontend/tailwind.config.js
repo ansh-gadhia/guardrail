@@ -27,6 +27,9 @@ export default {
         warn: token("--warn"),
         danger: token("--danger"),
         info: token("--info"),
+        // Dialog scrim. Carries its own alpha, so it is `bg-scrim` with no
+        // opacity modifier — the value is a theme decision, not a call site's.
+        scrim: "rgb(var(--scrim) / var(--scrim-alpha))",
         // Retained so any un-migrated markup keeps rendering.
         brand: { 50: "#f0fdfa", 100: "#ccfbf1", 200: "#99f6e4", 500: "#14b8a6", 600: "#0d9488", 700: "#0f766e" },
       },
@@ -62,11 +65,18 @@ export default {
         fadein: { from: { opacity: "0" }, to: { opacity: "1" } },
         slideup: { from: { opacity: "0", transform: "translateY(8px)" }, to: { opacity: "1", transform: "translateY(0)" } },
         shimmer: { "100%": { transform: "translateX(100%)" } },
+        // Dialogs arrive from slightly behind the page rather than sliding up
+        // from nowhere: the scale is what makes it read as "this came forward".
+        "modal-in": {
+          from: { opacity: "0", transform: "translateY(6px) scale(0.985)" },
+          to: { opacity: "1", transform: "translateY(0) scale(1)" },
+        },
         spin: { to: { transform: "rotate(360deg)" } },
       },
       animation: {
         fadein: "fadein 0.35s ease both",
         slideup: "slideup 0.4s cubic-bezier(0.22, 1, 0.36, 1) both",
+        "modal-in": "modal-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both",
       },
       fontFamily: {
         sans: ["Inter var", "Inter", "ui-sans-serif", "system-ui", "-apple-system", "Segoe UI", "Roboto", "sans-serif"],

@@ -268,6 +268,10 @@ type RequestFilter struct {
 	Status   RequestStatus
 	UserID   *uuid.UUID
 	DeviceID *uuid.UUID
+	// SessionID finds the request a given session was redeemed from — the answer
+	// to "was this access approved, by whom, and when", asked from the session
+	// rather than from the approval queue.
+	SessionID *uuid.UUID
 	// PendingOnly restricts to requests still awaiting a decision.
 	PendingOnly bool
 	// UnreviewedEmergency restricts to emergency access nobody has signed off.

@@ -140,6 +140,14 @@ func (h *AccessHandler) listRequests(c *gin.Context) {
 			f.UserID = &id
 		}
 	}
+	// Lets a session say how it was authorized. Scoping is unchanged: the service
+	// still narrows to the caller's own requests without approval:read, so this
+	// cannot be used to read somebody else's reason by guessing session ids.
+	if v := c.Query("session_id"); v != "" {
+		if id, err := uuid.Parse(v); err == nil {
+			f.SessionID = &id
+		}
+	}
 	list, err := h.svc.ListRequests(c.Request.Context(), actor, f)
 	if err != nil {
 		failAccess(c, err)

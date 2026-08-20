@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, problemDetail } from "@/lib/api";
-import { plausibleDate } from "@/lib/dates";
+import { plausibleDate, sessionSpan } from "@/lib/dates";
 import type { AssetGroup, Device, Session, UserRow, RecordingKind } from "@/lib/types";
 import { RECORDING_KIND_INFO } from "@/lib/types";
 import { useAuth } from "@/store/auth";
@@ -43,17 +43,14 @@ function relTime(iso?: string): string {
   if (h < 24) return `${h}h ago`;
   return `${Math.round(h / 24)}d ago`;
 }
-function duration(start?: string, end?: string): string {
-  if (!start) return "—";
-  const s = new Date(start).getTime();
-  const e = end ? new Date(end).getTime() : Date.now();
-  const ms = e - s;
-  if (Number.isNaN(ms) || ms < 0) return "—";
-  const sec = Math.round(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  if (m < 60) return `${m}m ${sec % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
+// How long access was actually held. Measured to whichever came first — the
+// record closing, or authorization running out — because the reaper that closes
+// a lapsed session only runs while the API does, so `ended - started` reports
+// broker downtime as access. See sessionSpan in lib/dates.
+function heldFor(s: Session): string {
+  const span = sessionSpan(s);
+  if (!span) return "—";
+  return span.overrun ? `${span.label}*` : span.label;
 }
 const startedOf = (s: Session) => s.started_at ?? s.created_at;
 
@@ -592,7 +589,7 @@ export function DeviceDetailPage() {
                     <span className="min-w-0 flex-1 truncate text-fg">{userEmail.get(s.user_id ?? "") ?? (s.user_id ?? "").slice(0, 8)}</span>
                     <StatusBadge value={s.status} />
                     <span className="whitespace-nowrap text-xs text-muted">{absLocal(startedOf(s))}</span>
-                    <span className="w-16 text-right font-mono text-xs tabular-nums text-muted">{duration(startedOf(s), s.ended_at)}</span>
+                    <span className="w-16 text-right font-mono text-xs tabular-nums text-muted">{heldFor(s)}</span>
                     <span className="inline-flex w-28 items-center justify-end gap-1 font-mono text-2xs text-faint">
                       <IconGlobe size={12} />{s.client_ip || "—"}
                     </span>

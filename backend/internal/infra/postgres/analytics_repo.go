@@ -210,14 +210,43 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 		whereSQL = "WHERE " + strings.Join(where, " AND ")
 	}
 	args = append(args, limit)
+	// The target is stored as a bare UUID, which is unreadable on a screen: a
+	// reviewer reading "device:baaf24df" has to go and look it up somewhere else
+	// before the row means anything. Resolve it to the name the same reviewer
+	// would recognise — device name, user email, credential name — in the query
+	// that reads the events, so the CSV export and any API client get it too.
+	//
+	// The lookups are deliberately NOT filtered on deleted_at. Naming the device
+	// an event happened to is the entire job here, and a device being deleted
+	// afterwards is exactly when somebody comes looking. A row whose subject has
+	// been purged resolves to nothing and the console falls back to the id.
+	//
+	// e is MATERIALIZED so the guarded cast below cannot be reordered above the
+	// filter: target_id is TEXT, and ::uuid on a value that is not one is an
+	// error, not a NULL.
 	query := fmt.Sprintf(`
-		SELECT ts, COALESCE(actor_email,''), action, category,
-		       COALESCE(target_type,''), COALESCE(target_id,''),
-		       COALESCE(host(ip),''), COALESCE(user_agent,''), result, detail
-		  FROM audit_events
-		  %s
-		 ORDER BY ts DESC, id DESC
-		 LIMIT $%d`, whereSQL, len(args))
+		WITH e AS MATERIALIZED (
+			SELECT ts, actor_email, action, category, target_type, target_id, ip,
+			       user_agent, result, detail, id,
+			       CASE WHEN target_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+			            THEN target_id::uuid END AS tid
+			  FROM audit_events
+			  %s
+			 ORDER BY ts DESC, id DESC
+			 LIMIT $%d
+		)
+		SELECT e.ts, COALESCE(e.actor_email,''), e.action, e.category,
+		       COALESCE(e.target_type,''), COALESCE(e.target_id,''),
+		       COALESCE(host(e.ip),''), COALESCE(e.user_agent,''), e.result, e.detail,
+		       COALESCE(d.name, u.email::text, c.name, sn.device_name, ro.name, g.name, '') AS target_label
+		  FROM e
+		  LEFT JOIN devices         d  ON e.target_type = 'device'     AND d.id  = e.tid
+		  LEFT JOIN users           u  ON e.target_type = 'user'       AND u.id  = e.tid
+		  LEFT JOIN credentials     c  ON e.target_type = 'credential' AND c.id  = e.tid
+		  LEFT JOIN access_sessions sn ON e.target_type = 'session'    AND sn.id = e.tid
+		  LEFT JOIN roles           ro ON e.target_type = 'role'       AND ro.id = e.tid
+		  LEFT JOIN asset_groups    g  ON e.target_type = 'group'      AND g.id  = e.tid
+		 ORDER BY e.ts DESC, e.id DESC`, whereSQL, len(args))
 
 	out := []analytics.AuditRow{}
 	err := r.scoped(ctx, s, func(tx pgx.Tx) error {
@@ -230,7 +259,8 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 			var a analytics.AuditRow
 			var detail []byte
 			if err := rows.Scan(&a.Timestamp, &a.ActorEmail, &a.Action, &a.Category,
-				&a.TargetType, &a.TargetID, &a.IP, &a.UserAgent, &a.Result, &detail); err != nil {
+				&a.TargetType, &a.TargetID, &a.IP, &a.UserAgent, &a.Result, &detail,
+				&a.TargetLabel); err != nil {
 				return fmt.Errorf("analytics: scan audit: %w", err)
 			}
 			if len(detail) > 0 {

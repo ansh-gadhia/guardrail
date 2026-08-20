@@ -756,10 +756,19 @@ func (s *Service) recordAuditDetail(ctx context.Context, actor iam.Claims, actio
 		sid := sess.ID
 		e.SessionID = &sid
 	}
-	// Same for the device: approval.reviewed carries no device at all, and a
-	// target of all-zeros reads as a real device that cannot be looked up.
+	// Same for the device. The recording events carry a session and no device, so
+	// TargetID took the zero DeviceID and every one of them named device
+	// 00000000-0000-0000-0000-000000000000 — a device that has never existed,
+	// under a target_type that says "device". Where there is no device but there
+	// is a session, the session IS the target and saying so is both true and more
+	// use than a blank; approval.reviewed has neither and gets no target at all.
 	if sess.DeviceID == uuid.Nil {
-		e.TargetType, e.TargetID = "", ""
+		switch {
+		case sess.ID != uuid.Nil:
+			e.TargetType, e.TargetID = "session", sess.ID.String()
+		default:
+			e.TargetType, e.TargetID = "", ""
+		}
 	}
 	_ = s.audit.Record(ctx, e)
 }

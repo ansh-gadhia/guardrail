@@ -146,6 +146,10 @@ func (r *RequestRepo) List(ctx context.Context, s access.Scope, f access.Request
 			args = append(args, *f.DeviceID)
 			q += ` AND r.device_id = $` + strconv.Itoa(len(args))
 		}
+		if f.SessionID != nil {
+			args = append(args, *f.SessionID)
+			q += ` AND r.session_id = $` + strconv.Itoa(len(args))
+		}
 		args = append(args, limit)
 		q += ` ORDER BY r.created_at DESC LIMIT $` + strconv.Itoa(len(args))
 

@@ -78,9 +78,15 @@ func (s *Service) RevokeSession(ctx context.Context, actor iam.Claims, familyID 
 	if err := s.sessions.RevokeFamily(ctx, familyID, s.clock.Now()); err != nil {
 		return err
 	}
+	// The target is whose session was cut, which is very often not the actor —
+	// an administrator signing somebody else out is the case this event exists
+	// for. It was recorded only inside Detail, so the Target column was blank on
+	// precisely the rows where it mattered most.
 	s.record(ctx, audit.Event{
 		OrganizationID: &orgID, Action: "auth.session_revoke", Category: audit.CategoryAuth,
-		ActorID: &actor.UserID, ActorEmail: actor.Email, IP: meta.IP, UserAgent: meta.UserAgent,
+		ActorID: &actor.UserID, ActorEmail: actor.Email,
+		TargetType: "user", TargetID: ownerID.String(),
+		IP: meta.IP, UserAgent: meta.UserAgent,
 		Result: audit.ResultSuccess,
 		Detail: map[string]any{"target_user": ownerID.String(), "family": familyID.String()},
 	})

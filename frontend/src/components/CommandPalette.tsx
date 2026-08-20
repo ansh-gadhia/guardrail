@@ -1,3 +1,4 @@
+import { Portal, Z } from "./Overlay";
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { api } from "@/lib/api";
 import type { SearchResults } from "@/lib/types";
@@ -91,7 +92,8 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
 
   let idx = -1;
   return (
-    <div className="fixed inset-0 z-[90] flex items-start justify-center p-4 pt-[12vh]" role="dialog" aria-modal="true" aria-label="Command palette">
+    <Portal>
+    <div className="fixed inset-0 flex items-start justify-center p-4 pt-[12vh]" style={{ zIndex: Z.palette }} role="dialog" aria-modal="true" aria-label="Command palette">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fadein" onClick={onClose} />
       <div className="relative z-10 w-full max-w-xl overflow-hidden rounded-2xl border border-line bg-surface shadow-md animate-slideup">
         <div className="flex items-center gap-3 border-b border-line px-4">
@@ -138,5 +140,6 @@ export function CommandPalette({ open, onClose, commands }: { open: boolean; onC
         </div>
       </div>
     </div>
+    </Portal>
   );
 }

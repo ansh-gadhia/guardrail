@@ -1,3 +1,4 @@
+import { Portal, Z } from "./Overlay";
 import { useEffect } from "react";
 import { create } from "zustand";
 import { cn } from "./ui";
@@ -80,10 +81,12 @@ function ToastCard({ t }: { t: Toast }) {
 export function Toaster() {
   const toasts = useToastStore((s) => s.toasts);
   return (
-    <div className="pointer-events-none fixed right-4 top-4 z-[100] flex flex-col gap-2">
+    <Portal>
+    <div className="pointer-events-none fixed right-4 top-4 flex flex-col gap-2" style={{ zIndex: Z.toast }}>
       {toasts.map((t) => (
         <ToastCard key={t.id} t={t} />
       ))}
     </div>
+    </Portal>
   );
 }
