@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, problemDetail } from "@/lib/api";
-import { plausibleDate, sessionSpan } from "@/lib/dates";
+import { absLocal, plausibleDate, relTime, startedOf } from "@/lib/dates";
 import type { AssetGroup, Device, Session, UserRow, RecordingKind } from "@/lib/types";
 import { RECORDING_KIND_INFO } from "@/lib/types";
 import { useAuth } from "@/store/auth";
@@ -12,11 +12,20 @@ import { DeviceStatusBadge } from "@/components/DeviceHealthDot";
 import { GroupPicker } from "@/components/GroupPicker";
 import { toast } from "@/components/Toast";
 import { DeviceAccessPolicy } from "@/components/DeviceAccessPolicy";
+import { SessionDetail, HeldCell } from "@/components/SessionDetail";
 import {
   deviceTypeLabel, RecordingToggle, DeliveryModeField, isWebScheme,
   PROTOCOLS, DEVICE_TYPES, defaultPortFor,
 } from "./DevicesPage";
 import { IconDevices, IconSessions, IconAudit, IconClock, IconGlobe, IconChevronRight, IconFilm, IconKey } from "@/components/icons";
+
+/** Outcome dot for the device's audit trail, matching the Audit Log's tones. */
+const AUDIT_DOT: Record<string, string> = {
+  success: "bg-success",
+  pending: "bg-warn",
+  denied: "bg-danger",
+  failure: "bg-danger",
+};
 
 interface DeviceAuditRow {
   ts: string;
@@ -28,31 +37,6 @@ interface DeviceAuditRow {
 }
 
 /* ---- time helpers (UTC in, local out; zero/invalid dates guarded via plausibleDate) ---- */
-function absLocal(iso?: string): string {
-  const d = plausibleDate(iso);
-  return d ? d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—";
-}
-function relTime(iso?: string): string {
-  const d = plausibleDate(iso);
-  if (!d) return iso ? "unknown" : "";
-  const s = Math.round((Date.now() - d.getTime()) / 1000);
-  if (s < 60) return "just now";
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
-}
-// How long access was actually held. Measured to whichever came first — the
-// record closing, or authorization running out — because the reaper that closes
-// a lapsed session only runs while the API does, so `ended - started` reports
-// broker downtime as access. See sessionSpan in lib/dates.
-function heldFor(s: Session): string {
-  const span = sessionSpan(s);
-  if (!span) return "—";
-  return span.overrun ? `${span.label}*` : span.label;
-}
-const startedOf = (s: Session) => s.started_at ?? s.created_at;
 
 /* Group membership, edited in place. Membership is an access decision — a device
    moving into a group grants every role scoped to that group — so it saves on
@@ -448,6 +432,10 @@ export function DeviceDetailPage() {
   const navigate = useNavigate();
   const has = useAuth((s) => s.has);
   const [editing, setEditing] = useState(false);
+  // A session opened from the Access history below. The same panel the
+  // Recordings page opens, shown here so a device's history is a way IN to
+  // its sessions rather than a list you then have to go and find elsewhere.
+  const [openSession, setOpenSession] = useState<Session | null>(null);
 
   const device = useQuery<Device>({
     queryKey: ["device", id],
@@ -575,7 +563,12 @@ export function DeviceDetailPage() {
             <DeviceAccessPolicy device={d} canEdit={has("device:write")} toBody={toDeviceBody} />
           </Panel>
 
-          <Panel title="Access history" icon={IconSessions} subtitle="Every brokered session to this device" bodyClassName="p-0">
+          <Panel
+            title="Access history"
+            icon={IconSessions}
+            subtitle="Every brokered session to this device — open one for its replay, activity and approval"
+            bodyClassName="p-0"
+          >
             {!has("session:read") ? (
               <div className="p-4"><EmptyState message="You don't have permission to view sessions." /></div>
             ) : sessions.isLoading ? (
@@ -585,15 +578,22 @@ export function DeviceDetailPage() {
             ) : (
               <div className="divide-y divide-line">
                 {(sessions.data ?? []).map((s) => (
-                  <div key={s.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-sm">
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setOpenSession(s)}
+                    className="group flex w-full flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-left text-sm transition hover:bg-surface-2/60"
+                    title="Open this session — replay, activity, and how it was authorized"
+                  >
                     <span className="min-w-0 flex-1 truncate text-fg">{userEmail.get(s.user_id ?? "") ?? (s.user_id ?? "").slice(0, 8)}</span>
                     <StatusBadge value={s.status} />
                     <span className="whitespace-nowrap text-xs text-muted">{absLocal(startedOf(s))}</span>
-                    <span className="w-16 text-right font-mono text-xs tabular-nums text-muted">{heldFor(s)}</span>
+                    <span className="w-auto text-right"><HeldCell session={s} /></span>
                     <span className="inline-flex w-28 items-center justify-end gap-1 font-mono text-2xs text-faint">
                       <IconGlobe size={12} />{s.client_ip || "—"}
                     </span>
-                  </div>
+                    <IconChevronRight size={14} className="shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100" />
+                  </button>
                 ))}
               </div>
             )}
@@ -608,19 +608,20 @@ export function DeviceDetailPage() {
               <EmptyState icon={IconAudit} message="No audit events recorded for this device." />
             ) : (
               <ol className="divide-y divide-line">
-                {(audit.data ?? []).map((a, i) => {
-                  const ok = (a.result || "").toLowerCase() === "success";
-                  return (
-                    <li key={i} className="flex items-center gap-3 px-4 py-2.5">
-                      <span className={cn("h-2 w-2 shrink-0 rounded-full", ok ? "bg-success" : "bg-danger")} />
-                      <span className="w-40 shrink-0 truncate font-mono text-xs text-accent">{a.action}</span>
-                      <span className="min-w-0 flex-1 truncate text-sm text-muted">{a.actor || "system"}</span>
-                      <span className="inline-flex items-center gap-1 whitespace-nowrap text-2xs text-faint">
-                        <IconClock size={12} />{relTime(a.ts)}
-                      </span>
-                    </li>
-                  );
-                })}
+                {(audit.data ?? []).map((a, i) => (
+                  <li key={i} className="flex items-center gap-3 px-4 py-2.5">
+                    {/* Anything-but-success was red, so a request merely waiting on an
+                        approver looked like a refusal — the same lie the Audit Log's
+                        badge used to tell. Pending is amber, and an outcome this
+                        panel does not know is grey rather than an accusation. */}
+                    <span className={cn("h-2 w-2 shrink-0 rounded-full", AUDIT_DOT[(a.result || "").toLowerCase()] ?? "bg-line-strong")} />
+                    <span className="w-40 shrink-0 truncate font-mono text-xs text-accent">{a.action}</span>
+                    <span className="min-w-0 flex-1 truncate text-sm text-muted">{a.actor || "system"}</span>
+                    <span className="inline-flex items-center gap-1 whitespace-nowrap text-2xs text-faint">
+                      <IconClock size={12} />{relTime(a.ts)}
+                    </span>
+                  </li>
+                ))}
               </ol>
             )}
           </Panel>
@@ -628,6 +629,14 @@ export function DeviceDetailPage() {
       )}
 
       {editing && d && <EditDeviceModal device={d} onClose={() => setEditing(false)} />}
+      {openSession && (
+        <SessionDetail
+          session={openSession}
+          deviceLabel={openSession.device_name || d?.name}
+          userLabel={userEmail.get(openSession.user_id ?? "")}
+          onClose={() => setOpenSession(null)}
+        />
+      )}
     </div>
   );
 }

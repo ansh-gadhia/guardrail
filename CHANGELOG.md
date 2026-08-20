@@ -182,7 +182,27 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   One capability is lost: a single import can no longer span several devices or
   groups, because the target is chosen once. Import once per target.
 
+### Changed
+- **A device's Access history is now a way in to its sessions.** The rows listed
+  every brokered session to the device and did nothing when clicked, so reading
+  one meant leaving the device, opening Recordings, and finding the session again
+  in a table of every session on the estate. Clicking a row now opens that
+  session where you are — replay, activity timeline, authorization, and the
+  export and delete actions — the same panel Recordings opens. The panel moved to
+  `components/SessionDetail.tsx` so both pages render one implementation rather
+  than drifting apart, and the shared session-time helpers moved to `lib/dates`
+  with them.
+
 ### Fixed
+- **`approval.requested` showed as a red dot in a device's audit trail.** That
+  panel coloured anything-but-success red, so a request merely waiting on an
+  approver looked like a refusal — the same thing the Audit Log's badge used to
+  say before `pending` existed. Pending is amber, and an outcome the panel does
+  not recognise is grey rather than an accusation.
+- **A session's held time was marked with a bare `*` on the device page.** It
+  meant "this record outlived its authorized window", which no reader could have
+  guessed. The device page now uses the same renderer as the session list, which
+  says so: "+21h past window".
 - **Modals and drawers were painted over by the header and the footer.** The
   shell renders pages into `<main class="isolate">`, and `isolation: isolate`
   creates a stacking context — so every overlay a page opened was sealed inside

@@ -74,3 +74,33 @@ export function sessionSpan(s: {
     live: !ended,
   };
 }
+
+/* ---- Shared session-time formatting ----------------------------------------
+   UTC on the wire, the viewer's own locale and zone on screen. These lived in
+   RecordingsPage and were copied into DeviceDetailPage; both render the same
+   sessions, so they belong in one place. */
+
+/** An absolute local timestamp: "18 Aug 2026, 2:08 pm". */
+export function absLocal(iso?: string): string {
+  const d = plausibleDate(iso);
+  return d ? d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—";
+}
+
+/** A relative timestamp: "2d ago". Empty when the time is missing. */
+export function relTime(iso?: string): string {
+  const d = plausibleDate(iso);
+  if (!d) return "";
+  const s = Math.round((Date.now() - d.getTime()) / 1000);
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+/** When a session began. A session created but never established has no
+    started_at, and created_at is the honest fallback — not "now". */
+export function startedOf(s: { started_at?: string; created_at?: string }): string | undefined {
+  return s.started_at ?? s.created_at;
+}
