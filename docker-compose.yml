@@ -43,7 +43,15 @@ services:
     ports:
       - "${POSTGRES_BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Source is a NAME or a PATH, chosen by one variable.
+      #
+      # Compose reads a mount source that starts with "/" as a bind mount and
+      # anything else as a named volume, so leaving GUARDRAIL_PGDATA_MOUNT unset
+      # keeps the Docker-managed volume this has always used, while setting it to
+      # an absolute path puts the data on a disk of your choosing. Nothing else in
+      # the file changes either way. scripts/migrate-data.sh sets these, moves the
+      # bytes and restarts the stack; install.sh asks for the path up front.
+      - ${GUARDRAIL_PGDATA_MOUNT:-pgdata}:/var/lib/postgresql/data
       - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-guardrail} -d ${POSTGRES_DB:-guardrail}"]
@@ -58,7 +66,8 @@ services:
     ports:
       - "${REDIS_BIND_ADDR:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     volumes:
-      - redisdata:/data
+      # Name or absolute path — see the note on pgdata above.
+      - ${GUARDRAIL_REDIS_MOUNT:-redisdata}:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -252,7 +261,10 @@ services:
       GUARDRAIL_LDAP_USER_FILTER: ${GUARDRAIL_LDAP_USER_FILTER:-}
       GUARDRAIL_OTLP_ENDPOINT: ${GUARDRAIL_OTLP_ENDPOINT:-}
     volumes:
-      - recordings:/var/lib/guardrail/recordings
+      # Name or absolute path — see the note on pgdata above. The container path
+      # stays put: GUARDRAIL_RECORDING_DIR is what the API writes to inside its
+      # own namespace, and relocating the data must not change it.
+      - ${GUARDRAIL_RECORDINGS_MOUNT:-recordings}:/var/lib/guardrail/recordings
       # The same volume guacd writes desktop recordings into; the API moves them
       # into the blob store when a session ends.
       # Bind-mounted at an IDENTICAL path on both sides, not a named volume.
@@ -365,6 +377,12 @@ services:
 
 volumes:
   # Persistent across `docker compose down` and reboots; `down -v` wipes them.
+  #
+  # These are the DEFAULT homes, used when the matching GUARDRAIL_*_MOUNT is
+  # unset. Point one at an absolute path instead and the volume named here stops
+  # being mounted anywhere — it is not deleted, and it still holds whatever it
+  # held, which is why scripts/migrate-data.sh names it explicitly when it is
+  # finally safe to remove.
   pgdata:
   redisdata:
   # Session recordings. These are audit evidence — back this up with pgdata, and
@@ -374,4 +392,8 @@ volumes:
   # Scratch space between guacd and the API: guacd writes a desktop recording
   # here, the API moves it into the blob store on teardown and deletes it. Nothing
   # here is durable evidence — that lives in `recordings` — so it needs no backup.
+  #
+  # Declared but never mounted: the two services share this through a bind mount
+  # at GUARDRAIL_GUACD_RECORDING_DIR instead, for the reason spelled out on the
+  # guacd service. Kept so that `docker volume ls` still accounts for the name.
   desktop-recordings:
