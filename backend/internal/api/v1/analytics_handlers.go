@@ -53,7 +53,7 @@ func (h *AnalyticsHandler) verifyChain(c *gin.Context) {
 	// resolvable account behind it — form their own chain. Only a super admin can
 	// read those rows, so only a super admin can ask for that chain.
 	var org *uuid.UUID
-	if !(actor.IsSuperAdmin && c.Query("scope") == "system") {
+	if !actor.IsSuperAdmin || c.Query("scope") != "system" {
 		id := actor.OrganizationID
 		org = &id
 	}

@@ -5,6 +5,7 @@ package test
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -334,19 +335,32 @@ func TestIntegration_AuditChainCatchesAnAlteredRow(t *testing.T) {
 	}
 }
 
-// tamperWithAuditRow edits an audit event directly, as the database owner rather
-// than through the application. Nothing in the product can do this; that is the
-// premise of the test.
+// tamperWithAuditRow edits an audit event directly, standing in for somebody
+// with database access.
+//
+// It needs a connection that OWNS the table. The application's own role is
+// granted no UPDATE or DELETE on audit_events — that is the product guarantee,
+// and it is why the rest of the suite, which runs as that role, cannot perform
+// this edit. So the owner DSN is a separate variable, and without it the test
+// says why it did not run rather than reporting a pass it did not earn.
 func tamperWithAuditRow(t *testing.T, ctx context.Context, id uuid.UUID) {
 	t.Helper()
-	dsn := envOrSkip(t, "GUARDRAIL_TEST_DSN")
+	dsn := os.Getenv("GUARDRAIL_TEST_OWNER_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("GUARDRAIL_TEST_DSN")
+	}
+	if dsn == "" {
+		t.Skip("set GUARDRAIL_TEST_DSN (and GUARDRAIL_TEST_OWNER_DSN) to run integration tests")
+	}
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		t.Fatalf("connect as owner: %v", err)
+		t.Fatalf("connect as the table owner: %v", err)
 	}
 	defer conn.Close(ctx)
 	if _, err := conn.Exec(ctx, `UPDATE audit_events SET result='success' WHERE id=$1`, id); err != nil {
-		t.Fatalf("tamper: %v", err)
+		t.Skipf("this connection cannot rewrite audit_events (%v). "+
+			"That is the correct grant for the application role; point "+
+			"GUARDRAIL_TEST_OWNER_DSN at the role that owns the table to exercise this.", err)
 	}
 }
 

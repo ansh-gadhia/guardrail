@@ -130,7 +130,14 @@ jobs:
           psql -h localhost -U guardrail -d guardrail -v ON_ERROR_STOP=1 -f db/seed.sql
       - name: Run integration tests
         env:
+          # The application connects as the least-privilege role, so that is what
+          # the suite runs as.
           GUARDRAIL_TEST_DSN: postgres://guardrail_app:apppass@localhost:5432/guardrail?sslmode=disable
+          # One test rewrites an audit row to prove the hash chain notices. The
+          # app role is granted no UPDATE on audit_events — that is the whole
+          # point — so simulating an attacker with database access needs the role
+          # that owns the table.
+          GUARDRAIL_TEST_OWNER_DSN: postgres://guardrail:guardrail@localhost:5432/guardrail?sslmode=disable
         run: go test -tags=integration ./test/...
 
   security:
@@ -138,6 +145,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gitleaks scans the range <before>^..<after> for a push, so it needs
+          # the parent of the FIRST pushed commit. The default shallow clone does
+          # not have it, and a push of several commits at once then dies with
+          # "ambiguous argument ...^..." having scanned nothing — a secret scan
+          # that cannot start is worse than none, because the job goes red for a
+          # reason unrelated to the code and people learn to ignore it.
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
