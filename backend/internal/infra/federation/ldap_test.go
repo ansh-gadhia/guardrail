@@ -3,7 +3,9 @@ package federation
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-ldap/ldap/v3"
 
@@ -109,4 +111,76 @@ func TestLDAP_UserNotFound(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalidCredentials", err)
 	}
 	_ = dir
+}
+
+// hangingLDAP blocks in Bind until its connection is closed — a directory that
+// accepted the TCP connection and then stopped answering, which is the failure
+// the caller's deadline exists for.
+type hangingLDAP struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newHangingLDAP() *hangingLDAP { return &hangingLDAP{closed: make(chan struct{})} }
+
+func (h *hangingLDAP) Bind(string, string) error {
+	<-h.closed
+	return errors.New("ldap: connection closed")
+}
+
+func (h *hangingLDAP) Search(*ldap.SearchRequest) (*ldap.SearchResult, error) {
+	<-h.closed
+	return nil, errors.New("ldap: connection closed")
+}
+
+func (h *hangingLDAP) Close() error {
+	h.once.Do(func() { close(h.closed) })
+	return nil
+}
+
+func TestLDAP_CancelledContextUnblocksAndDoesNotLookLikeABadPassword(t *testing.T) {
+	dir := newHangingLDAP()
+	a := NewLDAPAuthenticator(LDAPConfig{
+		URL: "ldap://x", BindDN: "cn=svc,dc=corp", BindPassword: "svcpw", BaseDN: "dc=corp",
+	})
+	a.dial = func(LDAPConfig) (ldapConn, error) { return dir, nil }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.Authenticate(ctx, "bob", "bobpass")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		// The deadline must surface as a deadline. Reporting it as invalid
+		// credentials would charge a directory outage against the account's
+		// failure budget and eventually lock out someone who typed nothing wrong.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+		}
+		if errors.Is(err, iam.ErrInvalidCredentials) {
+			t.Fatal("a wedged directory must not be reported as a bad password")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Authenticate ignored its context: still blocked long after the deadline")
+	}
+}
+
+func TestLDAP_AlreadyCancelledContextNeverDials(t *testing.T) {
+	a := newTestAuthenticator(newFakeDir())
+	dialed := false
+	a.dial = func(LDAPConfig) (ldapConn, error) { dialed = true; return newFakeDir(), nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := a.Authenticate(ctx, "bob", "bobpass"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if dialed {
+		t.Fatal("dialled the directory for a request that was already abandoned")
+	}
 }

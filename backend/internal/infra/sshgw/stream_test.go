@@ -446,3 +446,10 @@ func TestConsoleServesTerminal(t *testing.T) {
 		t.Error("console page does not carry the watermark attribution")
 	}
 }
+
+// Purge is not exercised by these tests; the fake satisfies the port so a
+// method added to it does not break every harness that stores recordings.
+func (f *fakeRecordings) DueForPurge(context.Context, time.Time, int) ([]access.ExpiredRecording, error) {
+	return nil, nil
+}
+func (f *fakeRecordings) PurgeSystem(context.Context, uuid.UUID) error { return nil }

@@ -36,8 +36,12 @@ type Deps struct {
 	// APITokens verifies long-lived machine tokens on the same Authorization
 	// header. Optional: nil means this deployment issues none.
 	APITokens middleware.APITokenVerifier
-	Version   string // build version, surfaced at /api/v1/version
-	WebDir    string // if set, serve the SPA/console from this dir
+	// SourceGuard applies each organization's source-address policy to every
+	// authenticated request. Optional: nil means no policy is enforced, which is
+	// what a deployment that has never configured one wants.
+	SourceGuard middleware.SourceGuard
+	Version     string // build version, surfaced at /api/v1/version
+	WebDir      string // if set, serve the SPA/console from this dir
 }
 
 // New builds the fully-configured Gin engine for the public API listener.
@@ -84,7 +88,7 @@ func New(d Deps) (*gin.Engine, error) {
 	// Feature routes. The authentication middleware is built once from the
 	// injected token verifier and shared by every protected module.
 	if d.Authenticator != nil {
-		authMW := middleware.Authenticate(d.Authenticator, d.APITokens)
+		authMW := middleware.Authenticate(d.Authenticator, d.APITokens, d.SourceGuard)
 		if d.IAM != nil {
 			d.IAM.Register(apiV1, authMW)
 			// Machine tokens: issued and revoked here, verified by authMW above.
@@ -102,6 +106,9 @@ func New(d Deps) (*gin.Engine, error) {
 			// the same bounded context, and the gate that raises a request lives
 			// in Connect.
 			d.Access.RegisterApprovals(apiV1, authMW)
+			// Organization policy settings — retention first. Same context: the
+			// broker owns recordings, so it owns how long they are kept.
+			d.Access.RegisterSettings(apiV1, authMW)
 			// The proxy endpoint mounts on the root engine (browser-facing,
 			// cookie-authenticated), outside /api/v1.
 			d.Access.RegisterProxy(r)

@@ -28,7 +28,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 APP_NAME="GuardRail"
 REPO="${GUARDRAIL_REPO:-ansh-gadhia/guardrail}"
-VERSION="${GUARDRAIL_VERSION:-1.1.2}"
+VERSION="${GUARDRAIL_VERSION:-1.2.0}"
 # Which git ref the host-side files come from. Images are published from main, so
 # main is the default; set it to a tag or a commit to install a fixed point.
 REF="${GUARDRAIL_REF:-main}"
@@ -552,6 +552,34 @@ generate_cert() {
 # ---------------------------------------------------------------------------
 # Writing .env
 # ---------------------------------------------------------------------------
+
+# ensure_env_key adds a setting to an existing .env if it is not already there,
+# leaving any value the operator has already chosen alone.
+#
+# An update rewrites only the keys it owns and must never regenerate secrets, so
+# it cannot simply re-run write_env. That leaves a gap every time a release adds
+# a setting: the deployment keeps running on the compose file's fallback, and the
+# key is missing from the one file an operator would look in. Keys added by a
+# release are listed in migrate_env below.
+ensure_env_key() {
+    local key=$1 value=$2 comment=${3:-}
+    grep -qE "^${key}=" "$ENV_FILE" && return 0
+    {
+        printf '\n'
+        [ -n "$comment" ] && printf '# %s\n' "$comment"
+        printf '%s=%s\n' "$key" "$value"
+    } >>"$ENV_FILE"
+    info "added ${B}${key}${R} to the configuration ${D}(default: ${value})${R}"
+}
+
+# migrate_env brings an older .env up to what this release expects. Add a line
+# here for every setting a release introduces; it is a no-op on a file that
+# already has it, so it is safe to leave in place across releases.
+migrate_env() {
+    ensure_env_key GUARDRAIL_RECORDING_RETENTION_DAYS 90 \
+        "How long recordings are kept, in days (0 = indefinitely). Seeds an organization that has never set its own policy; the console (Organization -> Recording retention) is what is in force once one has."
+}
+
 write_env() {
     local ip; ip=$(host_ip)
     umask 077
@@ -606,6 +634,12 @@ GUARDRAIL_ADMIN_ORG=default
 GUARDRAIL_BROWSER_ISOLATION=true
 GUARDRAIL_CHROME_PATH=
 GUARDRAIL_RECORDING_DIR=/var/lib/guardrail/recordings
+# How long recordings are kept, in days. 0 keeps them indefinitely.
+# This SEEDS an organization that has never set a policy of its own; once one is
+# set in the console (Organization -> Recording retention) the stored policy is
+# what is in force and this line no longer changes it. The console shows both
+# values side by side.
+GUARDRAIL_RECORDING_RETENTION_DAYS=90
 
 # ---- Desktop access (RDP / VNC) ----
 GUARDRAIL_DESKTOP_ENABLED=${DESKTOP_ENABLED}
@@ -653,7 +687,11 @@ start_stack() {
     step "Starting ${APP_NAME}"
     spin "pulling images (${VERSION})" \
         docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "${prof[@]}" pull --quiet \
-        || warn "some images could not be pulled; falling back to whatever is local"
+        || warn "could not pull ${B}:${VERSION}${R} — starting with whatever is already on this host. If the stack does not come up, that tag has not been published yet; pick another with GUARDRAIL_VERSION=."
+    # Brings up the one-shot migrate and seed containers too: `api` declares them
+    # as service_completed_successfully dependencies, and compose re-runs a
+    # completed one-shot on every `up`. That is what applies a release's new
+    # migrations — an update does not need a separate step, and must not skip it.
     spin "starting services" \
         docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "${prof[@]}" up -d --remove-orphans
 }
@@ -888,6 +926,7 @@ do_update() {
         -e "s|^GUARDRAIL_DNS_UPSTREAM=.*|GUARDRAIL_DNS_UPSTREAM=${DNS_UPSTREAM}|" \
         "$ENV_FILE"
     grep -q '^GUARDRAIL_DNS_UPSTREAM=' "$ENV_FILE" || echo "GUARDRAIL_DNS_UPSTREAM=${DNS_UPSTREAM}" >>"$ENV_FILE"
+    migrate_env
     ok "configuration updated (secrets and admin credentials untouched)"
 
     # The cert has to name the tunnel domain, which may have just changed.

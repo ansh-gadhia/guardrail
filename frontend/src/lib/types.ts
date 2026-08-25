@@ -435,6 +435,12 @@ export interface AuditRow {
    * when the action has no separate target; the console falls back to the id.
    */
   target_label?: string;
+  /**
+   * The session this event happened inside, when it happened inside one. It is
+   * what lets the console offer the recording, the timeline and the approval
+   * behind an entry instead of leaving the reader to go and search for them.
+   */
+  session_id?: string;
   ip: string;
   user_agent?: string;
   result: string;
@@ -642,3 +648,55 @@ export const REQUEST_WINDOWS: { minutes: number; label: string }[] = [
   { minutes: 240, label: "4 hours" },
   { minutes: 480, label: "8 hours" },
 ];
+
+/* ---- Organization settings ------------------------------------------------ */
+
+/** How an organization's console presents itself. */
+export interface Branding {
+  client_name: string;
+  /** A data: URI, or "" when no artwork is set. */
+  client_logo: string;
+  enabled: boolean;
+  /** Whether there is anything to show — the server's own reading of the rule. */
+  configured: boolean;
+}
+
+/** One entry in a source-address list. */
+export interface NetworkRule {
+  cidr: string;
+  note?: string;
+}
+
+export interface NetworkPolicy {
+  allowlist_enabled: boolean;
+  allowlist: NetworkRule[];
+  blocklist_enabled: boolean;
+  blocklist: NetworkRule[];
+}
+
+export interface OrgSettings {
+  recording_retention_days: number;
+  /** What this deployment's .env asked for, shown beside the live value. */
+  configured_default_days: number;
+  branding: Branding;
+  network_policy: NetworkPolicy;
+  updated_at?: string;
+  updated_by?: string;
+  /** The address this console reached the API from. */
+  your_ip?: string;
+}
+
+/** The result of walking the audit log's hash chain. */
+export interface ChainReport {
+  ok: boolean;
+  checked: number;
+  /** True when the walk stopped at its row cap rather than at the end of the chain. */
+  truncated?: boolean;
+  /** Entries whose hash predates the current scheme and cannot be recomputed. */
+  unverifiable?: number;
+  from?: string;
+  to?: string;
+  broken_at?: string;
+  broken_at_ts?: string;
+  reason?: string;
+}

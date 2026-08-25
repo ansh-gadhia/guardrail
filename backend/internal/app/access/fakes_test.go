@@ -20,14 +20,15 @@ func (c fixedClock) Now() time.Time { return c.t }
 
 // fakeSessions is an in-memory SessionRepository.
 type fakeSessions struct {
-	mu          sync.Mutex
-	created     []*access.Session
-	byID        map[uuid.UUID]*access.Session
-	statuses    []statusUpdate
-	createErr   error
-	idleExpired []access.ExpiredSession
-	touched     []uuid.UUID
-	touchedAt   time.Time
+	mu             sync.Mutex
+	created        []*access.Session
+	byID           map[uuid.UUID]*access.Session
+	statuses       []statusUpdate
+	createErr      error
+	idleExpired    []access.ExpiredSession
+	overdueExpired []access.ExpiredSession
+	touched        []uuid.UUID
+	touchedAt      time.Time
 
 	// views is what ListView hands back; lastFilter records the filter it was
 	// called with, so a test can assert what the service passed down.
@@ -97,7 +98,9 @@ func (f *fakeSessions) UpdateStatus(_ context.Context, _ access.Scope, id uuid.U
 }
 
 func (f *fakeSessions) CountActive(context.Context, access.Scope) (int, error) { return 0, nil }
-func (f *fakeSessions) ExpireOverdue(context.Context, time.Time) (int, error)  { return 0, nil }
+func (f *fakeSessions) ExpireOverdue(context.Context, time.Time) ([]access.ExpiredSession, error) {
+	return f.overdueExpired, nil
+}
 
 // idleExpired is what the next ExpireIdle sweep will report; touched records the
 // sessions marked as in use, so a test can assert activity actually reaches the
@@ -217,6 +220,19 @@ func (f *fakeAudit) find(action string) *audit.Event {
 	return nil
 }
 
+// findAll returns every event with the given action, in the order recorded.
+func (f *fakeAudit) findAll(action string) []audit.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []audit.Event
+	for i := range f.events {
+		if f.events[i].Action == action {
+			out = append(out, f.events[i])
+		}
+	}
+	return out
+}
+
 // fakeRecordings tracks recording lifecycle calls.
 type fakeRecordings struct {
 	mu        sync.Mutex
@@ -330,6 +346,98 @@ type harness struct {
 	registry   *fakeRegistry
 	// requests is the approval store; only populated for a gated device.
 	requests *fakeRequests
+	// events is the per-session timeline the digest on session.end summarises.
+	events *fakeEvents
+	// settings is the organization policy store: retention, branding, network.
+	settings *fakeSettings
+}
+
+// fakeSettings is an in-memory access.SettingsStore.
+type fakeSettings struct {
+	mu  sync.Mutex
+	rec map[uuid.UUID]*access.OrgSettings
+}
+
+func newFakeSettings() *fakeSettings {
+	return &fakeSettings{rec: map[uuid.UUID]*access.OrgSettings{}}
+}
+
+func (f *fakeSettings) row(orgID uuid.UUID) *access.OrgSettings {
+	if f.rec[orgID] == nil {
+		f.rec[orgID] = &access.OrgSettings{RecordingRetentionDays: 90, Branding: access.Branding{Enabled: true}}
+	}
+	return f.rec[orgID]
+}
+
+func (f *fakeSettings) GetSettings(_ context.Context, _ access.Scope, orgID uuid.UUID) (*access.OrgSettings, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := *f.row(orgID)
+	return &cp, nil
+}
+
+func (f *fakeSettings) SetRecordingRetention(_ context.Context, _ access.Scope, orgID uuid.UUID, days int, by uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.row(orgID)
+	r.RecordingRetentionDays = days
+	r.UpdatedBy = &by
+	return nil
+}
+
+func (f *fakeSettings) SetBranding(_ context.Context, _ access.Scope, orgID uuid.UUID, b access.Branding, by uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.row(orgID)
+	r.Branding = b
+	r.UpdatedBy = &by
+	return nil
+}
+
+func (f *fakeSettings) SetNetworkPolicy(_ context.Context, _ access.Scope, orgID uuid.UUID, p access.NetworkPolicy, by uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.row(orgID)
+	r.Network = p
+	r.UpdatedBy = &by
+	return nil
+}
+
+func (f *fakeSettings) NetworkPolicyFor(_ context.Context, orgID uuid.UUID) (access.NetworkPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.row(orgID).Network, nil
+}
+
+func (f *fakeSettings) RecordingRetention(_ context.Context, orgID uuid.UUID) (time.Duration, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return time.Duration(f.row(orgID).RecordingRetentionDays) * 24 * time.Hour, nil
+}
+
+// fakeEvents is an in-memory access.EventRecorder.
+type fakeEvents struct {
+	mu       sync.Mutex
+	timeline map[uuid.UUID][]access.Event
+}
+
+func newFakeEvents() *fakeEvents { return &fakeEvents{timeline: map[uuid.UUID][]access.Event{}} }
+
+func (f *fakeEvents) RecordEvent(_ context.Context, sessionID uuid.UUID, kind string, data map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.timeline[sessionID] = append(f.timeline[sessionID], access.Event{Kind: kind, Data: data})
+	return nil
+}
+
+func (f *fakeEvents) ListEvents(_ context.Context, _ access.Scope, sessionID uuid.UUID, limit int) ([]access.Event, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := f.timeline[sessionID]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return append([]access.Event(nil), out...), nil
 }
 
 type opts struct {
@@ -385,6 +493,8 @@ func newHarness(o opts) *harness {
 	aud := &fakeAudit{}
 	rec := newFakeRecordings()
 	reg := &fakeRegistry{}
+	evts := newFakeEvents()
+	settings := newFakeSettings()
 
 	deps := Deps{
 		Sessions:   sessions,
@@ -401,11 +511,13 @@ func newHarness(o opts) *harness {
 			// its own.
 			Isolate: !o.noRecording || o.isolate,
 		}},
-		Creds:  fakeCreds{has: o.hasCredential},
-		Audit:  aud,
-		Clock:  fixedClock{t: fixedNow},
-		Node:   "test-node",
-		Config: DefaultConfig(),
+		Creds:    fakeCreds{has: o.hasCredential},
+		Events:   evts,
+		Settings: settings,
+		Audit:    aud,
+		Clock:    fixedClock{t: fixedNow},
+		Node:     "test-node",
+		Config:   DefaultConfig(),
 	}
 	if o.noEmergencyQuota {
 		deps.Config.EmergencyQuota = 0
@@ -432,7 +544,7 @@ func newHarness(o opts) *harness {
 	return &harness{
 		svc: NewService(deps), sessions: sessions, authorizer: authz,
 		gateway: gw, isolated: iso, audit: aud, recordings: rec, registry: reg,
-		requests: requests,
+		requests: requests, events: evts, settings: settings,
 	}
 }
 
@@ -609,3 +721,10 @@ func (f fakeRanker) LevelFor(context.Context, access.Scope, uuid.UUID) (int, err
 func (f fakeRanker) ApproversAbove(context.Context, access.Scope, int) (int, error) {
 	return f.above, nil
 }
+
+// Purge is not exercised by these tests; the fake satisfies the port so a
+// method added to it does not break every harness that stores recordings.
+func (f *fakeRecordings) DueForPurge(context.Context, time.Time, int) ([]access.ExpiredRecording, error) {
+	return nil, nil
+}
+func (f *fakeRecordings) PurgeSystem(context.Context, uuid.UUID) error { return nil }

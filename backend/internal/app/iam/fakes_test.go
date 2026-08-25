@@ -2,6 +2,7 @@ package iam
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -137,8 +138,21 @@ func (f *fakeOrgRepo) GetBySlug(_ context.Context, slug string) (*iam.Organizati
 	}
 	return nil, iam.ErrNotFound
 }
-func (f *fakeOrgRepo) List(context.Context, iam.TenantScope, iam.Page) ([]iam.Organization, error) {
-	return nil, nil
+
+// List returns every organization the fake knows, in a stable order. It is not
+// decoration: soleOrg asks "does this deployment have exactly one tenant?" here,
+// and a List that always answers "none" would make that question untestable.
+func (f *fakeOrgRepo) List(_ context.Context, _ iam.TenantScope, _ iam.Page) ([]iam.Organization, error) {
+	slugs := make([]string, 0, len(f.bySlug))
+	for slug := range f.bySlug {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+	out := make([]iam.Organization, 0, len(slugs))
+	for _, slug := range slugs {
+		out = append(out, *f.bySlug[slug])
+	}
+	return out, nil
 }
 
 // fakeRoleRepo is a no-op iam.RoleRepository.
@@ -279,6 +293,38 @@ func (f *fakeSessionRepo) FamilyOwner(_ context.Context, familyID iam.ID) (iam.I
 type nopAudit struct{}
 
 func (nopAudit) Record(context.Context, audit.Event) error { return nil }
+
+// captureAudit keeps what was recorded, so a test can assert on the ledger
+// rather than only on the return value of the call that wrote to it.
+type captureAudit struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (c *captureAudit) Record(_ context.Context, e audit.Event) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, e)
+	return nil
+}
+
+// find returns the recorded events for an action, optionally narrowed to a
+// detail["reason"].
+func (c *captureAudit) find(action, reason string) []audit.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []audit.Event
+	for _, e := range c.events {
+		if e.Action != action {
+			continue
+		}
+		if reason != "" && e.Detail["reason"] != reason {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
 
 type nopThrottle struct{}
 

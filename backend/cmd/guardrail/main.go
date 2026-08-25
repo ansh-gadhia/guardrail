@@ -131,6 +131,15 @@ func startWorkers(ctx context.Context, log *zap.Logger, notifySvc *appnotify.Ser
 				} else if esc > 0 || exp > 0 {
 					log.Info("swept access requests", zap.Int("escalated", esc), zap.Int("expired", exp))
 				}
+				// Retention. Every recording has carried a deadline since the
+				// feature shipped and nothing ever read it, so recordings
+				// accumulated forever and the retention policy was a number in a
+				// column rather than something that happened.
+				if n, err := broker.PurgeRecordings(ctx); err != nil {
+					log.Warn("recording retention sweep failed", zap.Error(err))
+				} else if n > 0 {
+					log.Info("purged expired recordings", zap.Int("count", n))
+				}
 			}
 		}
 	}()
@@ -543,6 +552,10 @@ func run() error {
 
 	sessionServer := v1.SessionMux(sessionServers)
 
+	// Retention policy lives in the database so an administrator can change it
+	// without a redeploy; the environment supplies what a tenant that has never
+	// set one inherits.
+	settingsRepo := postgres.NewSettingsRepo(pg, time.Duration(cfg.Recording.RetentionDays)*24*time.Hour)
 	brokerSvc := appaccess.NewService(appaccess.Deps{
 		Sessions:         sessionRepo,
 		Authorizer:       postgres.NewAuthorizerRepo(pg),
@@ -552,6 +565,7 @@ func run() error {
 		Registry:         liveRegistry,
 		Events:           eventRepo,
 		Recordings:       recordingRepo,
+		Settings:         settingsRepo,
 		Blobs:            blobStore,
 		Devices:          deviceLookup,
 		Creds:            credResolver,
@@ -601,7 +615,7 @@ func run() error {
 
 	// --- Analytics: dashboard, search, audit log, reports (M8) ---
 	analyticsSvc := appanalytics.NewService(postgres.NewAnalyticsRepo(pg))
-	analyticsHandler := v1.NewAnalyticsHandler(analyticsSvc)
+	analyticsHandler := v1.NewAnalyticsHandler(analyticsSvc, auditRec)
 
 	// --- Device liveness (M-health) ---
 	healthSvc := apphealth.NewService(postgres.NewHealthRepo(pg), log, apphealth.Config{
@@ -647,8 +661,11 @@ func run() error {
 		// Long-lived machine tokens, verified on the same Authorization header as
 		// a user's JWT and told apart by their prefix.
 		APITokens: iamSvc,
-		WebDir:    cfg.HTTP.WebDir,
-		Version:   version,
+		// Each organization's source-address policy, applied to every
+		// authenticated request. The broker owns it because it owns org settings.
+		SourceGuard: brokerSvc,
+		WebDir:      cfg.HTTP.WebDir,
+		Version:     version,
 	})
 	if err != nil {
 		return err
@@ -726,5 +743,8 @@ func accessConfig(cfg *config.Config) appaccess.Config {
 	if cfg.Session.EmergencyWindow > 0 {
 		c.EmergencyWindow = cfg.Session.EmergencyWindow
 	}
+	// The fallback for a tenant whose settings row cannot be read. Zero is
+	// meaningful — keep recordings indefinitely — so it is assigned, not guarded.
+	c.RecordingRetention = time.Duration(cfg.Recording.RetentionDays) * 24 * time.Hour
 	return c
 }

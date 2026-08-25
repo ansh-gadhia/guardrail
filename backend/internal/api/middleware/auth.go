@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/guardrail/guardrail/internal/domain/iam"
 )
@@ -32,7 +33,7 @@ type APITokenVerifier interface {
 // than by trying one and falling back to the other. Fallback would make an
 // expired session token and a malformed API token produce the same log line, and
 // would run every machine token through a JWT parse first for no reason.
-func Authenticate(a Authenticator, tokens APITokenVerifier) gin.HandlerFunc {
+func Authenticate(a Authenticator, tokens APITokenVerifier, guard SourceGuard) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		h := c.GetHeader("Authorization")
 		token, ok := strings.CutPrefix(h, "Bearer ")
@@ -59,6 +60,9 @@ func Authenticate(a Authenticator, tokens APITokenVerifier) gin.HandlerFunc {
 			abortProblem(c, http.StatusUnauthorized, "Unauthorized", "invalid or expired token")
 			return
 		}
+		if !enforceSource(c, guard, claims) {
+			return
+		}
 		c.Set(ctxClaims, claims)
 		c.Next()
 	}
@@ -80,4 +84,35 @@ func abortProblem(c *gin.Context, status int, title, detail string) {
 	c.AbortWithStatusJSON(status, gin.H{
 		"type": "about:blank", "title": title, "status": status, "detail": detail,
 	})
+}
+
+// SourceGuard decides whether an authenticated principal may act from the
+// address their request arrived from, and records the refusal when they may not.
+//
+// It is consulted inside Authenticate rather than as a middleware of its own
+// because the decision needs the claims, and claims only exist once the
+// credential has been verified. A separate handler would either have to re-parse
+// the token or run after the route it is meant to guard.
+type SourceGuard interface {
+	CheckNetworkSource(ctx context.Context, orgID uuid.UUID, isSuperAdmin bool, ip string) (bool, string)
+	AuditNetworkRefusal(ctx context.Context, actor iam.Claims, reason, path, ip, userAgent string)
+}
+
+// enforceSource applies the organization's network policy to a verified caller.
+// Reports whether the request may continue.
+func enforceSource(c *gin.Context, guard SourceGuard, claims iam.Claims) bool {
+	if guard == nil {
+		return true
+	}
+	ip := c.ClientIP()
+	ok, reason := guard.CheckNetworkSource(c.Request.Context(), claims.OrganizationID, claims.IsSuperAdmin, ip)
+	if ok {
+		return true
+	}
+	guard.AuditNetworkRefusal(c.Request.Context(), claims, reason, c.Request.URL.Path, ip, c.Request.UserAgent())
+	// 403, not 401. The credential is valid and re-authenticating will not help;
+	// telling the console otherwise would send it round a refresh loop.
+	abortProblem(c, http.StatusForbidden, "Forbidden",
+		"your organization's network policy does not permit access from this address")
+	return false
 }

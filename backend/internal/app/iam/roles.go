@@ -34,6 +34,9 @@ func (s *Service) SetRoleDeviceAccess(ctx context.Context, actor iam.Claims, rol
 	if in.Scope == iam.DeviceScopeAll {
 		in.DeviceTypes, in.GroupIDs = nil, nil
 	}
+	if err := s.systemRoleGuard(ctx, actor, roleID); err != nil {
+		return err
+	}
 	if err := s.roles.SetDeviceAccess(ctx, actor.Scope(), roleID, in); err != nil {
 		return err
 	}
@@ -53,6 +56,9 @@ func (s *Service) SetRoleDeviceAccess(ctx context.Context, actor iam.Claims, rol
 func (s *Service) SetRoleApprovalLevel(ctx context.Context, actor iam.Claims, roleID iam.ID, level int, meta ReqMeta) error {
 	if level < 0 || level > 999 {
 		return fmt.Errorf("%w: approval level must be between 0 and 999", iam.ErrInvalidInput)
+	}
+	if err := s.systemRoleGuard(ctx, actor, roleID); err != nil {
+		return err
 	}
 	if err := s.roles.SetApprovalLevel(ctx, actor.Scope(), roleID, level); err != nil {
 		return err
@@ -88,4 +94,35 @@ func (s *Service) ApprovalCoverage(ctx context.Context, actor iam.Claims) (map[i
 		out[l] = n
 	}
 	return out, nil
+}
+
+// systemRoleGuard refuses an edit to a role this tenant does not own.
+//
+// System roles — Super Admin, Organization Admin, Operator, Auditor, Read-only —
+// carry a NULL organization_id and are shared by every tenant on the
+// deployment. One organization editing "Operator" would change it for all of
+// them, so the RLS policy on roles admits them for READING and refuses to write
+// them back: USING allows organization_id IS NULL, WITH CHECK does not.
+//
+// That is the correct rule, and it was being enforced in the worst possible
+// place. The service issued the UPDATE anyway, Postgres rejected the resulting
+// row, and the console showed "new row violates row-level security policy for
+// table roles" as a 500 — an internal error for something that is simply not
+// allowed. An Organization Admin editing any seeded role hit it every time.
+//
+// Refused here instead, with a reason and a way forward.
+func (s *Service) systemRoleGuard(ctx context.Context, actor iam.Claims, roleID iam.ID) error {
+	if actor.IsSuperAdmin {
+		return nil
+	}
+	role, err := s.roles.GetByID(ctx, actor.Scope(), roleID)
+	if err != nil {
+		return err
+	}
+	if role.OrganizationID == nil {
+		return fmt.Errorf("%w: %q is a built-in role shared by every organization on this deployment, "+
+			"so it cannot be changed for one of them. Create a role of your own and edit that instead",
+			iam.ErrPermissionDenied, role.Name)
+	}
+	return nil
 }

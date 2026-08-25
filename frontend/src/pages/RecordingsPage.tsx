@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { absLocal, relTime, startedOf } from "@/lib/dates";
@@ -25,7 +26,38 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 export function RecordingsPage() {
-  const [selected, setSelected] = useState<Session | null>(null);
+  // Which session is open lives in the URL, not in component state, so it can be
+  // linked to. An investigator quoting a session in a ticket, a reviewer sending
+  // "look at this one" to a colleague, and the back button all need the same
+  // thing: an address that names the session. Holding it in useState made every
+  // session reachable only by retracing the clicks that found it.
+  const [params, setParams] = useSearchParams();
+  const openID = params.get("session");
+
+  const openSession = useCallback(
+    (s: Session) =>
+      setParams(
+        (prev) => {
+          prev.set("session", s.id);
+          return prev;
+        },
+        // A push, so Escape/back closes the panel rather than leaving the page.
+        { replace: false },
+      ),
+    [setParams],
+  );
+
+  const closeSession = useCallback(
+    () =>
+      setParams(
+        (prev) => {
+          prev.delete("session");
+          return prev;
+        },
+        { replace: true },
+      ),
+    [setParams],
+  );
 
   // Paging, search and sort live here and travel to the server. The table is
   // handed exactly one page and told the real total.
@@ -71,6 +103,19 @@ export function RecordingsPage() {
 
   const rows = sessions.data?.data ?? [];
   const total = sessions.data?.total ?? 0;
+
+  // A linked session is fetched by id: the row it names may be on page nine, or
+  // filtered out by whatever search the reader happens to have typed, or older
+  // than anything on screen. Seeding from the loaded page keeps a click instant
+  // and reserves the request for links arriving cold.
+  const linked = useQuery<Session>({
+    queryKey: ["session", openID],
+    queryFn: async () => (await api.get<Session>(`/sessions/${openID}`)).data,
+    enabled: !!openID,
+    initialData: () => rows.find((r) => r.id === openID),
+    staleTime: 10_000,
+  });
+  const selected = linked.data ?? null;
 
   // Labels now ride along with each row, so this page no longer fetches every
   // user and every device just to name a dozen sessions.
@@ -197,7 +242,7 @@ export function RecordingsPage() {
             searchPlaceholder="Search by user, device, IP, protocol…"
             exportName="session-recordings"
             emptyMessage={search ? `No sessions match “${search}”.` : "No results."}
-            onRowClick={setSelected}
+            onRowClick={openSession}
             server={{
               total,
               page,
@@ -232,8 +277,14 @@ export function RecordingsPage() {
           session={selected}
           deviceLabel={deviceName(selected)}
           userLabel={userEmail(selected)}
-          onClose={() => setSelected(null)}
+          onClose={closeSession}
         />
+      )}
+      {/* A link to a session that no longer exists, or that this reader may not
+          read, must say so — silently showing the list is indistinguishable from
+          the link having worked. */}
+      {openID && !selected && linked.isError && (
+        <ErrorNote message="That session could not be opened — it may have been deleted, or it belongs to an organization you cannot read." />
       )}
     </div>
   );

@@ -70,12 +70,22 @@ type SessionConfig struct {
 	EmergencyWindow time.Duration
 }
 
-// RecordingConfig controls where session recordings are stored.
+// RecordingConfig controls where session recordings are stored and how long
+// they are kept.
 type RecordingConfig struct {
 	// Dir is the root directory for recording artifacts.
 	Dir string
 	// MaxBytes caps the frames a single session may buffer before flush.
 	MaxBytes int
+	// RetentionDays seeds a tenant that has never set a retention policy. It is
+	// NOT the live value: retention is an administrator's policy decision, so it
+	// lives in org_settings and is edited in the console without a redeploy. This
+	// is what a fresh organization inherits, and what the console offers as
+	// "the value this deployment was installed with".
+	//
+	// Zero means keep recordings indefinitely, which is a choice a deployment may
+	// legitimately make — and a different statement from having no policy at all.
+	RetentionDays int
 }
 
 // BrowserConfig controls the browser-isolation access gateway. When enabled, web
@@ -264,8 +274,9 @@ func Load() (*Config, error) {
 			EmergencyWindow:  getDuration("GUARDRAIL_EMERGENCY_QUOTA_WINDOW", 7*24*time.Hour),
 		},
 		Recording: RecordingConfig{
-			Dir:      getEnv("GUARDRAIL_RECORDING_DIR", "/var/lib/guardrail/recordings"),
-			MaxBytes: getInt("GUARDRAIL_RECORDING_MAX_BYTES", 512<<20),
+			Dir:           getEnv("GUARDRAIL_RECORDING_DIR", "/var/lib/guardrail/recordings"),
+			MaxBytes:      getInt("GUARDRAIL_RECORDING_MAX_BYTES", 512<<20),
+			RetentionDays: getInt("GUARDRAIL_RECORDING_RETENTION_DAYS", 90),
 		},
 		Health: HealthConfig{
 			PollInterval: getDuration("GUARDRAIL_HEALTH_POLL_INTERVAL", 60*time.Second),

@@ -27,7 +27,7 @@ diagram, the default port map, first sign-in, and troubleshooting.
 
 ## Status
 
-Current version: **1.0.0** (see [`CHANGELOG.md`](CHANGELOG.md)).
+Current version: **1.2.0** (see [`CHANGELOG.md`](CHANGELOG.md)).
 
 | Milestone | Scope | State |
 |---|---|---|
@@ -88,7 +88,7 @@ make install-native
 Verify the stack:
 
 ```bash
-curl -fskS https://localhost/api/v1/version   # {"name":"GuardRail","version":"1.0.0"}
+curl -fskS https://localhost/api/v1/version   # {"name":"GuardRail","version":"1.2.0"}
 curl -fskS https://localhost/healthz          # ok
 ```
 

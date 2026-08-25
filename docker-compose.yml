@@ -214,6 +214,10 @@ services:
       GUARDRAIL_GUACD_ADDR: ${GUARDRAIL_GUACD_ADDR:-guacd:4822}
       GUARDRAIL_GUACD_RECORDING_DIR: ${GUARDRAIL_GUACD_RECORDING_DIR:-/var/lib/guardrail/desktop-recordings}
       GUARDRAIL_RECORDING_DIR: ${GUARDRAIL_RECORDING_DIR:-/var/lib/guardrail/recordings}
+      # Seeds the retention policy of an organization that has never set one.
+      # The live value lives in the database and is edited in the console; this
+      # is the default a fresh tenant inherits, shown there beside it.
+      GUARDRAIL_RECORDING_RETENTION_DAYS: ${GUARDRAIL_RECORDING_RETENTION_DAYS:-90}
       GUARDRAIL_LOG_LEVEL: ${GUARDRAIL_LOG_LEVEL:-info}
       GUARDRAIL_LOG_FORMAT: ${GUARDRAIL_LOG_FORMAT:-json}
 

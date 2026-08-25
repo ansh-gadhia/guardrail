@@ -227,7 +227,7 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 	query := fmt.Sprintf(`
 		WITH e AS MATERIALIZED (
 			SELECT ts, actor_email, action, category, target_type, target_id, ip,
-			       user_agent, result, detail, id,
+			       user_agent, result, detail, id, session_id,
 			       CASE WHEN target_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 			            THEN target_id::uuid END AS tid
 			  FROM audit_events
@@ -238,7 +238,8 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 		SELECT e.ts, COALESCE(e.actor_email,''), e.action, e.category,
 		       COALESCE(e.target_type,''), COALESCE(e.target_id,''),
 		       COALESCE(host(e.ip),''), COALESCE(e.user_agent,''), e.result, e.detail,
-		       COALESCE(d.name, u.email::text, c.name, sn.device_name, ro.name, g.name, '') AS target_label
+		       COALESCE(d.name, u.email::text, c.name, sn.device_name, ro.name, g.name, '') AS target_label,
+		       COALESCE(e.session_id::text, '') AS session_id
 		  FROM e
 		  LEFT JOIN devices         d  ON e.target_type = 'device'     AND d.id  = e.tid
 		  LEFT JOIN users           u  ON e.target_type = 'user'       AND u.id  = e.tid
@@ -260,7 +261,7 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 			var detail []byte
 			if err := rows.Scan(&a.Timestamp, &a.ActorEmail, &a.Action, &a.Category,
 				&a.TargetType, &a.TargetID, &a.IP, &a.UserAgent, &a.Result, &detail,
-				&a.TargetLabel); err != nil {
+				&a.TargetLabel, &a.SessionID); err != nil {
 				return fmt.Errorf("analytics: scan audit: %w", err)
 			}
 			if len(detail) > 0 {

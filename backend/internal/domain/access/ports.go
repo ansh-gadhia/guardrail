@@ -23,9 +23,11 @@ type SessionRepository interface {
 	UpdateStatus(ctx context.Context, s Scope, id uuid.UUID, status Status, endReason string, at time.Time) error
 	// CountActive returns the number of active sessions in the tenant.
 	CountActive(ctx context.Context, s Scope) (int, error)
-	// ExpireOverdue marks active sessions past their window as expired
-	// (cross-tenant maintenance).
-	ExpireOverdue(ctx context.Context, now time.Time) (int, error)
+	// ExpireOverdue marks active sessions past their window as expired and
+	// returns the ones it closed (cross-tenant maintenance). It returns them
+	// rather than a count because closing a privileged session is an event
+	// somebody has to be able to read afterwards, and a count cannot be audited.
+	ExpireOverdue(ctx context.Context, now time.Time) ([]ExpiredSession, error)
 	// ExpireIdle ends active sessions that have gone untouched for longer than
 	// their device's idle timeout, returning the ones it ended so the caller can
 	// tear their gateways down. Cross-tenant maintenance.
@@ -36,11 +38,19 @@ type SessionRepository interface {
 }
 
 // ExpiredSession identifies a session the reaper closed. Protocol comes along
-// because tearing the session down means finding the gateway that serves it.
+// because tearing the session down means finding the gateway that serves it;
+// DeviceID, EndedAt and Reason come along because the closure is audited, and an
+// audit entry that cannot say which device, when, or why is not worth writing.
 type ExpiredSession struct {
 	ID       uuid.UUID
 	OrgID    uuid.UUID
+	DeviceID uuid.UUID
 	Protocol Protocol
+	// EndedAt is when the session actually ended — the moment its authorization
+	// lapsed or its idle timeout elapsed — not when the sweep noticed.
+	EndedAt time.Time
+	// Reason is the end_reason stamped on the row: window_expired or idle_timeout.
+	Reason string
 }
 
 // ActivitySink records that a session is being used, so an idle one can be told
@@ -154,6 +164,22 @@ type Recording struct {
 	DurationMS *int64
 }
 
+// ExpiredRecording is one recording past its retention deadline, with what it
+// takes to free it: the object keys, and the tenant it belongs to.
+type ExpiredRecording struct {
+	RecordingID uuid.UUID
+	SessionID   uuid.UUID
+	OrgID       uuid.UUID
+	// ObjectKeys are the blobs to delete. Rows dropped without them leave objects
+	// nothing points to — storage that is never freed and never accounted for.
+	ObjectKeys []string
+	// Kinds and Bytes are recorded in the audit event, so the log says what was
+	// destroyed rather than only that something was.
+	Kinds      []string
+	Bytes      int64
+	RetainedTo time.Time
+}
+
 // RecordingStore persists recording metadata and retention.
 type RecordingStore interface {
 	Start(ctx context.Context, s Scope, sessionID uuid.UUID, retention time.Duration) (*Recording, error)
@@ -176,6 +202,63 @@ type RecordingStore interface {
 	// gateway — which finalizes recordings from a background teardown with no
 	// acting user.
 	FindBySessionSystem(ctx context.Context, sessionID uuid.UUID) (*Recording, error)
+	// DueForPurge lists recordings past their retention deadline, across every
+	// tenant — the reaper runs on a timer, not on behalf of an organization.
+	DueForPurge(ctx context.Context, now time.Time, limit int) ([]ExpiredRecording, error)
+	// PurgeSystem drops one expired recording's rows without a tenant scope. The
+	// caller frees the blobs first; see Delete.
+	PurgeSystem(ctx context.Context, recordingID uuid.UUID) error
+}
+
+// SettingsStore reads and writes an organization's policy settings.
+//
+// Retention is read here rather than taken from the process configuration
+// because it is a policy an administrator sets, not a deployment detail: it
+// must change without a redeploy, and it differs per tenant. The configured
+// value seeds a tenant that has never set one.
+type SettingsStore interface {
+	// RecordingRetention returns how long this organization keeps recordings.
+	// Zero means keep them indefinitely.
+	RecordingRetention(ctx context.Context, orgID uuid.UUID) (time.Duration, error)
+	// GetSettings reads an organization's settings, creating the row from the
+	// deployment's configured defaults the first time it is asked.
+	GetSettings(ctx context.Context, s Scope, orgID uuid.UUID) (*OrgSettings, error)
+	// SetRecordingRetention stores a new policy, in days, and re-stamps the
+	// deadline on recordings the organization already holds.
+	SetRecordingRetention(ctx context.Context, s Scope, orgID uuid.UUID, days int, by uuid.UUID) error
+	// SetBranding stores how this organization's console presents itself.
+	SetBranding(ctx context.Context, s Scope, orgID uuid.UUID, b Branding, by uuid.UUID) error
+	// SetNetworkPolicy stores which source addresses may reach the console.
+	SetNetworkPolicy(ctx context.Context, s Scope, orgID uuid.UUID, p NetworkPolicy, by uuid.UUID) error
+	// NetworkPolicyFor reads the policy with no acting user. It is on the path of
+	// every authenticated request, so implementations are expected to be cheap.
+	NetworkPolicyFor(ctx context.Context, orgID uuid.UUID) (NetworkPolicy, error)
+}
+
+// OrgSettings is one organization's policy settings.
+type OrgSettings struct {
+	// RecordingRetentionDays is how long session recordings are kept. Zero means
+	// indefinitely — a legitimate policy, and a different statement from having
+	// no policy at all.
+	RecordingRetentionDays int
+	// ConfiguredDefaultDays is what this deployment's environment asked for
+	// (GUARDRAIL_RECORDING_RETENTION_DAYS). The console shows it beside the live
+	// value so an administrator can see when the two have diverged, rather than
+	// wondering which one is in force. The API container cannot write the host's
+	// .env — compose reads that file, the container only receives variables from
+	// it — so the honest arrangement is one runtime source of truth with the
+	// file's value visible next to it.
+	ConfiguredDefaultDays int
+	// Branding is what the console shows in place of the vendor seal. Zero-valued
+	// with Enabled true is the default and means "show the vendor seal".
+	Branding Branding
+	// Network is the source-address policy. Both lists are off by default, which
+	// is the only safe default: a deployment that upgrades into this feature must
+	// not suddenly start refusing the addresses it has always accepted.
+	Network        NetworkPolicy
+	UpdatedAt      time.Time
+	UpdatedBy      *uuid.UUID
+	UpdatedByEmail string
 }
 
 // Artifact kinds. A recording is stored as two objects: the payload, and a

@@ -159,3 +159,33 @@ export const IconRefresh = (p: IconProps) => (
 export const IconClipboard = (p: IconProps) => (
   <svg {...base(p)}><rect x="8" y="2" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /></svg>
 );
+
+// Organization-wide policy: a gear.
+export const IconSettings = (p: IconProps) => (
+  <svg {...base(p)}><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.35.4.65.73.85.3.18.65.27 1 .26H21a2 2 0 1 1 0 4h-.09c-.7.01-1.33.42-1.61 1.06z" /></svg>
+);
+
+// A brush: the console's own appearance.
+export const IconBrush = (p: IconProps) => (
+  <svg {...base(p)}><path d="M9.5 14.5 3 21l6.5-6.5" /><path d="M14 3.5a2.12 2.12 0 0 1 3 3L9.5 14 6 15l1-3.5z" /><path d="M17.5 6.5 21 3" /></svg>
+);
+
+// A network shield: which addresses may reach the console.
+export const IconNetwork = (p: IconProps) => (
+  <svg {...base(p)}><rect x="3" y="3" width="7" height="6" rx="1.5" /><rect x="14" y="3" width="7" height="6" rx="1.5" /><rect x="8.5" y="15" width="7" height="6" rx="1.5" /><path d="M6.5 9v3h11V9M12 12v3" /></svg>
+);
+
+// A padlocked ledger link: the audit chain.
+export const IconLink = (p: IconProps) => (
+  <svg {...base(p)}><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+);
+
+// A calendar with a slash: how long evidence is kept.
+export const IconArchive = (p: IconProps) => (
+  <svg {...base(p)}><rect x="3" y="4" width="18" height="4" rx="1.5" /><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" /><path d="M10 12h4" /></svg>
+);
+
+// An upload tray: bringing artwork in.
+export const IconUpload = (p: IconProps) => (
+  <svg {...base(p)}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 9l5-5 5 5M12 4v12" /></svg>
+);

@@ -325,14 +325,14 @@ func (r *AccessSessionRepo) ExpireIdle(ctx context.Context, now time.Time) ([]ac
 			  AND d.idle_timeout_minutes > 0
 			  AND COALESCE(s.last_activity_at, s.started_at, s.created_at)
 			      < $1::timestamptz - make_interval(mins => d.idle_timeout_minutes)
-			RETURNING s.id, s.organization_id, s.protocol`, now)
+			RETURNING s.id, s.organization_id, s.device_id, s.protocol, s.ended_at, s.end_reason`, now)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var e access.ExpiredSession
-			if err := rows.Scan(&e.ID, &e.OrgID, &e.Protocol); err != nil {
+			if err := rows.Scan(&e.ID, &e.OrgID, &e.DeviceID, &e.Protocol, &e.EndedAt, &e.Reason); err != nil {
 				return err
 			}
 			out = append(out, e)
@@ -353,8 +353,8 @@ func (r *AccessSessionRepo) TouchActivity(ctx context.Context, id uuid.UUID, at 
 	})
 }
 
-func (r *AccessSessionRepo) ExpireOverdue(ctx context.Context, now time.Time) (int, error) {
-	var n int
+func (r *AccessSessionRepo) ExpireOverdue(ctx context.Context, now time.Time) ([]access.ExpiredSession, error) {
+	var out []access.ExpiredSession
 	err := r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
 		// ended_at is granted_until, NOT the moment the reaper noticed. Access was
 		// authorized to exactly that instant and no further; stamping "now" records
@@ -363,14 +363,22 @@ func (r *AccessSessionRepo) ExpireOverdue(ctx context.Context, now time.Time) (i
 		// host that is off overnight adds the whole outage to every session that
 		// lapsed during it. One session on this box reads as 21h when its window was
 		// an hour and its last activity was four seconds in.
-		ct, err := tx.Exec(ctx, `
+		rows, err := tx.Query(ctx, `
 			UPDATE access_sessions SET status='expired', ended_at=granted_until, end_reason='window_expired'
-			WHERE status='active' AND granted_until IS NOT NULL AND granted_until < $1`, now)
+			WHERE status='active' AND granted_until IS NOT NULL AND granted_until < $1
+			RETURNING id, organization_id, device_id, protocol, ended_at, end_reason`, now)
 		if err != nil {
 			return err
 		}
-		n = int(ct.RowsAffected())
-		return nil
+		defer rows.Close()
+		for rows.Next() {
+			var e access.ExpiredSession
+			if err := rows.Scan(&e.ID, &e.OrgID, &e.DeviceID, &e.Protocol, &e.EndedAt, &e.Reason); err != nil {
+				return err
+			}
+			out = append(out, e)
+		}
+		return rows.Err()
 	})
-	return n, err
+	return out, err
 }

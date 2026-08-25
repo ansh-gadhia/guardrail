@@ -103,13 +103,42 @@ GET    /audit?action=&actor=&result=&from=&to=&limit=   log:read; newest-first
 GET    /dashboard/summary              counts + top devices + recent activity
 GET    /search?q=&limit=               global (users/devices/sessions)
 POST   /reports    {type,format,from,to} -> CSV download   report:read
+POST   /audit/verify?scope=&limit=              log:read; walks the hash chain
 GET    /notification-channels  POST/PATCH/DELETE ...
 ```
+`/audit/verify` recomputes the caller's organization chain and reports
+`{ok, checked, from, to, unverifiable, truncated}`, plus `reason` and
+`broken_at` when a link or a row fails. A super admin may pass `scope=system` for
+the chain of events that belong to no tenant. `unverifiable` counts events
+written before `hash_version` 2, whose hashes cannot be recomputed from what the
+database stored; they are neither proved nor accused. A POST rather than a GET
+because it is a full table walk.
+
 `/reports` accepts `type: audit | access` and `format: csv` (default), returning
 the CSV inline as an `attachment` download. `from`/`to` accept RFC 3339 or
 `YYYY-MM-DD`. `/audit` and `/reports` are gated by `log:read` / `report:read`;
 `/dashboard/summary` and `/search` require only authentication and are scoped to
 the caller's organization by RLS (a super admin sees cross-tenant results).
+
+### Organization settings
+```
+GET    /settings                         org:read; policy + your source address
+GET    /settings/branding                any signed-in user (the console shell)
+PUT    /settings/recording-retention  {days}                       org:write
+PUT    /settings/branding  {client_name,client_logo,enabled}       org:write
+PUT    /settings/network-policy  {allowlist_enabled,allowlist,
+                                  blocklist_enabled,blocklist}     org:write
+```
+`/settings/branding` is readable by everybody because every page paints the
+brand; the rest is an administrator's business. `client_logo` is a `data:` URI
+under 400 000 characters, or `""`. Omitting `client_logo` from a PUT keeps the
+stored artwork — saving a changed name must not silently discard the logo.
+
+The network policy holds two independent lists of `{cidr, note}`, each with its
+own switch, **both off by default**. The blocklist wins over the allowlist. A
+policy that would refuse the address the request arrived from is rejected with
+400 rather than stored; super admins are exempt from enforcement. Refusals are
+audited as `auth.network_denied` and answered with 403.
 
 ### Ops (unauthenticated / infra)
 ```

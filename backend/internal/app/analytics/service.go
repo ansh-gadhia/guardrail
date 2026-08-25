@@ -88,9 +88,14 @@ type AuditRow struct {
 	// since been purged, or when the action has no target at all; the console
 	// falls back to the id rather than showing nothing.
 	TargetLabel string
-	IP          string
-	UserAgent   string
-	Result      string
+	// SessionID is the session the event happened inside, when it happened inside
+	// one. It is what turns an audit row into something a reviewer can follow:
+	// the recording, the timeline and the authorization behind it are all one
+	// click away instead of a search on another page.
+	SessionID string
+	IP        string
+	UserAgent string
+	Result    string
 	// Detail is the structured payload recorded with the event (e.g. the failure
 	// reason, a device name, an approval decision). Shape varies by action; the
 	// delivery layer passes it through verbatim for inspection.

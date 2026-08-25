@@ -6,18 +6,25 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/guardrail/guardrail/internal/api/middleware"
 	"github.com/guardrail/guardrail/internal/app/analytics"
+	"github.com/guardrail/guardrail/internal/domain/audit"
 )
 
 // AnalyticsHandler exposes the dashboard, global search, audit log, and report
 // endpoints — the read-model surface for M8.
-type AnalyticsHandler struct{ svc *analytics.Service }
+type AnalyticsHandler struct {
+	svc *analytics.Service
+	// verifier recomputes the audit hash chain. Optional: nil simply omits the
+	// endpoint rather than mounting one that always fails.
+	verifier audit.ChainVerifier
+}
 
 // NewAnalyticsHandler constructs an AnalyticsHandler.
-func NewAnalyticsHandler(svc *analytics.Service) *AnalyticsHandler {
-	return &AnalyticsHandler{svc: svc}
+func NewAnalyticsHandler(svc *analytics.Service, verifier audit.ChainVerifier) *AnalyticsHandler {
+	return &AnalyticsHandler{svc: svc, verifier: verifier}
 }
 
 // Register mounts analytics routes.
@@ -26,6 +33,58 @@ func (h *AnalyticsHandler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc)
 	rg.GET("/search", authMW, h.search)
 	rg.GET("/audit", authMW, middleware.RequirePermission("log:read"), h.audit)
 	rg.POST("/reports", authMW, middleware.RequirePermission("report:read"), h.report)
+	if h.verifier != nil {
+		// Behind log:read, the same permission as reading the events: verifying
+		// the chain reveals nothing the log itself does not.
+		rg.POST("/audit/verify", authMW, middleware.RequirePermission("log:read"), h.verifyChain)
+	}
+}
+
+// verifyChain recomputes the caller's organization chain and reports the first
+// event that does not follow the one before it, or whose contents no longer
+// match its own hash.
+//
+// A POST rather than a GET: it is a full table walk, and making it trivially
+// cacheable or prefetchable would invite exactly that.
+func (h *AnalyticsHandler) verifyChain(c *gin.Context) {
+	actor, _ := middleware.ClaimsFrom(c)
+
+	// Events that belong to no tenant — a refresh-token failure with no
+	// resolvable account behind it — form their own chain. Only a super admin can
+	// read those rows, so only a super admin can ask for that chain.
+	var org *uuid.UUID
+	if !(actor.IsSuperAdmin && c.Query("scope") == "system") {
+		id := actor.OrganizationID
+		org = &id
+	}
+
+	rep, err := h.verifier.VerifyChain(c.Request.Context(), org, queryLimit(c))
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	out := gin.H{
+		"ok": rep.OK, "checked": rep.Checked,
+		"truncated": rep.Truncated, "unverifiable": rep.Unverifiable,
+	}
+	if rep.Checked > 0 {
+		out["from"] = rfc3339UTC(rep.From)
+		out["to"] = rfc3339UTC(rep.To)
+	}
+	if !rep.OK {
+		out["reason"] = rep.Reason
+		// A chain can fail in ways that name no single row — no first event, or
+		// several claiming to be it. Reaching through the nil pointer to render a
+		// row that does not exist would turn a report about a damaged log into a
+		// 500 with no report at all.
+		if rep.BrokenAt != nil {
+			out["broken_at"] = rep.BrokenAt.String()
+		}
+		if rep.BrokenAtTS != nil && !rep.BrokenAtTS.IsZero() {
+			out["broken_at_ts"] = rfc3339UTC(*rep.BrokenAtTS)
+		}
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func (h *AnalyticsHandler) dashboard(c *gin.Context) {
@@ -79,6 +138,9 @@ func (h *AnalyticsHandler) audit(c *gin.Context) {
 		out = append(out, gin.H{
 			"ts": r.Timestamp, "actor": r.ActorEmail, "action": r.Action, "category": r.Category,
 			"target_type": r.TargetType, "target_id": r.TargetID, "target_label": r.TargetLabel,
+			// Present only for events that happened inside a session. The console
+			// turns it into a link to that session's recording and timeline.
+			"session_id": r.SessionID,
 			"ip":         r.IP,
 			"user_agent": r.UserAgent, "result": r.Result, "detail": r.Detail,
 		})

@@ -4,16 +4,18 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/store/auth";
 import { useTheme } from "@/store/theme";
 import { useVersion } from "@/hooks/useVersion";
+import { useBranding } from "@/hooks/useBranding";
 import { api } from "@/lib/api";
 import type { AccessRequest, Session } from "@/lib/types";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { CommandPalette, type Command } from "./CommandPalette";
-import { BrandMark, CompanyLogo } from "./brand";
+import { BrandMark, BrandSeal } from "./brand";
 import { Footer } from "./Footer";
 import { Menu, MenuItem, Badge, cn } from "./ui";
 import {
   IconDashboard, IconDevices, IconSessions, IconSliders, IconAudit, IconShield,
   IconLogout, IconBell, IconSun, IconMoon, IconMenu, IconChevronsLeft, IconSearch, IconX, IconActivity, IconFilm, IconGlobe, IconCheck,
+  IconSettings,
 } from "./icons";
 
 type IconType = ComponentType<{ size?: number; className?: string }>;
@@ -31,6 +33,10 @@ const NAV: NavItem[] = [
   { to: "/access-log", label: "Access Log", icon: IconActivity, perm: "user:read", section: "Governance" },
   { to: "/audit", label: "Audit Log", icon: IconAudit, perm: "log:read", section: "Governance" },
   { to: "/security", label: "Account", icon: IconShield, section: "Governance" },
+  // Organization-wide policy: branding, who may reach the console, how long
+  // recordings are kept, and the integrity of the log itself. Gated on org:read
+  // so it appears for administrators and for nobody else.
+  { to: "/organization", label: "Organization", icon: IconSettings, perm: "org:read", section: "Governance" },
 ];
 
 const COLLAPSE_KEY = "guardrail-sidebar-collapsed";
@@ -42,6 +48,7 @@ export function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { theme, toggle } = useTheme();
+  const branding = useBranding();
 
   const [collapsed, setCollapsed] = useState(() => {
     try { return localStorage.getItem(COLLAPSE_KEY) === "1"; } catch { return false; }
@@ -129,33 +136,12 @@ export function AppLayout() {
         )}
       </div>
 
-      {/* The company mark, seated just under the product wordmark — a small
-          animated "seal" that leans into the Virtual Galaxy name: a breathing
-          accent aura, drifting starlight, and a mark that blooms on hover. Hidden
-          when the rail is collapsed, where only the product emblem shows. */}
-      {!collapsed && (
-        <div className="brand-seal px-4 pb-2">
-          <div className="seal-divider mb-2.5 h-px w-full" aria-hidden />
-          <a
-            href="https://vgipl.com"
-            target="_blank"
-            rel="noreferrer noopener"
-            title="Virtual Galaxy"
-            className="group relative flex flex-col items-center gap-1.5 rounded-xl py-2 outline-none transition-colors hover:bg-surface-2/40 focus-visible:ring-2 focus-visible:ring-accent/50"
-          >
-            <span className="text-[8.5px] font-semibold uppercase tracking-[0.24em] text-faint transition-colors group-hover:text-accent">
-              Engineered by
-            </span>
-            <span className="seal-cluster relative flex items-center justify-center px-3 py-0.5">
-              <span className="seal-aura" aria-hidden />
-              <span className="seal-star seal-star-1" aria-hidden />
-              <span className="seal-star seal-star-2" aria-hidden />
-              <span className="seal-star seal-star-3" aria-hidden />
-              <CompanyLogo className="seal-logo relative h-7 w-auto" />
-            </span>
-          </a>
-        </div>
-      )}
+      {/* The mark seated just under the product wordmark: the client's identity
+          when this deployment has been branded for one, and the vendor seal when
+          it has not. Hidden when the rail is collapsed, where only the product
+          emblem shows. The settings page renders this exact component as a live
+          preview, so what an administrator approves is what ships. */}
+      {!collapsed && <BrandSeal branding={branding.data} />}
 
       <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-2">
         {sections.map((section) => (
@@ -191,7 +177,7 @@ export function AppLayout() {
       </nav>
       <div className="border-t border-line p-3">
         <div className={cn("mt-1 flex items-center px-2 text-2xs text-faint", collapsed ? "justify-center" : "justify-between")}>
-          {!collapsed && <span>GuardRail</span>}
+          {!collapsed && <span className="truncate">{branding.data?.configured ? branding.data.client_name || "GuardRail" : "GuardRail"}</span>}
           <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono">v{version.data?.version ?? "…"}</span>
         </div>
       </div>

@@ -1,4 +1,5 @@
 import { useMemo, useState, type ComponentType, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { plausibleDate } from "@/lib/dates";
@@ -17,8 +18,10 @@ import {
   IconCheck,
   IconShield,
   IconFolder,
+  IconFilm,
 } from "@/components/icons";
 import { toast } from "@/components/Toast";
+import { ChainVerdict, VerifyChainButton, useChainVerification } from "@/components/AuditIntegrity";
 
 // A stable key per row — the audit feed has no primary id, so we pair the row's
 // index with its timestamp to keep React keys and selection stable across sorts.
@@ -51,6 +54,10 @@ export function AuditPage() {
   const [action, setAction] = useState("");
   const [result, setResult] = useState("");
   const [selected, setSelected] = useState<Row | null>(null);
+  // Verification lives here as well as on the organization page, because this is
+  // where somebody is actually reading the log — and "can I trust what I am
+  // looking at" is a question you have while looking at it.
+  const { report, verify } = useChainVerification();
 
   const { data, isLoading, isError } = useQuery<AuditRow[]>({
     queryKey: ["audit", action, result],
@@ -145,7 +152,8 @@ export function AuditPage() {
         title="Audit Log"
         subtitle="Tamper-evident, hash-chained record of every privileged action."
         actions={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <VerifyChainButton pending={verify.isPending} onRun={() => verify.mutate()} />
             <Button variant="ghost" size="sm" icon={IconDownload} onClick={() => downloadReport("audit")}>
               Audit CSV
             </Button>
@@ -155,6 +163,12 @@ export function AuditPage() {
           </div>
         }
       />
+
+      {report && (
+        <div className="mb-4">
+          <ChainVerdict report={report} />
+        </div>
+      )}
 
       {isLoading && (
         <div className="space-y-3">
@@ -323,6 +337,23 @@ function AuditDetailDrawer({ event, onClose }: { event: Row; onClose: () => void
               </div>
             )}
           </DRow>
+          {event.session_id && (
+            <DRow label="Session">
+              {/* The recording, the timeline and the authorization behind this
+                  entry are all one place. Without this the reader had the id and
+                  a different page to go and search on. */}
+              <Link
+                to={`/recordings?session=${event.session_id}`}
+                className="inline-flex items-center gap-1.5 text-sm font-medium text-accent hover:underline"
+              >
+                <IconFilm size={14} />
+                Open this session
+              </Link>
+              <div className="mt-1">
+                <CopyableID label="session" value={event.session_id} />
+              </div>
+            </DRow>
+          )}
           <DRow label="Source IP">
             <span className="font-mono text-xs text-fg">{event.ip || "—"}</span>
           </DRow>

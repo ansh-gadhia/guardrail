@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"time"
 
@@ -204,4 +205,161 @@ func TestIntegration_SessionListingScansEveryColumnItSelects(t *testing.T) {
 		t.Errorf("ended_at is %v from granted_until; a late reaper recorded %v of access that was never authorized",
 			drift, drift)
 	}
+}
+
+// The hash chain is the thing that makes this an audit LOG rather than a table
+// of rows somebody could edit. It shipped in the first release and nothing ever
+// walked it, so two defects sat in it undetected:
+//
+//   - it FORKED, because each event linked to the latest-DATED predecessor
+//     rather than the last-inserted one, and
+//   - its hashes could not be recomputed at all, because they were taken over Go
+//     values that Postgres rounds (nanoseconds to microseconds) and re-orders
+//     (jsonb sorts object keys its own way) on the way in.
+//
+// Both are the kind of fault that only a verifier finds, which is why nothing
+// found them. These tests are that verifier's own proof.
+func TestIntegration_AuditChainVerifies(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+
+	repo := postgres.NewAuditRepo(pg)
+	org := newChainOrg(t, pg) // a chain of this test's own, unaffected by other rows
+	actor := uuid.New()
+
+	for i := 0; i < 12; i++ {
+		if err := repo.Record(ctx, audit.Event{
+			ID: uuid.New(), OrganizationID: &org, ActorID: &actor,
+			ActorEmail: "chain-probe@guardrail.local",
+			Action:     "test.chain", Category: audit.CategorySession,
+			Result: audit.ResultSuccess, IP: "10.200.10.69",
+			// Deliberately awkward: keys that jsonb and Go sort differently, and a
+			// character Go escapes and Postgres does not.
+			Detail: map[string]any{"zz": i, "a": "x<y&z", "middle": []any{1, "two"}},
+		}); err != nil {
+			t.Fatalf("record %d: %v", i, err)
+		}
+	}
+
+	rep, err := repo.VerifyChain(ctx, &org, 0)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !rep.OK {
+		t.Fatalf("a chain nobody touched does not verify: %s (at %v)", rep.Reason, rep.BrokenAt)
+	}
+	if rep.Checked != 12 {
+		t.Fatalf("checked %d events, want 12", rep.Checked)
+	}
+	if rep.Unverifiable != 0 {
+		t.Errorf("%d events reported unverifiable; every one of these was written by the current scheme", rep.Unverifiable)
+	}
+}
+
+// Events written OUT OF TIMESTAMP ORDER used to fork the chain: both linked to
+// the same predecessor, and a forked chain proves nothing, because a spliced-in
+// row is indistinguishable from a branch. Callers really do write out of order —
+// anything carrying its own clock does.
+func TestIntegration_AuditChainSurvivesOutOfOrderTimestamps(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+
+	repo := postgres.NewAuditRepo(pg)
+	org := newChainOrg(t, pg)
+	base := time.Date(2026, 8, 18, 14, 0, 0, 0, time.UTC)
+
+	for _, offset := range []time.Duration{0, -2 * time.Hour, time.Hour, -30 * time.Minute, 15 * time.Minute} {
+		if err := repo.Record(ctx, audit.Event{
+			ID: uuid.New(), OrganizationID: &org, Timestamp: base.Add(offset),
+			ActorEmail: "clock-skew@guardrail.local",
+			Action:     "test.out_of_order", Category: audit.CategoryAuth, Result: audit.ResultSuccess,
+		}); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+
+	rep, err := repo.VerifyChain(ctx, &org, 0)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !rep.OK {
+		t.Fatalf("out-of-order timestamps broke the chain: %s", rep.Reason)
+	}
+	if rep.Checked != 5 {
+		t.Fatalf("checked %d events, want 5", rep.Checked)
+	}
+}
+
+// And the point of all of it: an altered row is caught, and named.
+func TestIntegration_AuditChainCatchesAnAlteredRow(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+
+	repo := postgres.NewAuditRepo(pg)
+	org := newChainOrg(t, pg)
+	var victim uuid.UUID
+	for i := 0; i < 5; i++ {
+		id := uuid.New()
+		if i == 2 {
+			victim = id
+		}
+		if err := repo.Record(ctx, audit.Event{
+			ID: id, OrganizationID: &org, ActorEmail: "chain-probe@guardrail.local",
+			Action: "test.tamper", Category: audit.CategorySession, Result: audit.ResultDenied,
+		}); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+
+	// The application role holds no UPDATE grant on audit_events, which is the
+	// point — so this edit is made as the owner, standing in for somebody with
+	// database access. That is precisely the attacker a hash chain exists for.
+	tamperWithAuditRow(t, ctx, victim)
+
+	rep, err := repo.VerifyChain(ctx, &org, 0)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if rep.OK {
+		t.Fatal("an event was rewritten in the database and the chain still verified")
+	}
+	if rep.BrokenAt == nil || *rep.BrokenAt != victim {
+		t.Fatalf("broken at %v, want the row that was edited (%s)", rep.BrokenAt, victim)
+	}
+	if rep.Checked != 2 {
+		t.Errorf("checked %d events before the break, want the 2 that precede it", rep.Checked)
+	}
+}
+
+// tamperWithAuditRow edits an audit event directly, as the database owner rather
+// than through the application. Nothing in the product can do this; that is the
+// premise of the test.
+func tamperWithAuditRow(t *testing.T, ctx context.Context, id uuid.UUID) {
+	t.Helper()
+	dsn := envOrSkip(t, "GUARDRAIL_TEST_DSN")
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect as owner: %v", err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, `UPDATE audit_events SET result='success' WHERE id=$1`, id); err != nil {
+		t.Fatalf("tamper: %v", err)
+	}
+}
+
+// newChainOrg creates an organization so the test writes into a chain of its own.
+// audit_events carries a foreign key to organizations, and — more to the point —
+// a chain shared with every other test's rows would prove nothing about ordering.
+func newChainOrg(t *testing.T, pg *postgres.DB) uuid.UUID {
+	t.Helper()
+	slug := "chain-" + uuid.NewString()[:8]
+	o := &domiam.Organization{ID: uuid.New(), Name: slug, Slug: slug, Status: "active"}
+	if err := postgres.NewOrgRepo(pg).Create(context.Background(),
+		domiam.TenantScope{IsSuperAdmin: true}, o); err != nil {
+		t.Fatalf("create organization: %v", err)
+	}
+	return o.ID
 }

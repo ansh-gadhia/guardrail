@@ -149,13 +149,19 @@ jobs:
           # carry. check-latest resolves against the published list instead.
           check-latest: true
           cache-dependency-path: backend/go.sum
+      # Both scanners are pinned. @latest means every run installs whatever was
+      # published minutes ago, so a scanner release can turn main red overnight
+      # for a reason that has nothing to do with the commit that triggered it —
+      # and the build is no longer reproducible: the same tree scans differently
+      # on Tuesday than it did on Monday. Bump these deliberately; a scanner
+      # upgrade is a change worth reviewing, like any other dependency.
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           cd backend && govulncheck ./...
       - name: gosec (static security analysis)
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
           cd backend && gosec -exclude-generated -severity medium ./...
       - name: gitleaks (secret scan)
         uses: gitleaks/gitleaks-action@v2

@@ -26,14 +26,26 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (*TokenPair, error) 
 		if err == nil && !ok {
 			// No target: a throttled attempt names an email, and there may be no
 			// user behind it. Inventing one would be worse than leaving it blank.
-			s.record(ctx, audit.Event{Action: "auth.login", Category: audit.CategoryAuth,
+			// The organization is a different matter — see attemptOrg: without it
+			// this row is visible to nobody but a super admin, and a password
+			// spray hitting the throttle is exactly what a tenant's own
+			// administrator needs to see.
+			s.record(ctx, audit.Event{OrganizationID: s.attemptOrg(ctx, email, in.Organization),
+				Action: "auth.login", Category: audit.CategoryAuth,
 				ActorEmail: email.String(), IP: in.Meta.IP, UserAgent: in.Meta.UserAgent,
 				Result: audit.ResultDenied, Detail: map[string]any{"reason": "throttled"}})
 			return nil, ErrThrottled
 		}
 	}
 
-	user, err := s.resolveLoginUser(ctx, email, in.Organization)
+	user, attemptedOrg, err := s.resolveLoginUser(ctx, email, in.Organization)
+	if errors.Is(err, iam.ErrEmailAmbiguous) {
+		// Recorded before returning. This attempt used to vanish entirely: it is
+		// not a failed password, so it never reached failLogin, and the early
+		// return below meant no event was written at all. Every candidate account
+		// was named by this attempt, so each one's organization is told about it.
+		s.recordAmbiguous(ctx, email, in.Meta)
+	}
 	if err != nil && !errors.Is(err, iam.ErrNotFound) && !errors.Is(err, iam.ErrInvalidCredentials) {
 		return nil, err // ambiguous email or infra error
 	}
@@ -46,7 +58,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (*TokenPair, error) 
 	pwOK, _ := s.hasher.Verify(in.Password, hash)
 
 	if user == nil || user.AuthProvider != iam.ProviderLocal || user.PasswordHash == "" {
-		s.failLogin(ctx, throttleKey, nil, email, in.Meta, "unknown_user")
+		s.failLogin(ctx, throttleKey, nil, email, in.Meta, "unknown_user", attemptedOrg)
 		return nil, iam.ErrInvalidCredentials
 	}
 	if user.IsLocked(now) {
@@ -54,7 +66,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (*TokenPair, error) 
 		return nil, iam.ErrAccountLocked
 	}
 	if !pwOK {
-		s.failLogin(ctx, throttleKey, user, email, in.Meta, "bad_password")
+		s.failLogin(ctx, throttleKey, user, email, in.Meta, "bad_password", attemptedOrg)
 		return nil, iam.ErrInvalidCredentials
 	}
 	if user.Status != "active" {
@@ -95,38 +107,93 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (*TokenPair, error) 
 	return pair, nil
 }
 
-// resolveLoginUser finds the user to authenticate, using the org slug when given
-// and otherwise requiring a globally-unique email.
-func (s *Service) resolveLoginUser(ctx context.Context, email iam.Email, orgSlug string) (*iam.User, error) {
+// resolveLoginUser finds the account a sign-in attempt is for, and — separately
+// — the organization the attempt was AIMED at, which is known in cases where the
+// account is not: naming an organization on the form resolves one even when the
+// email belongs to nobody. The second return is what makes a failure visible to
+// the administrator responsible for it; see attemptOrg.
+func (s *Service) resolveLoginUser(ctx context.Context, email iam.Email, orgSlug string) (*iam.User, *iam.ID, error) {
 	if orgSlug != "" {
 		org, err := s.orgs.GetBySlug(ctx, orgSlug)
 		if err != nil {
-			return nil, iam.ErrInvalidCredentials
+			return nil, nil, iam.ErrInvalidCredentials
 		}
+		orgID := org.ID
 		u, err := s.users.GetByEmailInOrg(ctx, org.ID, email)
 		if err != nil {
-			return nil, iam.ErrInvalidCredentials
+			// The organization is real and was named; only the user is unknown.
+			return nil, &orgID, iam.ErrInvalidCredentials
 		}
-		return u, nil
+		return u, &orgID, nil
 	}
 	candidates, err := s.users.GetByEmailGlobal(ctx, email)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	switch len(candidates) {
 	case 0:
-		return nil, iam.ErrNotFound
+		return nil, s.soleOrg(ctx), iam.ErrNotFound
 	case 1:
 		u := candidates[0]
-		return &u, nil
+		return &u, &u.OrganizationID, nil
 	default:
-		return nil, iam.ErrEmailAmbiguous
+		return nil, nil, iam.ErrEmailAmbiguous
+	}
+}
+
+// attemptOrg works out which organization a sign-in attempt belongs to, for
+// attempts that never get as far as resolving a user.
+//
+// Audit rows are read under row-level security: an event with a NULL
+// organization is visible to super admins and to nobody else. Every failure
+// against an address that does not exist therefore landed in a place the
+// tenant's own Organization Admin could not look — which is precisely the
+// shape of a password spray, and precisely the person who needs to see it.
+func (s *Service) attemptOrg(ctx context.Context, email iam.Email, orgSlug string) *iam.ID {
+	_, orgID, _ := s.resolveLoginUser(ctx, email, orgSlug)
+	return orgID
+}
+
+// soleOrg returns the organization when the deployment has exactly one, and nil
+// when it has several.
+//
+// A single-tenant install is the common case, and there "we could not tell which
+// tenant this was for" is not true: there is only one, and every attempt on the
+// sign-in page is an attempt on it. With more than one tenant the honest answer
+// is nil — guessing would file one tenant's attack traffic in another tenant's
+// ledger, and that ledger is hash-chained and cannot be corrected later.
+func (s *Service) soleOrg(ctx context.Context) *iam.ID {
+	orgs, err := s.orgs.List(ctx, iam.TenantScope{IsSuperAdmin: true}, iam.Page{Limit: 2})
+	if err != nil || len(orgs) != 1 {
+		return nil
+	}
+	id := orgs[0].ID
+	return &id
+}
+
+// recordAmbiguous notes an attempt on an address that exists in more than one
+// organization. Each one was named by the attempt, so each one is told.
+func (s *Service) recordAmbiguous(ctx context.Context, email iam.Email, meta ReqMeta) {
+	candidates, err := s.users.GetByEmailGlobal(ctx, email)
+	if err != nil {
+		return
+	}
+	for i := range candidates {
+		orgID := candidates[i].OrganizationID
+		s.record(ctx, audit.Event{
+			OrganizationID: &orgID, Action: "auth.login", Category: audit.CategoryAuth,
+			ActorEmail: email.String(),
+			TargetType: "user", TargetID: candidates[i].ID.String(),
+			IP: meta.IP, UserAgent: meta.UserAgent,
+			Result: audit.ResultFailure,
+			Detail: map[string]any{"reason": "email_ambiguous", "organizations": len(candidates)},
+		})
 	}
 }
 
 // failLogin records a failed attempt, incrementing account + throttle counters
 // and locking the account when the threshold is reached.
-func (s *Service) failLogin(ctx context.Context, throttleKey string, user *iam.User, email iam.Email, meta ReqMeta, reason string) {
+func (s *Service) failLogin(ctx context.Context, throttleKey string, user *iam.User, email iam.Email, meta ReqMeta, reason string, orgID *iam.ID) {
 	if s.throttle != nil {
 		_ = s.throttle.Fail(ctx, throttleKey)
 	}
@@ -140,7 +207,10 @@ func (s *Service) failLogin(ctx context.Context, throttleKey string, user *iam.U
 		s.record(ctx, s.authEvent(user, meta, audit.ResultFailure, reason))
 		return
 	}
-	s.record(ctx, audit.Event{Action: "auth.login", Category: audit.CategoryAuth,
+	// No user, so no target — but an organization where one could be worked out,
+	// so the tenant's administrator can see attempts on addresses that do not
+	// exist rather than only on ones that do.
+	s.record(ctx, audit.Event{OrganizationID: orgID, Action: "auth.login", Category: audit.CategoryAuth,
 		ActorEmail: email.String(), IP: meta.IP, UserAgent: meta.UserAgent,
 		Result: audit.ResultFailure, Detail: map[string]any{"reason": reason}})
 }

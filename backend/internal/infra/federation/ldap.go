@@ -62,11 +62,19 @@ func NewLDAPAuthenticator(cfg LDAPConfig) *LDAPAuthenticator {
 }
 
 // Authenticate verifies username/password against the directory.
-// TODO: the context is not yet honoured — a wedged directory server holds this
-// call until the LDAP library's own timeout, not the caller's deadline.
-func (a *LDAPAuthenticator) Authenticate(_ context.Context, username, password string) (*iam.ExternalIdentity, error) {
+//
+// The caller's context is honoured. go-ldap v3 has no context-aware Bind or
+// Search, so cancellation is delivered the way the library itself supports:
+// closing the connection, which unblocks whichever operation is in flight. A
+// directory that stops answering mid-bind therefore fails when the request's
+// deadline passes, instead of pinning a request goroutine — and a sign-in page
+// the operator has already navigated away from stops holding a socket open.
+func (a *LDAPAuthenticator) Authenticate(ctx context.Context, username, password string) (*iam.ExternalIdentity, error) {
 	if password == "" { // unauthenticated (anonymous) bind guard
 		return nil, iam.ErrInvalidCredentials
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	conn, err := a.dial(a.cfg)
 	if err != nil {
@@ -74,6 +82,31 @@ func (a *LDAPAuthenticator) Authenticate(_ context.Context, username, password s
 	}
 	defer conn.Close()
 
+	// The watchdog outlives no part of this call: `done` closes on return, so the
+	// goroutine cannot leak past it. Close is safe to call twice — the library
+	// guards it — so the deferred Close above stays as it is.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+
+	id, err := a.searchAndBind(conn, username, password)
+	if err != nil && ctx.Err() != nil {
+		// The failure is our own cancellation closing the socket underneath the
+		// operation, not the directory rejecting the password. Reporting it as
+		// invalid credentials would count a timeout against the account's failure
+		// budget and eventually lock out a user who typed nothing wrong.
+		return nil, ctx.Err()
+	}
+	return id, err
+}
+
+func (a *LDAPAuthenticator) searchAndBind(conn ldapConn, username, password string) (*iam.ExternalIdentity, error) {
 	// 1) Bind as the service account to search.
 	if a.cfg.BindDN != "" {
 		if err := conn.Bind(a.cfg.BindDN, a.cfg.BindPassword); err != nil {

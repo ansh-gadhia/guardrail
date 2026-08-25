@@ -12,6 +12,136 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 ### Security
+- **The audit hash chain is now verifiable, and was not before.** The chain
+  shipped in the first release and nothing had ever walked it, which is how two
+  defects survived in it. It **forked**: each event linked to the tail found by
+  `ORDER BY ts DESC` — the latest-*dated* event, not the last-*inserted* one — so
+  any two events written out of timestamp order linked to the same predecessor
+  and the chain split. On the reference deployment it had forked in hundreds of
+  places, and a forked chain proves nothing, because a spliced-in row is
+  indistinguishable from a branch. And its hashes **could not be recomputed at
+  all**: they were taken over Go values, but verification can only see what
+  Postgres stored, and the two are different bytes — `timestamptz` keeps
+  microseconds while Go keeps nanoseconds, and `jsonb` re-orders object keys and
+  drops whitespace. Every honest event failed to reproduce its own hash.
+
+  `audit_events` gains `seq` (insertion order, which is the order the chain is
+  actually built in) and `hash_version`. The writer truncates the timestamp,
+  canonicalises the address and the detail document, and links to the tail by
+  `seq`. `POST /api/v1/audit/verify` walks the chain and reports what it proved:
+  entries checked, the window covered, and — when a link or a row fails — the
+  exact entry, in words an auditor can use. Events written before this carry
+  `hash_version` 1 and are reported as **unverifiable, not as altered**: their
+  hashes were computed over bytes that no longer exist, and an append-only log
+  has nothing legitimate to rewrite them with. Proved both ways round against a
+  live database: an in-place `UPDATE` and a mid-chain `DELETE` are each caught and
+  named, and the untouched log verifies clean. Migration `0032`.
+
+- **A per-organization source-address policy.** An allowlist and a blocklist,
+  each with **its own switch**, applied to every authenticated request. Two
+  switches rather than one because the lists answer different questions: an
+  allowlist says "only from here", a blocklist says "never from there", and
+  coupling them would mean barring a single address first requires enumerating
+  every address that is permitted. **Both default to off**, which is the only
+  safe default for a deployment upgrading into the feature. The blocklist wins
+  over the allowlist — an address on both is being argued about, and refusing
+  fails safe. Saving is **refused if the policy would lock its author out**: the
+  draft is evaluated against the address the request arrived from before it is
+  stored, and the console shows that address and the verdict live while the
+  policy is being edited. Super admins are exempt, because a platform operator
+  locked out by a customer's typo has no way back that does not involve `psql`.
+  Refusals are audited as `auth.network_denied`.
+
+- **Failed sign-ins are no longer invisible to the administrator they concern.**
+  Audit rows are read under row-level security, so an event with no organization
+  is visible to a super admin and to nobody else — and every failure against an
+  address that does not exist was written exactly that way. That is the shape of
+  a password spray, hidden from precisely the person who needs to see it. An
+  attempt is now attributed to the organization it named, to the one that owns
+  the address when the email resolves, or — on a single-tenant deployment — to
+  the only organization there is. With several tenants and nothing to go on it
+  stays unattributed, because filing one tenant's attack traffic in another
+  tenant's hash-chained ledger cannot be undone. An **ambiguous email** used to
+  be recorded nowhere at all; it is now recorded once per candidate organization.
+
+- `LDAPAuthenticator.Authenticate` honours its context. go-ldap v3 has no
+  context-aware bind or search, so cancellation closes the connection, which
+  unblocks whichever operation is in flight. A wedged directory now fails at the
+  request's deadline instead of pinning a goroutine — and reports the deadline as
+  a deadline, rather than as a bad password that would count against the
+  account's lockout budget.
+
+- `govulncheck` and `gosec` are pinned in CI (`v1.7.0`, `v2.28.0`). At `@latest`
+  a scanner release could turn `main` red overnight for a reason unrelated to the
+  commit that triggered it, and the same tree scanned differently on Tuesday than
+  it had on Monday.
+
+### Added
+- **Console branding, per organization.** The rail under the GuardRail wordmark
+  carried the vendor seal as hard-coded markup, so putting a client's own
+  identity on a deployment meant editing the source. It is now a setting: a
+  logo, a name, or both. Whatever is supplied is what shows — a logo alone
+  renders the logo, a name alone is set as a wordmark in the display face with
+  the product's own accent gradient clipped to the letterforms, and both renders
+  the logo with the name beneath it. With neither, the console keeps exactly what
+  it showed before: *engineered by Virtual Galaxy*. There is a separate on/off
+  switch, so the vendor seal can be restored for a week without discarding the
+  artwork. The settings page renders the **real sidebar component** as a live
+  preview, so what an administrator approves is what ships. The footer carries
+  the Virtual Galaxy mark alongside the tagline — quiet and desaturated until
+  hovered — and names the client when one is set. Migration `0031`.
+
+- **Organization settings page** (`/organization`, gated on `org:read`), holding
+  the four policies that apply to a whole tenant rather than to one person:
+  branding, the source-address policy, recording retention, and audit-log
+  integrity. Each panel saves on its own — a single page-level *Save* would mean
+  changing a logo also applied whatever half-finished firewall rules were on
+  screen. New endpoints `GET /settings`, `GET /settings/branding`,
+  `PUT /settings/branding`, `PUT /settings/network-policy`.
+
+- **Sessions have addresses.** `/recordings?session=<id>` opens a named session
+  directly, fetching it by id rather than hoping it is on the page the reader
+  happens to be looking at, so a session can be quoted in a ticket or sent to a
+  colleague. A **Copy link** control sits in the session window, and any audit
+  entry that happened inside a session now links straight to it — the recording,
+  the timeline and the authorization behind the entry are one click away instead
+  of a search on another page. `session_id` is exposed on audit rows.
+
+### Fixed
+- **A session that timed out left no trace in the audit log.** Both reapers —
+  the grant window and the idle timeout — flipped the row and returned a count,
+  so the log held `session.start` and then nothing: every timed-out session read
+  as still open to anybody reviewing the log rather than the sessions table. Both
+  now write `session.end`, with the reason and the moment the session actually
+  ended rather than the moment the sweep noticed.
+
+- **`session.end` carries a summary of what happened inside the session** —
+  how many timeline events, of what kinds, against which destinations. The
+  timeline itself is deliberately not copied into the ledger: a web session
+  records an event per proxied request, and mirroring that would write thousands
+  of hash-chained rows per session and bury every entry a reviewer actually
+  reads.
+
+- **Housekeeping no longer signs its work with an account that has never
+  existed.** The retention purge and the session reapers run with no user behind
+  them, and the audit recorder stamped `actor_id` unconditionally, writing
+  `00000000-0000-0000-0000-000000000000`. An empty actor is the true statement.
+
+- The README status table said 1.0.0 while `VERSION` said 1.1.2.
+
+- **`install.sh` update path.** Its pinned `VERSION` moves to 1.2.0 — left at
+  1.1.2 it would have pulled last release's images alongside this release's
+  compose file and migrations, which is the untested combination the script's own
+  header warns about. It also gains `migrate_env`: an update rewrites only the
+  keys it owns (regenerating secrets would orphan the vault), so until now every
+  release that added a setting left it missing from the one file an operator
+  would look in. `GUARDRAIL_RECORDING_RETENTION_DAYS` is the first entry; a value
+  already set by hand is left alone. Database migrations need no new step —
+  `api` declares `migrate` and `seed` as `service_completed_successfully`
+  dependencies and compose re-runs a completed one-shot on every `up`, which is
+  verified behaviour, not an assumption.
+
+### Security
 - **The build floor is now a patch, not a minor.** `go.mod` said `go 1.26`, which
   any 1.26.x satisfies, so a build host carrying an older patch produced a
   vulnerable binary without complaint — and one was deployed that way. go1.26.5

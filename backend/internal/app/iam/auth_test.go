@@ -16,6 +16,7 @@ type harness struct {
 	users    *fakeUserRepo
 	sessions *fakeSessionRepo
 	orgs     *fakeOrgRepo
+	audit    *captureAudit
 	hasher   *security.Argon2Hasher
 	now      time.Time
 }
@@ -25,6 +26,7 @@ func newHarness(t *testing.T) *harness {
 	users := newFakeUserRepo()
 	sessions := newFakeSessionRepo(users)
 	orgs := newFakeOrgRepo()
+	rec := &captureAudit{}
 	hasher := security.NewArgon2Hasher(security.Argon2Params{
 		Memory: 8 * 1024, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32,
 	})
@@ -32,11 +34,11 @@ func newHarness(t *testing.T) *harness {
 	svc := NewService(Deps{
 		Users: users, Orgs: orgs, Roles: fakeRoleRepo{}, Sessions: sessions,
 		Hasher: hasher, Tokens: security.NewJWTIssuer("0123456789abcdef0123456789abcdef", "guardrail", 15*time.Minute),
-		Refresh: security.NewRefreshGenerator(), Audit: nopAudit{}, Throttle: nopThrottle{},
+		Refresh: security.NewRefreshGenerator(), Audit: rec, Throttle: nopThrottle{},
 		Clock:  fixedClock{t: now},
 		Config: Config{MaxLoginFailures: 5, LockoutDuration: 15 * time.Minute, RefreshTTL: 720 * time.Hour},
 	})
-	return &harness{svc: svc, users: users, sessions: sessions, orgs: orgs, hasher: hasher, now: now}
+	return &harness{svc: svc, users: users, sessions: sessions, orgs: orgs, audit: rec, hasher: hasher, now: now}
 }
 
 func (h *harness) addUser(t *testing.T, email, password string) *iam.User {

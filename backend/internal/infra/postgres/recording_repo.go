@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -175,6 +176,66 @@ func (r *RecordingRepo) Delete(ctx context.Context, sc access.Scope, sessionID u
 		}
 		if tag.RowsAffected() == 0 {
 			return access.ErrNotFound
+		}
+		return nil
+	})
+}
+
+// DueForPurge lists recordings past their retention deadline, newest deadline
+// first, across every tenant.
+//
+// System-scoped on purpose: the purge runs on a timer with no acting user and no
+// organization, exactly like the session reaper. Scoping it to a tenant would
+// mean the sweep only ever ran for whoever happened to be logged in.
+//
+// The limit bounds one pass. A deployment that has never purged may have years
+// of recordings due at once, and deleting all of them inside a single
+// transaction would hold locks for as long as that takes; the reaper simply
+// comes back in thirty seconds for the next batch.
+func (r *RecordingRepo) DueForPurge(ctx context.Context, now time.Time, limit int) ([]access.ExpiredRecording, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var out []access.ExpiredRecording
+	err := r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT r.id, r.access_session_id, r.organization_id, r.retention_until,
+			       COALESCE(array_agg(a.object_key) FILTER (WHERE a.object_key <> ''), '{}'),
+			       COALESCE(array_agg(a.kind) FILTER (WHERE a.kind IS NOT NULL), '{}'),
+			       COALESCE(SUM(a.size_bytes), 0)
+			  FROM recordings r
+			  LEFT JOIN recording_artifacts a ON a.recording_id = r.id
+			 WHERE r.retention_until IS NOT NULL AND r.retention_until < $1
+			 GROUP BY r.id, r.access_session_id, r.organization_id, r.retention_until
+			 ORDER BY r.retention_until ASC
+			 LIMIT $2`, now, limit)
+		if err != nil {
+			return fmt.Errorf("recordings: due for purge: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var e access.ExpiredRecording
+			if err := rows.Scan(&e.RecordingID, &e.SessionID, &e.OrgID, &e.RetainedTo,
+				&e.ObjectKeys, &e.Kinds, &e.Bytes); err != nil {
+				return fmt.Errorf("recordings: scan purge row: %w", err)
+			}
+			out = append(out, e)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// PurgeSystem drops an expired recording and its artifact rows. The caller frees
+// the blobs first — a row deleted before its bytes leaves an object nothing
+// points to, which is storage that is never reclaimed and never noticed.
+func (r *RecordingRepo) PurgeSystem(ctx context.Context, recordingID uuid.UUID) error {
+	return r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM recording_artifacts WHERE recording_id=$1`, recordingID); err != nil {
+			return fmt.Errorf("recordings: purge artifacts: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM recordings WHERE id=$1`, recordingID); err != nil {
+			return fmt.Errorf("recordings: purge: %w", err)
 		}
 		return nil
 	})

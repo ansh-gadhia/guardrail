@@ -7,8 +7,12 @@ package access
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,6 +43,10 @@ type Config struct {
 	EmergencyQuota  int
 	EmergencyWindow time.Duration
 
+	// RecordingRetention is the fallback deadline for a tenant whose settings row
+	// cannot be read. The policy itself lives in org_settings and is read per
+	// organization; this is only what happens when that read fails, and keeping
+	// a recording too long is the safer failure.
 	RecordingRetention time.Duration
 }
 
@@ -70,19 +78,23 @@ type Service struct {
 	registry   access.LiveRegistry
 	events     access.EventRecorder
 	recordings access.RecordingStore
-	blobs      access.BlobStore
-	devices    access.DeviceLookup
-	creds      access.CredentialResolver
-	requests   access.RequestRepository
-	grants     access.GrantRepository
-	ranker     access.Ranker
-	audit      audit.Recorder
-	notifier   Notifier
-	activity   *ActivityTracker
-	clock      iam.Clock
-	node       string
-	cfg        Config
-	log        *zap.Logger
+	settings   access.SettingsStore
+	// policies caches the per-organization network policy for the guard that runs
+	// on every authenticated request.
+	policies *policyCache
+	blobs    access.BlobStore
+	devices  access.DeviceLookup
+	creds    access.CredentialResolver
+	requests access.RequestRepository
+	grants   access.GrantRepository
+	ranker   access.Ranker
+	audit    audit.Recorder
+	notifier Notifier
+	activity *ActivityTracker
+	clock    iam.Clock
+	node     string
+	cfg      Config
+	log      *zap.Logger
 }
 
 // Deps bundles broker collaborators.
@@ -104,9 +116,13 @@ type Deps struct {
 	Registry         access.LiveRegistry
 	Events           access.EventRecorder
 	Recordings       access.RecordingStore
-	Blobs            access.BlobStore
-	Devices          access.DeviceLookup
-	Creds            access.CredentialResolver
+	// Settings supplies the per-organization retention policy. Nil is valid: the
+	// broker then falls back to Config.RecordingRetention for every tenant, which
+	// is how it behaved before the policy was settable.
+	Settings access.SettingsStore
+	Blobs    access.BlobStore
+	Devices  access.DeviceLookup
+	Creds    access.CredentialResolver
 	// Requests, Grants and Ranker drive the approval gate. All three nil is a
 	// valid deployment: the gate then never fires and every device connects
 	// immediately, which is exactly how things behaved before approvals existed.
@@ -137,7 +153,9 @@ func NewService(d Deps) *Service {
 		sessions: d.Sessions, authorizer: d.Authorizer,
 		gateways: indexGateways(d.Gateways), isolated: indexGateways(d.IsolatedGateways),
 		registry: d.Registry,
-		events:   d.Events, recordings: d.Recordings, blobs: d.Blobs, devices: d.Devices, creds: d.Creds,
+		events:   d.Events, recordings: d.Recordings, settings: d.Settings,
+		policies: newPolicyCache(),
+		blobs:    d.Blobs, devices: d.Devices, creds: d.Creds,
 		requests: d.Requests, grants: d.Grants, ranker: d.Ranker,
 		audit: d.Audit, notifier: d.Notifier, activity: d.Activity,
 		clock: clock, node: d.Node, cfg: d.Config, log: d.Log,
@@ -389,7 +407,7 @@ func (s *Service) establish(ctx context.Context, actor iam.Claims, sess *access.
 		// written would take access away over a failure the operator cannot act on,
 		// and the gateway logs the unrecorded session it then opens. But the cause
 		// belongs in the log next to the effect.
-		if _, err := s.recordings.Start(ctx, scopeOf(actor), sess.ID, s.cfg.RecordingRetention); err != nil && s.log != nil {
+		if _, err := s.recordings.Start(ctx, scopeOf(actor), sess.ID, s.retentionFor(ctx, actor.OrganizationID)); err != nil && s.log != nil {
 			s.log.Error("the recording could not be started; this session will not be recorded",
 				zap.String("session_id", sess.ID.String()),
 				zap.String("device_id", sess.DeviceID.String()),
@@ -486,7 +504,14 @@ func (s *Service) Terminate(ctx context.Context, actor iam.Claims, sessionID uui
 	if s.activity != nil {
 		s.activity.forget(sessionID)
 	}
-	s.recordAudit(ctx, actor, "session.end", sess, meta, audit.ResultSuccess)
+	detail := map[string]any{"ended_by": "user"}
+	if reason != "" {
+		detail["reason"] = reason
+	}
+	if d := s.activityDigest(ctx, sess.OrganizationID, sess.ID); d != nil {
+		detail["activity"] = d
+	}
+	s.recordAuditDetail(ctx, actor, "session.end", sess, meta, audit.ResultSuccess, detail)
 	return nil
 }
 
@@ -619,8 +644,86 @@ func (s *Service) RecordingArtifact(ctx context.Context, actor iam.Claims, sessi
 // ExpireOverdue is invoked by a background reaper to expire sessions past their
 // window across all tenants.
 func (s *Service) ExpireOverdue(ctx context.Context) (int, error) {
-	return s.sessions.ExpireOverdue(ctx, s.clock.Now())
+	expired, err := s.sessions.ExpireOverdue(ctx, s.clock.Now())
+	if err != nil {
+		return 0, err
+	}
+	for _, e := range expired {
+		s.auditReaped(ctx, e)
+	}
+	return len(expired), nil
 }
+
+// auditReaped writes the session.end entry for a session nobody closed by hand.
+//
+// Until this existed, a session that ran out its window or idled out simply
+// stopped appearing in the active list: the audit log held session.start and
+// then nothing, so the ledger said every one of those sessions was still open.
+// The reviewer's question — "when did this end, and why?" — had no answer in the
+// place built to answer it.
+func (s *Service) auditReaped(ctx context.Context, e access.ExpiredSession) {
+	detail := map[string]any{"reason": e.Reason, "ended_by": "system"}
+	if !e.EndedAt.IsZero() {
+		detail["ended_at"] = e.EndedAt.UTC().Format(time.RFC3339)
+	}
+	if d := s.activityDigest(ctx, e.OrgID, e.ID); d != nil {
+		detail["activity"] = d
+	}
+	// No acting user: nobody did this, a deadline did. See recordAuditDetail.
+	s.recordAuditDetail(ctx, iam.Claims{OrganizationID: e.OrgID}, "session.end",
+		&access.Session{ID: e.ID, DeviceID: e.DeviceID}, ReqMeta{}, audit.ResultSuccess, detail)
+}
+
+// activityDigest summarises what happened inside a session, for the audit entry
+// that closes it.
+//
+// The timeline itself is not copied into the audit log and must not be: a web
+// session records an event per proxied request, so mirroring it would write
+// thousands of hash-chained rows per session and bury every entry a reviewer
+// actually reads. What goes in the ledger is the shape of the session — how many
+// events, of what kinds, against which destinations — with the full timeline one
+// click away behind the session id the entry already carries.
+func (s *Service) activityDigest(ctx context.Context, orgID, sessionID uuid.UUID) map[string]any {
+	if s.events == nil {
+		return nil
+	}
+	scope := access.Scope{OrganizationID: orgID, IsSuperAdmin: true}
+	events, err := s.events.ListEvents(ctx, scope, sessionID, activityDigestLimit)
+	if err != nil || len(events) == 0 {
+		return nil
+	}
+	kinds := map[string]int{}
+	var paths []string
+	seen := map[string]bool{}
+	for _, ev := range events {
+		kinds[ev.Kind]++
+		p, _ := ev.Data["path"].(string)
+		if p == "" || seen[p] || len(paths) >= activityDigestPaths {
+			continue
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+	out := map[string]any{"events": len(events), "kinds": kinds}
+	if len(paths) > 0 {
+		out["paths"] = paths
+		if len(seen) > len(paths) {
+			out["paths_truncated"] = true
+		}
+	}
+	// Says so rather than quietly reporting a smaller session than happened.
+	if len(events) >= activityDigestLimit {
+		out["truncated"] = true
+	}
+	return out
+}
+
+// Bounds on the digest above: how many timeline rows one summary reads, and how
+// many distinct destinations it names.
+const (
+	activityDigestLimit = 2000
+	activityDigestPaths = 25
+)
 
 // ExpireIdle ends sessions that have gone untouched past their device's idle
 // timeout and releases what they were holding.
@@ -651,6 +754,7 @@ func (s *Service) ExpireIdle(ctx context.Context) (int, error) {
 		if s.activity != nil {
 			s.activity.forget(e.ID)
 		}
+		s.auditReaped(ctx, e)
 	}
 	return len(expired), nil
 }
@@ -741,11 +845,19 @@ func (s *Service) recordAuditDetail(ctx context.Context, actor iam.Claims, actio
 		return
 	}
 	org := actor.OrganizationID
-	uid := actor.UserID
 	e := audit.Event{
-		ID: uuid.New(), OrganizationID: &org, ActorID: &uid, ActorEmail: actor.Email,
+		ID: uuid.New(), OrganizationID: &org, ActorEmail: actor.Email,
 		Action: action, Category: audit.CategorySession, TargetType: "device", TargetID: sess.DeviceID.String(),
 		IP: meta.IP, UserAgent: meta.UserAgent, Result: result, Detail: detail,
+	}
+	// Only a real person gets stamped as the actor. Housekeeping — the retention
+	// purge, the session reapers — runs with no user behind it, and writing
+	// 00000000-0000-0000-0000-000000000000 into actor_id names an account that has
+	// never existed. An empty actor is the true statement, and the console renders
+	// it as the system rather than as a blank.
+	if actor.UserID != uuid.Nil {
+		uid := actor.UserID
+		e.ActorID = &uid
 	}
 	// Only events that belong to a session carry one. The approval and denial
 	// paths pass a bare Session to name the device, so taking its zero id
@@ -771,4 +883,388 @@ func (s *Service) recordAuditDetail(ctx context.Context, actor iam.Claims, actio
 		}
 	}
 	_ = s.audit.Record(ctx, e)
+}
+
+// retentionFor resolves how long this organization keeps recordings.
+//
+// Falls back to the configured default when there is no settings store or the
+// read fails. Keeping a recording longer than policy is recoverable — somebody
+// deletes it — while stamping a deadline shorter than policy because a query
+// blipped destroys evidence on a timer, so the fallback errs long.
+func (s *Service) retentionFor(ctx context.Context, orgID uuid.UUID) time.Duration {
+	if s.settings == nil {
+		return s.cfg.RecordingRetention
+	}
+	d, err := s.settings.RecordingRetention(ctx, orgID)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("retention: falling back to the configured default", zap.Error(err))
+		}
+		return s.cfg.RecordingRetention
+	}
+	return d
+}
+
+// PurgeRecordings deletes recordings past their retention deadline, blobs first,
+// then rows. Driven by the same worker loop as the session reaper.
+//
+// Retention existed as a number long before anything enforced it: every
+// recording was stamped with a deadline and nothing ever read the column, so the
+// policy was decorative, the disk had no ceiling, and no honest answer could be
+// given to "how long do you keep session evidence". This is what makes the
+// number true.
+//
+// Bounded per pass. A deployment that has never purged may have years of
+// recordings due at once, and doing them all in one sweep would hold the worker
+// — and its transactions — for as long as that takes. The loop comes back.
+func (s *Service) PurgeRecordings(ctx context.Context) (purged int, err error) {
+	if s.recordings == nil {
+		return 0, nil
+	}
+	due, err := s.recordings.DueForPurge(ctx, s.clock.Now(), purgeBatch)
+	if err != nil {
+		return 0, err
+	}
+	for i := range due {
+		r := due[i]
+		// Audited BEFORE the bytes go, and audited even if freeing them fails.
+		// An entry that only appears once deletion succeeded is an entry that is
+		// missing for exactly the deletions worth investigating.
+		s.recordAuditDetail(ctx, iam.Claims{OrganizationID: r.OrgID}, "recording.purged",
+			&access.Session{ID: r.SessionID}, ReqMeta{}, audit.ResultSuccess, map[string]any{
+				"recording_id": r.RecordingID.String(),
+				"artifacts":    r.Kinds,
+				"size_bytes":   r.Bytes,
+				"retained_to":  r.RetainedTo.UTC().Format(time.RFC3339),
+				"reason":       "retention_expired",
+			})
+
+		var orphaned []string
+		if s.blobs != nil {
+			for _, key := range r.ObjectKeys {
+				if key == "" {
+					continue
+				}
+				if derr := s.blobs.Delete(ctx, key); derr != nil {
+					orphaned = append(orphaned, key)
+				}
+			}
+		}
+		// The rows go regardless. A recording whose rows survive its blobs reads
+		// as intact evidence that cannot be played — worse than an honest gap —
+		// but an object nobody can reach and nobody knows about is how a storage
+		// audit turns up a surprise years later, so it is named in the log.
+		if len(orphaned) > 0 {
+			s.recordAuditDetail(ctx, iam.Claims{OrganizationID: r.OrgID}, "recording.purged",
+				&access.Session{ID: r.SessionID}, ReqMeta{}, audit.ResultFailure, map[string]any{
+					"reason":        "blob_delete_failed",
+					"orphaned_keys": orphaned,
+				})
+		}
+		if perr := s.recordings.PurgeSystem(ctx, r.RecordingID); perr != nil {
+			if s.log != nil {
+				s.log.Warn("purge: could not drop recording rows",
+					zap.String("recording", r.RecordingID.String()), zap.Error(perr))
+			}
+			continue
+		}
+		purged++
+	}
+	return purged, nil
+}
+
+// purgeBatch bounds one retention sweep.
+const purgeBatch = 50
+
+// PermOrgWrite gates changes to organization-wide policy.
+const PermOrgWrite = "org:write"
+
+// Settings returns this organization's policy settings, alongside what the
+// deployment's environment configured — so the console can show both rather
+// than leaving an administrator guessing which one is in force.
+func (s *Service) Settings(ctx context.Context, actor iam.Claims) (*access.OrgSettings, error) {
+	if s.settings == nil {
+		return nil, access.ErrNotFound
+	}
+	if !actor.IsSuperAdmin && !actor.Has("org:read") && !actor.Has(PermOrgWrite) {
+		return nil, access.ErrForbidden
+	}
+	return s.settings.GetSettings(ctx, scopeOf(actor), actor.OrganizationID)
+}
+
+// SetRecordingRetention changes how long this organization keeps session
+// recordings, in days. Zero keeps them indefinitely.
+//
+// Shortening retention is a destructive act on a delay: recordings already held
+// are re-stamped, so the next sweep deletes whatever the new policy has already
+// outlived. That is the point — a policy that only applied to future sessions
+// would leave the evidence somebody just decided to stop keeping — but it is why
+// this needs org:write and is audited with both the old value and the new.
+func (s *Service) SetRecordingRetention(ctx context.Context, actor iam.Claims, days int, meta ReqMeta) (*access.OrgSettings, error) {
+	if s.settings == nil {
+		return nil, access.ErrNotFound
+	}
+	if !actor.IsSuperAdmin && !actor.Has(PermOrgWrite) {
+		return nil, access.ErrForbidden
+	}
+	if days < 0 || days > maxRetentionDays {
+		return nil, fmt.Errorf("%w: retention must be between 0 and %d days (0 keeps recordings indefinitely)",
+			access.ErrInvalid, maxRetentionDays)
+	}
+	before, err := s.settings.GetSettings(ctx, scopeOf(actor), actor.OrganizationID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.settings.SetRecordingRetention(ctx, scopeOf(actor), actor.OrganizationID, days, actor.UserID); err != nil {
+		return nil, err
+	}
+	s.recordAuditDetail(ctx, actor, "settings.recording_retention", &access.Session{}, meta,
+		audit.ResultSuccess, map[string]any{
+			"from_days": before.RecordingRetentionDays,
+			"to_days":   days,
+			// Named explicitly: "shortened" is the direction that destroys
+			// evidence, and a reviewer scanning this log should not have to
+			// subtract two numbers to notice.
+			"shortened": days > 0 && (before.RecordingRetentionDays == 0 || days < before.RecordingRetentionDays),
+		})
+	return s.settings.GetSettings(ctx, scopeOf(actor), actor.OrganizationID)
+}
+
+// maxRetentionDays is ten years — the same ceiling the schema enforces.
+const maxRetentionDays = 3650
+
+// Branding returns just the branding, for any signed-in user.
+//
+// Separate from Settings because the console shell renders the brand on every
+// page for everybody, while the rest of the settings — retention, the network
+// policy — are an administrator's business. Gating the shell's own chrome behind
+// org:read would mean an operator saw a different product to their manager.
+func (s *Service) Branding(ctx context.Context, actor iam.Claims) (access.Branding, error) {
+	if s.settings == nil {
+		return access.Branding{Enabled: true}, nil
+	}
+	set, err := s.settings.GetSettings(ctx, scopeOf(actor), actor.OrganizationID)
+	if err != nil {
+		return access.Branding{Enabled: true}, err
+	}
+	return set.Branding, nil
+}
+
+// SetBranding stores how this organization's console presents itself: a client
+// name, a client logo, or neither.
+//
+// Neither is the default and is not a missing setting — it means the console
+// shows the vendor seal, which is what every install shipped before this
+// existed and what an unbranded one should keep showing.
+func (s *Service) SetBranding(ctx context.Context, actor iam.Claims, b access.Branding, meta ReqMeta) (*access.OrgSettings, error) {
+	if s.settings == nil {
+		return nil, access.ErrNotFound
+	}
+	if !actor.IsSuperAdmin && !actor.Has(PermOrgWrite) {
+		return nil, access.ErrForbidden
+	}
+	b.ClientName = strings.TrimSpace(b.ClientName)
+	if err := b.Validate(); err != nil {
+		return nil, err
+	}
+	before, err := s.settings.GetSettings(ctx, scopeOf(actor), actor.OrganizationID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.settings.SetBranding(ctx, scopeOf(actor), actor.OrganizationID, b, actor.UserID); err != nil {
+		return nil, err
+	}
+	// The artwork itself is not in the audit detail — it is a data URI hundreds
+	// of kilobytes long, and the ledger is hash-chained and kept forever. What
+	// changed is recorded; what it looks like is in the settings row.
+	s.recordAuditDetail(ctx, actor, "settings.branding", &access.Session{}, meta,
+		audit.ResultSuccess, map[string]any{
+			"from_name": before.Branding.ClientName,
+			"to_name":   b.ClientName,
+			"has_logo":  b.ClientLogo != "",
+			"enabled":   b.Enabled,
+		})
+	return s.settings.GetSettings(ctx, scopeOf(actor), actor.OrganizationID)
+}
+
+// SetNetworkPolicy stores which source addresses may reach this organization's
+// console.
+//
+// The guard below is the whole reason this is a service method rather than a
+// straight write. An allowlist that does not contain the administrator writing
+// it locks that administrator out of the console the instant it is saved, and
+// the only way back in is a database session on the host. So the policy is
+// evaluated against the address the request arrived from BEFORE it is stored,
+// and refused if it would shut the door on the person closing it.
+func (s *Service) SetNetworkPolicy(ctx context.Context, actor iam.Claims, p access.NetworkPolicy, meta ReqMeta) (*access.OrgSettings, error) {
+	if s.settings == nil {
+		return nil, access.ErrNotFound
+	}
+	if !actor.IsSuperAdmin && !actor.Has(PermOrgWrite) {
+		return nil, access.ErrForbidden
+	}
+	allow, err := access.NormalizeRules(p.Allow)
+	if err != nil {
+		return nil, err
+	}
+	block, err := access.NormalizeRules(p.Block)
+	if err != nil {
+		return nil, err
+	}
+	p.Allow, p.Block = allow, block
+	if p.AllowEnabled && len(p.Allow) == 0 {
+		return nil, fmt.Errorf("%w: an empty allowlist would refuse every address, including yours — "+
+			"add at least one entry, or leave the allowlist switched off", access.ErrInvalid)
+	}
+	if ok, reason := p.Verdict(parseIP(meta.IP)); !ok {
+		return nil, fmt.Errorf("%w: this policy would lock you out — the address you are connected from (%s) is %s. "+
+			"Add it before saving", access.ErrInvalid, displayIP(meta.IP), lockoutReason(reason))
+	}
+
+	before, err := s.settings.GetSettings(ctx, scopeOf(actor), actor.OrganizationID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.settings.SetNetworkPolicy(ctx, scopeOf(actor), actor.OrganizationID, p, actor.UserID); err != nil {
+		return nil, err
+	}
+	s.policies.forget(actor.OrganizationID)
+	s.recordAuditDetail(ctx, actor, "settings.network_policy", &access.Session{}, meta,
+		audit.ResultSuccess, map[string]any{
+			"allowlist_enabled":     p.AllowEnabled,
+			"allowlist_entries":     rulesToStrings(p.Allow),
+			"blocklist_enabled":     p.BlockEnabled,
+			"blocklist_entries":     rulesToStrings(p.Block),
+			"was_allowlist_enabled": before.Network.AllowEnabled,
+			"was_blocklist_enabled": before.Network.BlockEnabled,
+		})
+	return s.settings.GetSettings(ctx, scopeOf(actor), actor.OrganizationID)
+}
+
+func lockoutReason(reason string) string {
+	switch reason {
+	case "blocklisted":
+		return "on the blocklist"
+	case "not_allowlisted":
+		return "not on the allowlist"
+	default:
+		return "not permitted by it"
+	}
+}
+
+func rulesToStrings(rules []access.NetworkRule) []string {
+	out := make([]string, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, r.CIDR)
+	}
+	return out
+}
+
+func parseIP(raw string) netip.Addr {
+	addr, err := netip.ParseAddr(strings.TrimSpace(raw))
+	if err != nil {
+		// A host:port slipped through, or a proxy wrote something else entirely.
+		if h, _, serr := net.SplitHostPort(strings.TrimSpace(raw)); serr == nil {
+			if a, aerr := netip.ParseAddr(h); aerr == nil {
+				return a
+			}
+		}
+		return netip.Addr{}
+	}
+	return addr
+}
+
+func displayIP(raw string) string {
+	if a := parseIP(raw); a.IsValid() {
+		return a.String()
+	}
+	return "unknown"
+}
+
+// CheckNetworkSource decides whether a request from ip may act for this
+// organization, and says why not when it may not.
+//
+// Super admins are exempt. They are the account that has to be able to reach a
+// deployment whose tenant policy is wrong, and a platform operator locked out by
+// a customer's typo has no way back that does not involve psql.
+func (s *Service) CheckNetworkSource(ctx context.Context, orgID uuid.UUID, isSuperAdmin bool, ip string) (bool, string) {
+	if s.settings == nil || isSuperAdmin || orgID == uuid.Nil {
+		return true, ""
+	}
+	p, ok := s.policies.get(orgID, s.clock.Now())
+	if !ok {
+		loaded, err := s.settings.NetworkPolicyFor(ctx, orgID)
+		if err != nil {
+			// Fail open, loudly. This runs on every request: a database blip that
+			// turned into a deployment-wide 403 would be a far worse outage than
+			// the window it leaves, and the log says it happened.
+			if s.log != nil {
+				s.log.Warn("network policy unreadable; allowing request",
+					zap.String("organization", orgID.String()), zap.Error(err))
+			}
+			return true, ""
+		}
+		s.policies.put(orgID, loaded, s.clock.Now())
+		p = loaded
+	}
+	if !p.Active() {
+		return true, ""
+	}
+	return p.Verdict(parseIP(ip))
+}
+
+// AuditNetworkRefusal records a request the policy turned away.
+//
+// Written from the delivery layer, which is the only place that knows what was
+// being asked for. The arguments are primitives rather than a ReqMeta so the
+// middleware that calls this does not have to reach into the application layer.
+func (s *Service) AuditNetworkRefusal(ctx context.Context, actor iam.Claims, reason, path, ip, userAgent string) {
+	s.recordAuditDetail(ctx, actor, "auth.network_denied", &access.Session{},
+		ReqMeta{IP: ip, UserAgent: userAgent},
+		audit.ResultDenied, map[string]any{"reason": reason, "path": path})
+}
+
+// policyCache keeps the network policy off the database for a few seconds at a
+// time. It is read on every authenticated request; a query per request would put
+// the console's whole traffic through one table.
+//
+// The window is short and a write clears the entry for the organization it
+// changed, so a policy takes effect immediately on the node that stored it and
+// within one TTL everywhere else.
+type policyCache struct {
+	mu      sync.Mutex
+	entries map[uuid.UUID]policyEntry
+}
+
+type policyEntry struct {
+	policy access.NetworkPolicy
+	at     time.Time
+}
+
+const policyCacheTTL = 15 * time.Second
+
+func newPolicyCache() *policyCache {
+	return &policyCache{entries: map[uuid.UUID]policyEntry{}}
+}
+
+func (c *policyCache) get(orgID uuid.UUID, now time.Time) (access.NetworkPolicy, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[orgID]
+	if !ok || now.Sub(e.at) > policyCacheTTL {
+		return access.NetworkPolicy{}, false
+	}
+	return e.policy, true
+}
+
+func (c *policyCache) put(orgID uuid.UUID, p access.NetworkPolicy, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[orgID] = policyEntry{policy: p, at: now}
+}
+
+func (c *policyCache) forget(orgID uuid.UUID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, orgID)
 }

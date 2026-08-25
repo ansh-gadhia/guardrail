@@ -5,7 +5,7 @@ import { absLocal, plausibleDate, relTime, sessionSpan, startedOf } from "@/lib/
 import type { Session, SessionEvent, RecordingMeta, AccessRequest } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { Badge, StatusBadge, Modal, EmptyState, ErrorNote, Skeleton, Button, cn } from "@/components/ui";
-import { IconFilm, IconTrash, IconAlert, IconDownload } from "@/components/icons";
+import { IconFilm, IconTrash, IconAlert, IconDownload, IconClipboard, IconCheck } from "@/components/icons";
 import { SessionPlayer } from "@/components/SessionPlayer";
 import { TranscriptPlayer } from "@/components/TranscriptPlayer";
 import { DesktopReplay } from "@/components/DesktopReplay";
@@ -119,6 +119,7 @@ export function SessionDetail({
               ))}
           </div>
           <div className="flex items-center gap-2">
+            <CopySessionLink sessionID={session.id} />
             <ExportRecording
               session={session}
               deviceLabel={deviceLabel}
@@ -319,6 +320,45 @@ function download(blob: Blob, filename: string) {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Copies an address that opens this exact session.
+ *
+ * A session is the unit people talk about — "look at what happened in this one" —
+ * and until it had an address, the only way to hand one to a colleague was to
+ * describe the clicks that reach it. The link points at the recordings page,
+ * which resolves the session by id whatever page or filter the reader lands on.
+ */
+function CopySessionLink({ sessionID }: { sessionID: string }) {
+  const [copied, setCopied] = useState(false);
+  const href = `${window.location.origin}/recordings?session=${sessionID}`;
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(href);
+    } catch {
+      // Clipboard access can be refused (an insecure origin, or a browser that
+      // asks). Selecting the text is a worse experience than copying it, but it
+      // is a far better one than a button that appears to do nothing.
+      window.prompt("Copy this link to the session:", href);
+      return;
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
+  };
+
+  return (
+    <button
+      className="btn-ghost"
+      onClick={() => void copy()}
+      title="Copy a link that opens this session"
+      aria-label="Copy a link that opens this session"
+    >
+      {copied ? <IconCheck size={15} className="text-success" /> : <IconClipboard size={15} />}
+      {copied ? "Link copied" : "Copy link"}
+    </button>
+  );
 }
 
 function ExportRecording({
