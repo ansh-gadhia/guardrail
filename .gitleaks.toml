@@ -44,7 +44,24 @@ paths = [
 # domain/iam/password.go), so a fixture spelled "test-password" fails the very
 # policy the tests exist to exercise. The strings are random, were never used
 # anywhere, and appear only in assertions about login and first-login flows.
+# Four PEM-shaped placeholders. None of them contains key material: the bodies
+# are the literal strings "x", "y", "SUPERSECRETKEYBYTES" and a single ellipsis.
+# Gitleaks matches the BEGIN/END header, not entropy in the body, so it flags all
+# four.
+#
+# The header cannot be dropped. The vault infers a credential's injection method
+# from the shape of the secret (see domain/vault), so a fixture that does not
+# open with "-----BEGIN ... PRIVATE KEY-----" is classified as a password and the
+# tests stop exercising the SSH-key path — which is the path they exist for. The
+# frontend entry is the placeholder text in the key field on the device form.
+#
+# Written as the exact literals, in keeping with the passwords above: a real key
+# pasted into any of these files still fails the build.
 regexes = [
     '''Kx7-mQ2vRn9t''',
     '''Zt4-wLp8Bq3h''',
+    '''BEGIN OPENSSH PRIVATE KEY-----\\nx\\n-----END OPENSSH PRIVATE KEY''',
+    '''BEGIN OPENSSH PRIVATE KEY-----\\ny\\n-----END OPENSSH PRIVATE KEY''',
+    '''BEGIN OPENSSH PRIVATE KEY-----\\nSUPERSECRETKEYBYTES\\n-----END OPENSSH PRIVATE KEY''',
+    '''BEGIN OPENSSH PRIVATE KEY-----\\n…''',
 ]
