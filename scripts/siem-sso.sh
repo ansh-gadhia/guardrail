@@ -160,9 +160,21 @@ show_status() {
     probe_live
 }
 
+# console_url is where this deployment actually listens.
+#
+# Read from .env rather than assumed to be 443: install.sh lets the operator
+# choose the port, and shifts it when something else already holds it. Hard-coding
+# 443 makes a perfectly good setup on port 8443 report "could not confirm" — an
+# alarming message about a working configuration, which is the kind of thing
+# people spend an afternoon chasing.
+console_url() {
+    local port; port=$(env_or GUARDRAIL_HTTPS_PORT 443)
+    printf 'https://127.0.0.1:%s' "$port"
+}
+
 probe_live() {
     local out
-    out=$(curl -sk --max-time 5 "https://127.0.0.1/api/v1/auth/providers" 2>/dev/null || true)
+    out=$(curl -sk --max-time 5 "$(console_url)/api/v1/auth/providers" 2>/dev/null || true)
     case "$out" in
         *'"siem_sso":true'*)  ok "the running API reports SIEM single sign-on as ${B}enabled${R}" ;;
         *'"siem_sso":false'*) warn "the running API reports it as DISABLED — it may not have been restarted"
@@ -334,7 +346,7 @@ do_setup() {
         step "Verifying"
         local i=0
         while [ $i -lt 30 ]; do
-            case "$(curl -sk --max-time 3 https://127.0.0.1/api/v1/auth/providers 2>/dev/null || true)" in
+            case "$(curl -sk --max-time 3 "$(console_url)/api/v1/auth/providers" 2>/dev/null || true)" in
                 *'"siem_sso":true'*) ok "the API reports SIEM single sign-on as ${B}enabled${R}"; break ;;
             esac
             i=$((i + 1)); sleep 2
