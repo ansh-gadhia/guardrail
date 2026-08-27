@@ -249,16 +249,43 @@ access  RW | READWRITE | WRITE | READANDWRITE | FULL | EDIT -> read-write
 
 ### The default table
 
-| SIEM role | Access | GuardRail role | Rank | Can connect to a device | Can administer |
-|---|---|---|---|---|---|
-| Administrator | read-write | **Organization Admin** | 50 | ✔ | ✔ |
-| Administrator | read-only | **Auditor** | 0 | — | — |
-| L3 | read-write | **Operator** | 10 | ✔ | — |
-| L3 | read-only | **Auditor** | 0 | — | — |
-| L2 | read-write | **Operator** | 10 | ✔ | — |
-| L2 | read-only | **Auditor** | 0 | — | — |
-| L1 | read-write | **Read-only** | 0 | — | — |
-| L1 | read-only | **Read-only** | 0 | — | — |
+Every SIEM analyst gets their own GuardRail account, keyed on their own `sub`,
+with the role their own token asserts. Ten analysts at four tiers produce ten
+accounts at four privilege levels; there is nothing shared between them.
+
+| SIEM role | Access | GuardRail role | Rank | Connect to a device | Kill a session | Watch recordings | Audit log | Manage devices & credentials | Manage users | Approve access |
+|---|---|---|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| Administrator | read-write | **Organization Admin** | 50 | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| Administrator | read-only | **Auditor** | 0 | — | — | ✔ | ✔ | — | — | — |
+| L3 | read-write | **Operator** | 10 | ✔ | ✔ | ✔ | — | — | — | — |
+| L3 | read-only | **Auditor** | 0 | — | — | ✔ | ✔ | — | — | — |
+| L2 | read-write | **Operator** | 10 | ✔ | ✔ | ✔ | — | — | — | — |
+| L2 | read-only | **Auditor** | 0 | — | — | ✔ | ✔ | — | — | — |
+| L1 | read-write | **Read-only** | 0 | — | — | ✔ | — | — | — | — |
+| L1 | read-only | **Read-only** | 0 | — | — | ✔ | — | — | — | — |
+
+The exact permission keys behind each, straight out of `db/seed.sql`:
+
+```
+Organization Admin   every permission in the catalogue (22)
+Operator             device:connect, device:read, group:read,
+                     recording:read, session:read, session:terminate
+Auditor              approval:read, device:read, log:read, recording:read,
+                     report:read, session:read, user:read
+Read-only            device:read, group:read, recording:read, session:read
+Super Admin          NEVER granted by SSO — see the bar below
+```
+
+Read the two rank-0 rows carefully, because they are not the same thing:
+**Auditor** sees the audit log, reports and the user list; **Read-only** sees the
+estate and its sessions and nothing about who did what. An L1 who needs the audit
+trail should be mapped to Auditor with the override, not left on the default.
+
+`Rank` is the approval hierarchy: an approver must outrank a requester
+**strictly**. So an Operator (10) cannot approve another Operator's access
+request — only an Organization Admin (50) or a super admin can. Two Operators
+signing each other's work is not a hierarchy, which is the realistic failure the
+strict comparison is there to prevent.
 
 Three cells worth explaining:
 
@@ -428,8 +455,26 @@ ends up confidently green about a host that died forty minutes ago.
 An SSO-vouched session *also* reaches this endpoint (verified), so if the SIEM
 would rather use Flow A for it, that works. It just costs more and revokes worse.
 
-**To issue one:** console → Security → API tokens, or `POST /api/v1/api-tokens`
-as a Super Admin. Give it `device:read`.
+**To issue one**, any of:
+
+- `install.sh` already minted one at the end of a fresh install and printed it —
+  named `installer-bootstrap`, and it already carries `device:read`.
+- **Lost it?** Only its hash is stored, so it cannot be shown again. Mint a
+  replacement on the server:
+
+  ```bash
+  sudo /opt/guardrail/siem-sso.sh token --name siem-feed
+  ```
+
+  It signs in as the super admin (reading the credentials from `.env`, prompting
+  when they are stale or a second factor is enrolled), lists the tokens that
+  already exist so you do not leave a second standing credential behind by
+  accident, and prints the new one once.
+- Or in the console: **Security → API tokens** (super admin only).
+
+Tokens are restricted to **read** permissions by construction — `device:read` is
+the one the device feed needs. Revoke an old one from the console; revocation is
+immediate and everywhere.
 
 ---
 

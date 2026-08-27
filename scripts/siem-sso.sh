@@ -109,6 +109,9 @@ ${B}GuardRail — SIEM single sign-on${R}
   ${B}sudo $0${R} ${CYN}<jwks-url>${R} [options]     set it up
   ${B}sudo $0 status${R}                    show what is configured now
   ${B}sudo $0 off${R}                       turn it off (keeps the certificate)
+  ${B}sudo $0 token${R} [--name N]          mint a fresh read-only API token for the
+                                    SIEM's device feed, for when the one the
+                                    installer printed has been lost
 
 Options
   --secret ${D}<hex>${R}     also accept HS256 tokens signed with this shared secret.
@@ -122,9 +125,137 @@ Options
   --max-role ${D}<s>${R}     ceiling on any SSO-derived role, e.g. "Operator"
   --no-verify       skip the post-restart check (not recommended)
 
-Example
+Examples
   sudo $0 https://10.200.10.23:3000/api/sso/jwks.json
+  sudo $0 token --name siem-feed
+
+The console does the same thing under ${B}Security -> API tokens${R} (super admin only).
 USAGE
+}
+
+# ---------------------------------------------------------------------------
+# token — mint a replacement machine credential
+#
+# The installer prints one at the end of a fresh install and it is shown exactly
+# once, because only its hash is stored. That is the right design and it has one
+# predictable consequence: sooner or later somebody needs another one and the
+# terminal it was printed in is long gone.
+#
+# The console can do this (Security -> API tokens). This exists because the
+# person who needs it is usually already on the server, and because "sign in to
+# the console to get the credential the integration needs" is a detour when the
+# console is not the thing they were doing.
+# ---------------------------------------------------------------------------
+TOKEN_NAME=""
+TOKEN_SCOPES='["device:read"]'
+
+json_escape() {
+    local v=$1
+    v=${v//\\/\\\\}
+    v=${v//\"/\\\"}
+    printf '%s' "$v"
+}
+json_str() {
+    grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"$2+\"" | head -n1 | sed -E 's/.*:[[:space:]]*"(.*)"$/\1/'
+}
+
+# api_login echoes an access token, prompting for whatever .env cannot supply.
+api_login() {
+    local base=$1 email password body login jwt mfa code
+    email=$(env_get GUARDRAIL_ADMIN_EMAIL)
+    password=$(env_get GUARDRAIL_ADMIN_PASSWORD)
+
+    if [ -z "$email" ]; then
+        printf '%s' "  Super admin email: " >&2
+        IFS= read -r -u 3 email || return 1
+    fi
+    # The installer writes the bootstrap password into .env, and the summary tells
+    # the operator to change it at first sign-in. Both are right, and together
+    # they mean the stored value is usually stale — so a failed sign-in asks
+    # rather than reporting the credential as wrong.
+    local tries=2
+    while [ $tries -gt 0 ]; do
+        if [ -z "$password" ]; then
+            printf '%s' "  Password for ${email}: " >&2
+            IFS= read -r -s -u 3 password || return 1
+            printf '\n' >&2
+        fi
+        body=$(printf '{"email":"%s","password":"%s"}' "$(json_escape "$email")" "$(json_escape "$password")")
+        login=$(curl -sk --max-time 15 -X POST "$base/auth/login" \
+            -H 'Content-Type: application/json' -d "$body" 2>/dev/null) || true
+
+        jwt=$(printf '%s' "$login" | json_str access_token '[A-Za-z0-9._-]')
+        if [ -n "$jwt" ]; then printf '%s' "$jwt"; return 0; fi
+
+        # A second factor is the expected state on a platform like this, not an
+        # edge case: the console tells every admin to enrol one.
+        mfa=$(printf '%s' "$login" | json_str mfa_token '[A-Za-z0-9._:-]')
+        if [ -n "$mfa" ]; then
+            printf '%s' "  Authentication code: " >&2
+            IFS= read -r -u 3 code || return 1
+            login=$(curl -sk --max-time 15 -X POST "$base/auth/mfa/verify" \
+                -H 'Content-Type: application/json' \
+                -d "$(printf '{"mfa_token":"%s","code":"%s"}' "$(json_escape "$mfa")" "$(json_escape "$code")")" 2>/dev/null) || true
+            jwt=$(printf '%s' "$login" | json_str access_token '[A-Za-z0-9._-]')
+            if [ -n "$jwt" ]; then printf '%s' "$jwt"; return 0; fi
+            warn "that code was not accepted"
+        fi
+        password=""
+        tries=$((tries - 1))
+        [ $tries -gt 0 ] && warn "sign-in failed — the password in .env may be out of date"
+    done
+    return 1
+}
+
+mint_token() {
+    require_install
+    command -v curl >/dev/null || die "curl is required"
+    local base; base="$(console_url)/api/v1"
+    local name="${TOKEN_NAME:-siem-feed}"
+
+    step "Signing in"
+    local jwt
+    if ! jwt=$(api_login "$base"); then
+        err "could not sign in as a super admin"
+        info "mint one from the console instead: ${B}Security -> API tokens${R}"
+        exit 1
+    fi
+    ok "signed in"
+
+    # Shown before minting, so somebody who already has a working token can stop
+    # rather than leave a second standing credential behind them.
+    step "Tokens this deployment already has"
+    local listing
+    listing=$(curl -sk --max-time 15 "$base/api-tokens" -H "Authorization: Bearer $jwt" 2>/dev/null || true)
+    case "$listing" in
+        *'"name"'*)
+            printf '%s' "$listing" \
+                | tr '{' '\n' \
+                | grep -o '"name":"[^"]*"' \
+                | sed -E 's/"name":"(.*)"/    \1/' ;;
+        *) info "none" ;;
+    esac
+
+    step "Minting ${B}${name}${R}"
+    local created
+    created=$(curl -sk --max-time 15 -X POST "$base/api-tokens" \
+        -H "Authorization: Bearer $jwt" -H 'Content-Type: application/json' \
+        -d "$(printf '{"name":"%s","scopes":%s}' "$(json_escape "$name")" "$TOKEN_SCOPES")" 2>/dev/null) || true
+
+    local token; token=$(printf '%s' "$created" | json_str token '[A-Za-z0-9_-]')
+    if [ -z "$token" ]; then
+        err "the token was not created"
+        printf '    %s\n' "$created" >&2
+        info "API tokens can only be issued by a SUPER ADMIN — check the account you signed in as"
+        exit 1
+    fi
+
+    printf '\n    %s\n\n' "${GRN}${B}${token}${R}"
+    warn "Copy it now. Only its hash is stored; this is the only time it is shown."
+    info "It does not expire. Revoke it in the console: ${B}Security -> API tokens${R}"
+    printf '\n  %s\n' "${D}Give it to the SIEM for the device feed:${R}"
+    printf '    %s\n' "${D}curl -sk $(console_url)/api/v1/status/devices \\${R}"
+    printf '    %s\n\n' "${D}     -H \"Authorization: Bearer ${token}\"${R}"
 }
 
 # ---------------------------------------------------------------------------
@@ -384,6 +515,16 @@ main() {
         ""|-h|--help) usage; exit 0 ;;
         status)       show_status; exit 0 ;;
         off)          turn_off; exit 0 ;;
+        token)
+            shift
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --name)   TOKEN_NAME="${2:-}"; shift 2 ;;
+                    --scopes) TOKEN_SCOPES="[\"$(printf '%s' "${2:-device:read}" | sed 's/,/","/g')\"]"; shift 2 ;;
+                    *)        die "unknown option $1" ;;
+                esac
+            done
+            mint_token; exit 0 ;;
     esac
     parse_args "$@"
     do_setup
