@@ -92,6 +92,16 @@ type Principal struct {
 	// MustChangePassword tells the console to force a password change before
 	// letting this person do anything else.
 	MustChangePassword bool
+	// AuthProvider is how this person signs in: local, siem, oidc, ldap. The
+	// console needs it to stop offering things that cannot work — a password
+	// change to somebody who has no password, and a "set a password first" step
+	// to somebody whose first step is the second factor.
+	AuthProvider string
+	// MFAEnabled reports a CONFIRMED second factor. Enrollment that was started
+	// and abandoned does not count: a pending secret protects nothing, and
+	// treating it as done would silently stop offering the one prompt that would
+	// have finished it.
+	MFAEnabled bool
 }
 
 func principalFromUser(u *iam.User) Principal {
@@ -106,6 +116,7 @@ func principalFromUser(u *iam.User) Principal {
 		Permissions:        u.Permissions(),
 		ApprovalLevel:      u.ApprovalLevel(),
 		MustChangePassword: u.MustChangePassword,
+		AuthProvider:       string(u.AuthProvider),
 	}
 }
 

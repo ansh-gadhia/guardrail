@@ -343,8 +343,26 @@ func (s *Service) Me(ctx context.Context, claims iam.Claims) (*Principal, error)
 	if err != nil {
 		return nil, err
 	}
-	p := principalFromUser(user)
+	p := s.principalOf(ctx, user)
 	return &p, nil
+}
+
+// principalOf builds the public view of a user for a response the CONSOLE will
+// act on, which is the reason it costs an extra read that principalFromUser does
+// not: the console decides what to put in front of somebody at sign-in, and it
+// cannot do that without knowing whether they already hold a second factor.
+//
+// One indexed lookup by primary key, on sign-in and on refresh. The admin
+// listings deliberately keep the cheap path — they are answering "who exists",
+// not "what should this person be shown next".
+func (s *Service) principalOf(ctx context.Context, u *iam.User) Principal {
+	p := principalFromUser(u)
+	if s.mfa != nil {
+		if m, err := s.mfa.Get(ctx, u.ID); err == nil {
+			p.MFAEnabled = m.Confirmed()
+		}
+	}
+	return p
 }
 
 // issueTokens mints an access JWT and a rotated refresh token in the given
@@ -377,7 +395,7 @@ func (s *Service) issueTokens(ctx context.Context, user *iam.User, meta ReqMeta,
 	return &TokenPair{
 		AccessToken: access, AccessExpiresAt: accessExp,
 		RefreshToken: rawRefresh, RefreshExpiresAt: refreshExp,
-		Principal: principalFromUser(user),
+		Principal: s.principalOf(ctx, user),
 	}, nil
 }
 

@@ -457,7 +457,28 @@ Two defaults here run the **opposite way to the DLP's**, and both deliberately.
 
 **GuardRail still asks for its own second factor** (`TRUST_AMR=false`). If the
 person has enrolled TOTP in GuardRail, an SSO sign-in returns the same MFA
-challenge a password sign-in does, and the console shows the same screen. "The
+challenge a password sign-in does, and the console shows the same screen. The
+marker that says "this sign-in came from the SIEM" is carried inside the signed
+challenge, so the session minted on the far side of the code is still a
+SIEM-vouched one.
+
+**And they are offered one on arrival.** An account provisioned by the SIEM has
+no password, so `must_change_password` is false and the first-run flow — which is
+where the two-factor offer lives — used to be skipped entirely. Every analyst
+arriving through single sign-on went straight into the console having never been
+asked, which is backwards: they are exactly the people it reaches privileged
+devices on behalf of.
+
+The console now shows the same first-run page to a SIEM account with no confirmed
+factor, minus the password step it has nothing to do with. It is dismissible
+("I'll do this later") and returns at the next sign-in rather than nagging during
+this one — a prompt that cannot be dismissed only teaches people to click past
+security dialogs. Once a factor is confirmed the offer stops and the challenge
+starts. Long-standing local accounts are deliberately not included: somebody who
+has signed in with a password for a year has already answered this question.
+
+The console reads two fields from the principal to decide — `auth_provider` and
+`mfa_enabled`, both on every token response and on `/auth/me`. "The
 SIEM says they did MFA" and "this person just proved possession of a factor
 GuardRail knows about" are different claims, and only the second survives the
 SIEM being wrong — a forged exchange token asserts `amr` exactly as easily as it

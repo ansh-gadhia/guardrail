@@ -35,6 +35,12 @@ type principalDTO struct {
 	Permissions        []string `json:"permissions"`
 	ApprovalLevel      int      `json:"approval_level"`
 	MustChangePassword bool     `json:"must_change_password"`
+	// How this person signs in, and whether they already hold a second factor.
+	// The console reads both to decide what to put in front of them at sign-in:
+	// a password change is meaningless to somebody who has no password, and the
+	// two-factor offer is the only part of that flow a federated account needs.
+	AuthProvider string `json:"auth_provider"`
+	MFAEnabled   bool   `json:"mfa_enabled"`
 }
 
 func toPrincipalDTO(p appiam.Principal) principalDTO {
@@ -49,6 +55,8 @@ func toPrincipalDTO(p appiam.Principal) principalDTO {
 		Permissions:        p.Permissions,
 		ApprovalLevel:      p.ApprovalLevel,
 		MustChangePassword: p.MustChangePassword,
+		AuthProvider:       p.AuthProvider,
+		MFAEnabled:         p.MFAEnabled,
 	}
 }
 

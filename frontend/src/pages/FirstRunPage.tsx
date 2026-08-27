@@ -15,14 +15,19 @@ import { QRCode } from "@/components/QRCode";
    it is genuinely optional, because a nag that cannot be dismissed just teaches
    people to click past security prompts.
 
+   Somebody who arrived through the SIEM has no password to replace, so for them
+   this is the two-factor offer and nothing else. The stepper disappears rather
+   than showing a one-item list: a progress indicator for a single step is an
+   invitation to wonder what the other steps were.
+
    This deliberately renders instead of the app rather than as a modal over it:
    there is nothing useful to do behind it, and a dismissible-looking overlay
    would misrepresent that. */
 export function FirstRunPage() {
   const principal = useAuth((s) => s.principal);
-  const [step, setStep] = useState<"password" | "mfa">(
-    principal?.must_change_password ? "password" : "mfa",
-  );
+  const federated = principal?.auth_provider !== undefined && principal.auth_provider !== "local";
+  const needsPassword = principal?.must_change_password ?? false;
+  const [step, setStep] = useState<"password" | "mfa">(needsPassword ? "password" : "mfa");
 
   return (
     <div className="min-h-screen bg-surface-2/40 px-4 py-10">
@@ -35,12 +40,12 @@ export function FirstRunPage() {
           </div>
         </header>
 
-        <Stepper step={step} />
+        {needsPassword && <Stepper step={step} />}
 
         {step === "password" ? (
           <SetPasswordStep onDone={() => setStep("mfa")} />
         ) : (
-          <AddMfaStep />
+          <AddMfaStep federated={federated} />
         )}
       </div>
     </div>
@@ -176,7 +181,7 @@ function SetPasswordStep({ onDone }: { onDone: () => void }) {
   );
 }
 
-function AddMfaStep() {
+function AddMfaStep({ federated = false }: { federated?: boolean }) {
   const skipFirstRun = useAuth((s) => s.skipFirstRun);
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
   const [code, setCode] = useState("");
@@ -187,8 +192,11 @@ function AddMfaStep() {
   const clean = (v: string) => v.replace(/\D/g, "").slice(0, 6);
   const codesReady = code.length === 6 && nextCode.length === 6 && code !== nextCode;
 
-  // If the account already has MFA (rare here, but possible), don't pretend to
-  // offer it.
+  // If the account already has a confirmed factor, do not pretend to offer one.
+  // Not rare: the console reads the principal's mfa_enabled to decide whether to
+  // show this page at all, but that value is a snapshot from sign-in, and the
+  // factor may have been confirmed since — in another tab, or on the step before
+  // this one.
   const status = useQuery<MFAStatus>({
     queryKey: ["mfa"],
     queryFn: async () => (await api.get<MFAStatus>("/mfa")).data,
@@ -245,7 +253,15 @@ function AddMfaStep() {
   return (
     <Card
       title="Add two-factor authentication"
-      subtitle="A password alone protects every device this console reaches. A second factor is the difference between a stolen password and a breach."
+      subtitle={
+        federated
+          ? // Said this way because being asked for anything after signing in at
+            // the SIEM reads as something having gone wrong. It has not: the SIEM
+            // said who you are, and this is the factor GuardRail can still ask for
+            // if that assertion is ever forged.
+            "Your identity provider signed you in. A second factor here is what still protects the devices this console reaches if that sign-in is ever forged."
+          : "A password alone protects every device this console reaches. A second factor is the difference between a stolen password and a breach."
+      }
       icon={IconKey}
     >
       {error && <div className="mb-4"><ErrorNote message={error} /></div>}

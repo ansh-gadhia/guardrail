@@ -14,6 +14,12 @@ export interface Principal {
   // Rank in the approval hierarchy: the highest of this person's roles. They
   // can decide requests from anybody strictly below it.
   approval_level: number;
+  // How this person signs in. "siem" means the SIEM vouched for them and they
+  // have no GuardRail password at all, so anything password-shaped is not just
+  // unnecessary for them — it cannot work.
+  auth_provider: string;
+  // A CONFIRMED second factor. Enrollment started and abandoned does not count.
+  mfa_enabled: boolean;
 }
 
 export interface TokenResponse {

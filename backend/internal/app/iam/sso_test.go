@@ -736,3 +736,75 @@ func TestSSOResync_RefusesTheInstallationAccount(t *testing.T) {
 		t.Fatalf("want ErrProtectedAccount, got %v", err)
 	}
 }
+
+// ---- what the console is told to put in front of somebody ----
+
+// A newly provisioned SIEM account has no password, so must_change_password is
+// false and the whole first-run flow — including the two-factor offer at the end
+// of it — used to be skipped. The console decides from these two fields, so they
+// have to be right on the very first response.
+func TestSSOLogin_PrincipalDrivesTheFirstRunOffer(t *testing.T) {
+	h := newSSOHarness(t, nil)
+
+	pair, err := h.login(t, assertion())
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	p := pair.Principal
+	if p.AuthProvider != string(iam.ProviderSIEM) {
+		t.Errorf("auth_provider = %q, want %q", p.AuthProvider, iam.ProviderSIEM)
+	}
+	if p.MFAEnabled {
+		t.Error("a brand-new account cannot already hold a confirmed second factor")
+	}
+	if p.MustChangePassword {
+		t.Error("a SIEM account has no password, so it can never be pending a change")
+	}
+	// This is the condition the console gates on. Asserted here so a change to
+	// either field is caught by a test that says what it was for.
+	if !(p.AuthProvider == string(iam.ProviderSIEM) && !p.MFAEnabled) {
+		t.Fatal("the first-run two-factor offer would not be shown to a new SIEM user")
+	}
+}
+
+// Once a factor is confirmed the offer stops, and the exchange returns a
+// challenge instead of a session.
+func TestSSOLogin_ConfirmedFactorEndsTheOfferAndGatesTheLogin(t *testing.T) {
+	mfa := newFakeMFARepo()
+	h := newSSOHarness(t, func(d *Deps) {
+		d.MFA = mfa
+		d.TOTP = fakeTOTP{good: "123456", good2: "234567"}
+		d.Cipher = identityCipher{}
+		d.MFAChal = security.NewMFAChallenger("0123456789abcdef0123456789abcdef", 5*time.Minute)
+	})
+
+	if _, err := h.login(t, assertion()); err != nil {
+		t.Fatalf("first login: %v", err)
+	}
+	u := h.findUser(t, "analyst@corp.example")
+
+	confirmed := h.now
+	mfa.method = &iam.MFAMethod{UserID: u.ID, Type: iam.MFATypeTOTP,
+		Secret: []byte("s"), ConfirmedAt: &confirmed}
+
+	second := assertion()
+	second.Nonce = "n2"
+	pair, err := h.login(t, second)
+	if err != nil {
+		t.Fatalf("second login: %v", err)
+	}
+	if !pair.MFARequired || pair.MFAToken == "" {
+		t.Fatal("an account with a confirmed factor must be challenged, not signed straight in")
+	}
+
+	// And the marker survives the challenge, so the session minted on the far
+	// side is still a SIEM-vouched one.
+	_, sso, err := security.NewMFAChallenger("0123456789abcdef0123456789abcdef", 5*time.Minute).
+		Verify(pair.MFAToken, h.now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("verify challenge: %v", err)
+	}
+	if !sso {
+		t.Fatal("the challenge lost the SSO marker, so the session after it would not be SIEM-vouched")
+	}
+}
