@@ -469,16 +469,28 @@ arriving through single sign-on went straight into the console having never been
 asked, which is backwards: they are exactly the people it reaches privileged
 devices on behalf of.
 
-The console now shows the same first-run page to a SIEM account with no confirmed
-factor, minus the password step it has nothing to do with. It is dismissible
-("I'll do this later") and returns at the next sign-in rather than nagging during
-this one — a prompt that cannot be dismissed only teaches people to click past
-security dialogs. Once a factor is confirmed the offer stops and the challenge
-starts. Long-standing local accounts are deliberately not included: somebody who
-has signed in with a password for a year has already answered this question.
+The console now runs **one rule for both kinds of account**: somebody signing in
+for the first time is offered a second factor, and everybody else goes straight
+in. A SIEM account sees the same first-run page a locally created one does, minus
+the password step it has nothing to do with.
 
-The console reads two fields from the principal to decide — `auth_provider` and
-`mfa_enabled`, both on every token response and on `/auth/me`. "The
+| | Local account | SIEM account |
+|---|---|---|
+| First sign-in | password step, then the two-factor offer | the two-factor offer |
+| Offer dismissed | into the console | into the console |
+| Later sign-ins | straight in | straight in |
+| Once a factor is confirmed | challenged at sign-in | challenged at sign-in |
+
+Offered **once**, not on every sign-in: the prompt that comes back forever is the
+one people learn to click past, and anybody who declined can turn it on from
+Account → Two-factor whenever they choose. A temporary password is the one thing
+that does keep reappearing, because it is not optional.
+
+The console reads three fields from the principal — `first_login`, `mfa_enabled`
+and `auth_provider` — on every token response and on `/auth/me`. `first_login` is
+derived from `last_login_at`, so a token refresh correctly reports false:
+rotating a token is not a sign-in, and re-offering every fifteen minutes is the
+nagging this avoids. "The
 SIEM says they did MFA" and "this person just proved possession of a factor
 GuardRail knows about" are different claims, and only the second survives the
 SIEM being wrong — a forged exchange token asserts `amr` exactly as easily as it

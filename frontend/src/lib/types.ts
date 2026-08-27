@@ -20,6 +20,9 @@ export interface Principal {
   auth_provider: string;
   // A CONFIRMED second factor. Enrollment started and abandoned does not count.
   mfa_enabled: boolean;
+  // This account's first sign-in, of any kind. False on a token refresh, which
+  // is not a sign-in.
+  first_login: boolean;
 }
 
 export interface TokenResponse {

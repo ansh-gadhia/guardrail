@@ -23,26 +23,26 @@ import { NotFoundPage, ErrorBoundary } from "./pages/ErrorPages";
 // needsFirstRun reports whether there is something to put in front of somebody
 // before the console itself.
 //
-// Two reasons, and they arrive by different doors:
+// ONE RULE, both kinds of account. Somebody signing in for the first time is
+// offered a second factor; everybody else goes straight in. A temporary password
+// keeps its own clause because it is not optional — it must be replaced, however
+// many times its owner reloads the page.
 //
-//   * a temporary password somebody else typed, which must be replaced; and
-//   * a federated account with no second factor.
+// It used to be keyed on the temporary password alone, and that quietly meant
+// "only accounts an administrator typed a password for". An account provisioned
+// by an identity provider has no password, so must_change_password is false and
+// the whole first-run flow — including the two-factor offer at the end of it —
+// was skipped. Every analyst arriving through single sign-on went straight into
+// the console having never been asked, which is backwards: they are precisely
+// the people it reaches privileged devices on behalf of.
 //
-// The second exists because an account provisioned by the SIEM never has the
-// first. It has no password, so must_change_password is false and the whole
-// first-run flow — including the two-factor offer at the end of it — was simply
-// skipped. Every analyst arriving through single sign-on went straight into the
-// console having never been asked, which is the opposite of the intent: they are
-// precisely the people the console reaches privileged devices on behalf of.
-//
-// Local accounts are deliberately not included. Somebody who has been signing in
-// with a password for a year and chose not to enrol has already answered this
-// question; turning that into a prompt on every sign-in is how people learn to
-// click past security dialogs.
+// Once, not on every sign-in. The offer that comes back forever is the one
+// people learn to click past, and somebody who declined it can still turn it on
+// from Account -> Two-factor whenever they choose to.
 function needsFirstRun(principal: Principal, firstRunDone: boolean): boolean {
   if (firstRunDone) return false;
   if (principal.must_change_password) return true;
-  return principal.auth_provider === "siem" && !principal.mfa_enabled;
+  return principal.first_login && !principal.mfa_enabled;
 }
 
 function RequireAuth({ children }: { children: JSX.Element }) {

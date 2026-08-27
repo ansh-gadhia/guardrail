@@ -41,6 +41,10 @@ type principalDTO struct {
 	// two-factor offer is the only part of that flow a federated account needs.
 	AuthProvider string `json:"auth_provider"`
 	MFAEnabled   bool   `json:"mfa_enabled"`
+	// FirstLogin marks this account's first sign-in, of any kind. The console
+	// uses it to offer a second factor exactly once, to everybody, rather than
+	// only to the accounts that happened to arrive with a temporary password.
+	FirstLogin bool `json:"first_login"`
 }
 
 func toPrincipalDTO(p appiam.Principal) principalDTO {
@@ -57,6 +61,7 @@ func toPrincipalDTO(p appiam.Principal) principalDTO {
 		MustChangePassword: p.MustChangePassword,
 		AuthProvider:       p.AuthProvider,
 		MFAEnabled:         p.MFAEnabled,
+		FirstLogin:         p.FirstLogin,
 	}
 }
 

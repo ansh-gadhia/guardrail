@@ -357,6 +357,11 @@ func (s *Service) Me(ctx context.Context, claims iam.Claims) (*Principal, error)
 // not "what should this person be shown next".
 func (s *Service) principalOf(ctx context.Context, u *iam.User) Principal {
 	p := principalFromUser(u)
+	// Read before RecordLoginSuccess has any bearing on the struct in hand — see
+	// Principal.FirstLogin. On a refresh this is correctly false: rotating a token
+	// is not a sign-in, and re-offering on every rotation is the nagging this is
+	// meant to avoid.
+	p.FirstLogin = u.LastLoginAt == nil
 	if s.mfa != nil {
 		if m, err := s.mfa.Get(ctx, u.ID); err == nil {
 			p.MFAEnabled = m.Confirmed()

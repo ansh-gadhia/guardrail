@@ -102,6 +102,20 @@ type Principal struct {
 	// treating it as done would silently stop offering the one prompt that would
 	// have finished it.
 	MFAEnabled bool
+	// FirstLogin marks the sign-in that is this account's first, of any kind.
+	//
+	// It is what the two-factor offer is keyed on, and it is deliberately the
+	// same signal for every account. A local account has always had one — the
+	// temporary password its owner has to replace — and the offer rode along at
+	// the end of replacing it. An account provisioned by an identity provider has
+	// no password and so had nothing to ride on, which is the only reason it was
+	// never asked.
+	//
+	// Derived from last_login_at rather than stored: RecordLoginSuccess stamps
+	// the row by id and leaves the loaded struct alone, so at the moment a
+	// principal is built this still reads as it did before the sign-in that is
+	// happening now.
+	FirstLogin bool
 }
 
 func principalFromUser(u *iam.User) Principal {

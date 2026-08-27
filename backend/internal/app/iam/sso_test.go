@@ -760,10 +760,73 @@ func TestSSOLogin_PrincipalDrivesTheFirstRunOffer(t *testing.T) {
 	if p.MustChangePassword {
 		t.Error("a SIEM account has no password, so it can never be pending a change")
 	}
-	// This is the condition the console gates on. Asserted here so a change to
-	// either field is caught by a test that says what it was for.
-	if !(p.AuthProvider == string(iam.ProviderSIEM) && !p.MFAEnabled) {
-		t.Fatal("the first-run two-factor offer would not be shown to a new SIEM user")
+	if !p.FirstLogin {
+		t.Fatal("the account was just created, so this is its first sign-in")
+	}
+	// The condition the console gates on, asserted here so a change to any field
+	// behind it is caught by a test that says what it was for.
+	if !(p.FirstLogin && !p.MFAEnabled) {
+		t.Fatal("the two-factor offer would not be shown to a new SIEM user")
+	}
+
+	// And it is offered ONCE. A second sign-in goes straight in.
+	again := assertion()
+	again.Nonce = "n2"
+	next, err := h.login(t, again)
+	if err != nil {
+		t.Fatalf("second login: %v", err)
+	}
+	if next.Principal.FirstLogin {
+		t.Fatal("the second sign-in still reports itself as the first")
+	}
+}
+
+// Local and federated accounts are gated by the SAME rule. This pins that: a
+// brand-new local account reports first_login exactly as a SIEM one does, so the
+// console does not need to know which kind it is looking at.
+func TestFirstLogin_IsTheSameSignalForALocalAccount(t *testing.T) {
+	h := newHarness(t)
+	h.addUser(t, "fresh@acme.com", "supersecret-123")
+
+	first, err := h.svc.Login(context.Background(), LoginInput{
+		Email: "fresh@acme.com", Password: "supersecret-123"})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if !first.Principal.FirstLogin {
+		t.Fatal("a local account's first sign-in must report first_login")
+	}
+	if first.Principal.AuthProvider != string(iam.ProviderLocal) {
+		t.Errorf("auth_provider = %q", first.Principal.AuthProvider)
+	}
+
+	second, err := h.svc.Login(context.Background(), LoginInput{
+		Email: "fresh@acme.com", Password: "supersecret-123"})
+	if err != nil {
+		t.Fatalf("second login: %v", err)
+	}
+	if second.Principal.FirstLogin {
+		t.Fatal("the second sign-in still reports itself as the first")
+	}
+}
+
+// Rotating a token is not a sign-in. Without this, the offer would return every
+// fifteen minutes for as long as somebody stayed logged in.
+func TestFirstLogin_RefreshIsNotASignIn(t *testing.T) {
+	h := newSSOHarness(t, nil)
+	pair, err := h.login(t, assertion())
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if !pair.Principal.FirstLogin {
+		t.Fatal("expected the first sign-in to say so")
+	}
+	rotated, err := h.svc.Refresh(context.Background(), pair.RefreshToken, ReqMeta{IP: "10.0.0.9"})
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if rotated.Principal.FirstLogin {
+		t.Fatal("a token refresh reported itself as a first sign-in")
 	}
 }
 

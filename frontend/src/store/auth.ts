@@ -5,9 +5,11 @@ import type { LoginResult, Principal, TokenResponse } from "@/lib/types";
 interface AuthState {
   principal: Principal | null;
   ready: boolean; // initial session probe finished
-  // firstRunDone marks the two-factor offer as dismissed for this sign-in. It is
-  // per-session on purpose: "later" should mean later, not never, so the offer
-  // returns next time rather than nagging on every navigation now.
+  // firstRunDone marks the first-run flow as dismissed for this sign-in, so it
+  // does not reappear on every navigation. Whether it comes back at all is a
+  // separate question the SERVER answers, through must_change_password and
+  // first_login — see needsFirstRun. A temporary password comes back until it is
+  // replaced; the two-factor offer is made once, at the first sign-in.
   firstRunDone: boolean;
   skipFirstRun: () => void;
   setSession: (t: TokenResponse) => void;
