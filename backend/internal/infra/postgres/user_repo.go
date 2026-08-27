@@ -19,14 +19,17 @@ func NewUserRepo(db *DB) *UserRepo { return &UserRepo{db: db} }
 
 const userColumns = `id, organization_id, email, COALESCE(username,''), COALESCE(password_hash,''),
 	auth_provider, status, is_super_admin, failed_login_count, locked_until, last_login_at,
-	must_change_password, created_at, updated_at`
+	must_change_password, COALESCE(siem_sub,''), sso_managed, COALESCE(sso_source_role,''),
+	created_at, updated_at`
 
 func scanUser(row pgx.Row) (*iam.User, error) {
 	var u iam.User
 	var email string
 	if err := row.Scan(&u.ID, &u.OrganizationID, &email, &u.Username, &u.PasswordHash,
 		&u.AuthProvider, &u.Status, &u.IsSuperAdmin, &u.FailedLoginCount,
-		&u.LockedUntil, &u.LastLoginAt, &u.MustChangePassword, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		&u.LockedUntil, &u.LastLoginAt, &u.MustChangePassword,
+		&u.SSO.Subject, &u.SSO.Managed, &u.SSO.SourceRole,
+		&u.CreatedAt, &u.UpdatedAt); err != nil {
 		return nil, err
 	}
 	u.Email = iam.Email(email)
@@ -38,10 +41,16 @@ func (r *UserRepo) Create(ctx context.Context, s iam.TenantScope, u *iam.User) e
 	return r.db.withScope(ctx, s, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO users (id, organization_id, email, username, password_hash,
-				auth_provider, status, is_super_admin, must_change_password)
-			VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9)`,
+				auth_provider, status, is_super_admin, must_change_password,
+				siem_sub, sso_managed, sso_source_role)
+			VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,
+				NULLIF($10,''),$11,NULLIF($12,''))`,
 			u.ID, u.OrganizationID, u.Email.String(), u.Username, u.PasswordHash,
-			string(u.AuthProvider), u.Status, u.IsSuperAdmin, u.MustChangePassword)
+			string(u.AuthProvider), u.Status, u.IsSuperAdmin, u.MustChangePassword,
+			// NULLIF, not the empty string: the uniqueness index on siem_sub is
+			// partial on NOT NULL, and a second account carrying '' would collide
+			// with the first one that did.
+			u.SSO.Subject, u.SSO.Managed, u.SSO.SourceRole)
 		if err != nil {
 			return mapWriteErr(err)
 		}
@@ -282,4 +291,73 @@ func loadRoles(ctx context.Context, tx pgx.Tx, users []*iam.User) error {
 		}
 	}
 	return rows.Err()
+}
+
+// ---- SIEM single sign-on ----
+
+// GetBySIEMSubject resolves the account that has claimed a SIEM identity within
+// one organization.
+//
+// Read with the trusted system scope: this runs during the exchange, before any
+// principal exists to scope by. The organization comes from configuration
+// (GUARDRAIL_FEDERATION_ORG_ID), never from the token, so the SIEM's user id
+// cannot choose which tenant a sign-in lands in.
+func (r *UserRepo) GetBySIEMSubject(ctx context.Context, orgID iam.ID, subject string) (*iam.User, error) {
+	if subject == "" {
+		return nil, iam.ErrNotFound
+	}
+	var u *iam.User
+	err := r.db.withScope(ctx, iam.TenantScope{OrganizationID: orgID, IsSuperAdmin: true}, func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx, `SELECT `+userColumns+`
+			FROM users WHERE organization_id=$1 AND siem_sub=$2 AND deleted_at IS NULL`, orgID, subject)
+		var e error
+		u, e = scanUser(row)
+		if errors.Is(e, pgx.ErrNoRows) {
+			return iam.ErrNotFound
+		}
+		if e != nil {
+			return e
+		}
+		return loadRoles(ctx, tx, []*iam.User{u})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// SetSSOIdentity writes the SIEM link.
+func (r *UserRepo) SetSSOIdentity(ctx context.Context, userID iam.ID, ident iam.SSOIdentity) error {
+	return r.db.withScope(ctx, iam.TenantScope{IsSuperAdmin: true}, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE users SET siem_sub=NULLIF($2,''), sso_managed=$3, sso_source_role=NULLIF($4,''),
+				updated_at=now()
+			WHERE id=$1 AND deleted_at IS NULL`,
+			userID, ident.Subject, ident.Managed, ident.SourceRole)
+		return mapWriteErr(err)
+	})
+}
+
+// SetSSOManaged raises or clears the ownership flag on its own.
+func (r *UserRepo) SetSSOManaged(ctx context.Context, userID iam.ID, managed bool) error {
+	return r.db.withScope(ctx, iam.TenantScope{IsSuperAdmin: true}, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE users SET sso_managed=$2, updated_at=now() WHERE id=$1 AND deleted_at IS NULL`,
+			userID, managed)
+		return mapWriteErr(err)
+	})
+}
+
+// UpdateEmail changes the stored address.
+//
+// A collision surfaces as iam.ErrConflict through mapWriteErr rather than as a
+// constraint violation, because the caller treats it as a cosmetic failure and
+// carries on: an address is not worth failing an entire sign-in over.
+func (r *UserRepo) UpdateEmail(ctx context.Context, userID iam.ID, email iam.Email) error {
+	return r.db.withScope(ctx, iam.TenantScope{IsSuperAdmin: true}, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE users SET email=$2, updated_at=now() WHERE id=$1 AND deleted_at IS NULL`,
+			userID, email.String())
+		return mapWriteErr(err)
+	})
 }

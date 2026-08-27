@@ -259,6 +259,42 @@ services:
       GUARDRAIL_LDAP_BIND_PASSWORD: ${GUARDRAIL_LDAP_BIND_PASSWORD:-}
       GUARDRAIL_LDAP_BASE_DN: ${GUARDRAIL_LDAP_BASE_DN:-}
       GUARDRAIL_LDAP_USER_FILTER: ${GUARDRAIL_LDAP_USER_FILTER:-}
+      # ---- SIEM single sign-on ----
+      #
+      # A setting only reaches the running service if it is listed HERE. A field
+      # that exists in Go config but is missing from this block is permanently
+      # stuck at its default, silently, with nothing anywhere saying so — which is
+      # why every one of these is written out even though most are empty.
+      #
+      # Related: after changing one of these, `up -d` the api service rather than
+      # `restart` it. A restart reuses the old environment.
+      #
+      # Setting GUARDRAIL_SIEM_JWKS_URL together with GUARDRAIL_FEDERATION_ORG_ID
+      # is what switches the feature on. Everything else has a working default.
+      GUARDRAIL_SIEM_JWKS_URL: ${GUARDRAIL_SIEM_JWKS_URL:-}
+      GUARDRAIL_SIEM_JWKS_CA_BUNDLE: ${GUARDRAIL_SIEM_JWKS_CA_BUNDLE:-}
+      # Leave empty. It enables HS256, which hands this container a key that can
+      # FORGE the SIEM's assertions rather than only check them.
+      GUARDRAIL_SIEM_SSO_SECRET: ${GUARDRAIL_SIEM_SSO_SECRET:-}
+      GUARDRAIL_SIEM_SSO_ISSUER: ${GUARDRAIL_SIEM_SSO_ISSUER:-cybersentineldlp-siem}
+      GUARDRAIL_SIEM_SSO_AUDIENCE: ${GUARDRAIL_SIEM_SSO_AUDIENCE:-guardrail-pam}
+      GUARDRAIL_SIEM_JWKS_CACHE_TTL: ${GUARDRAIL_SIEM_JWKS_CACHE_TTL:-10m}
+      GUARDRAIL_SIEM_SSO_CLOCK_LEEWAY: ${GUARDRAIL_SIEM_SSO_CLOCK_LEEWAY:-1m}
+      GUARDRAIL_SIEM_SSO_MAX_TOKEN_AGE: ${GUARDRAIL_SIEM_SSO_MAX_TOKEN_AGE:-10m}
+      GUARDRAIL_SIEM_SSO_NONCE_FLOOR: ${GUARDRAIL_SIEM_SSO_NONCE_FLOOR:-5m}
+      GUARDRAIL_SIEM_SSO_NONCE_CEILING: ${GUARDRAIL_SIEM_SSO_NONCE_CEILING:-1h}
+      GUARDRAIL_SIEM_SSO_JIT_PROVISION: ${GUARDRAIL_SIEM_SSO_JIT_PROVISION:-true}
+      GUARDRAIL_SIEM_SSO_SYNC_ON_LOGIN: ${GUARDRAIL_SIEM_SSO_SYNC_ON_LOGIN:-true}
+      # Both off by default, and both defaults run the opposite way to the obvious
+      # choice: a second factor somebody deliberately enrolled here, and an
+      # administrator's address allowlist, are each doing real work on a broker
+      # that stands in front of privileged devices. Neither should switch itself
+      # off as a side effect of turning single sign-on on.
+      GUARDRAIL_SIEM_SSO_TRUST_AMR: ${GUARDRAIL_SIEM_SSO_TRUST_AMR:-false}
+      GUARDRAIL_SIEM_SSO_ALLOWLIST_BYPASS: ${GUARDRAIL_SIEM_SSO_ALLOWLIST_BYPASS:-false}
+      GUARDRAIL_SIEM_SSO_DEFAULT_ROLE: ${GUARDRAIL_SIEM_SSO_DEFAULT_ROLE:-Read-only}
+      GUARDRAIL_SIEM_SSO_MAX_ROLE: ${GUARDRAIL_SIEM_SSO_MAX_ROLE:-}
+      GUARDRAIL_SIEM_SSO_ROLE_MAP: ${GUARDRAIL_SIEM_SSO_ROLE_MAP:-}
       GUARDRAIL_OTLP_ENDPOINT: ${GUARDRAIL_OTLP_ENDPOINT:-}
     volumes:
       # Name or absolute path — see the note on pgdata above. The container path
@@ -275,6 +311,17 @@ services:
       # guacd, guacd records happily, and the API finds nothing to collect — a
       # recorded session with no evidence, discovered when someone goes looking.
       - ${GUARDRAIL_GUACD_RECORDING_DIR:-/var/lib/guardrail/desktop-recordings}:${GUARDRAIL_GUACD_RECORDING_DIR:-/var/lib/guardrail/desktop-recordings}
+      # The SIEM's TLS certificate, for pinning the JWKS fetch
+      # (GUARDRAIL_SIEM_JWKS_CA_BUNDLE=/etc/guardrail/siem/jwks-ca.pem).
+      #
+      # Its own directory rather than deploy/tls, which holds the console's
+      # certificate and key: these are opposite jobs — one proves GuardRail's
+      # identity to browsers, the other decides whose word GuardRail takes about
+      # who may sign in — and they rotate on unrelated schedules. Read-only, and
+      # always mounted: an empty directory costs nothing, and a bind mount that
+      # only exists when a variable is set is the kind of conditional that gets
+      # discovered at the worst moment.
+      - ./deploy/siem:/etc/guardrail/siem:ro
     # Join guacd's group (its image's gid 1000). guacd writes each desktop
     # recording group-readable (0640) into the shared dir above; this makes the
     # API a member of that group, so it can read the recording back and move it to

@@ -565,6 +565,11 @@ configure_dns() {
 generate_cert() {
     local tls="$INSTALL_DIR/deploy/tls"
     mkdir -p "$tls"
+    # Where a pinned SIEM certificate goes, if single sign-on is wired up later.
+    # Created empty on every install so the compose bind mount always has a real
+    # directory to point at, and so an operator adding SSO afterwards has an
+    # obvious place to drop the file rather than inventing one.
+    mkdir -p "$INSTALL_DIR/deploy/siem"
     local sans="DNS:localhost,IP:127.0.0.1"
     local ip; ip=$(host_ip)
     [ -n "$ip" ] && sans="$sans,IP:$ip"
@@ -614,6 +619,29 @@ migrate_env() {
         "Where the data lives. Blank = Docker-managed named volumes; an absolute path = that path, bind-mounted. Do not repoint these by hand on a running deployment — scripts/migrate-data.sh moves the data and rewrites them together."
     ensure_env_key GUARDRAIL_RECORDINGS_MOUNT ""
     ensure_env_key GUARDRAIL_REDIS_MOUNT ""
+    # SIEM single sign-on. All blank or defaulted, so an existing deployment is
+    # unchanged by the upgrade: SSO stays off until somebody fills in the JWKS
+    # URL and the organization, and every other key here reproduces the
+    # behaviour of a deployment that has never heard of the SIEM.
+    ensure_env_key GUARDRAIL_FEDERATION_ORG_ID "" \
+        "The organization federated users (OIDC, LDAP, SIEM SSO) are provisioned into. Blank leaves every federated provider off."
+    ensure_env_key GUARDRAIL_SIEM_JWKS_URL "" \
+        "SIEM single sign-on — see docs/SIEM_SSO.md. HTTPS URL where the SIEM publishes its public keys; setting this and the organization above turns the feature on."
+    ensure_env_key GUARDRAIL_SIEM_JWKS_CA_BUNDLE "" \
+        "The SIEM's own TLS certificate, so the key fetch is pinned to it. Drop the PEM in deploy/siem/ and name its in-container path here, e.g. /etc/guardrail/siem/jwks-ca.pem."
+    ensure_env_key GUARDRAIL_SIEM_SSO_ISSUER cybersentineldlp-siem
+    ensure_env_key GUARDRAIL_SIEM_SSO_AUDIENCE guardrail-pam \
+        "The aud this GuardRail accepts. Per-consumer: do not share it with another product the SIEM signs tokens for."
+    ensure_env_key GUARDRAIL_SIEM_SSO_SECRET "" \
+        "Leave blank. Enables HS256, under which this server holds a key that can FORGE the SIEM's assertions rather than only verify them."
+    ensure_env_key GUARDRAIL_SIEM_SSO_JIT_PROVISION true
+    ensure_env_key GUARDRAIL_SIEM_SSO_SYNC_ON_LOGIN true
+    ensure_env_key GUARDRAIL_SIEM_SSO_DEFAULT_ROLE Read-only
+    ensure_env_key GUARDRAIL_SIEM_SSO_MAX_ROLE "" \
+        "Ceiling on any SIEM-derived role. The Super Admin role is unreachable through SSO regardless of this."
+    ensure_env_key GUARDRAIL_SIEM_SSO_ROLE_MAP ""
+    ensure_env_key GUARDRAIL_SIEM_SSO_TRUST_AMR false
+    ensure_env_key GUARDRAIL_SIEM_SSO_ALLOWLIST_BYPASS false
 }
 
 write_env() {
@@ -696,6 +724,57 @@ GUARDRAIL_RECORDING_RETENTION_DAYS=90
 # ---- Desktop access (RDP / VNC) ----
 GUARDRAIL_DESKTOP_ENABLED=${DESKTOP_ENABLED}
 GUARDRAIL_GUACD_RECORDING_DIR=${GUACD_DIR}
+
+# ---- SIEM single sign-on ----
+# Off until the two keys below are filled in. The SIEM authenticates the analyst
+# and hands GuardRail a short-lived signed assertion; GuardRail never sees a
+# password and never calls the SIEM back. See docs/SIEM_SSO.md.
+#
+# GUARDRAIL_FEDERATION_ORG_ID is the organization SSO users land in — the same
+# setting OIDC and LDAP use, because it answers the same question. Without it SSO
+# stays off no matter what else is set: the tenant must come from configuration
+# and never from anything the token says.
+GUARDRAIL_FEDERATION_ORG_ID=
+# Where the SIEM publishes its public keys. HTTPS only. Setting this and the
+# organization above is what turns the feature on.
+GUARDRAIL_SIEM_JWKS_URL=
+# The SIEM's own TLS certificate, so the fetch above is pinned to it rather than
+# to whoever happens to answer. Drop the PEM in ${INSTALL_DIR}/deploy/siem/ and
+# name it here by its path INSIDE the container. Needed for any SIEM with a
+# self-signed certificate, which on a private network is nearly all of them.
+GUARDRAIL_SIEM_JWKS_CA_BUNDLE=
+# Exact strings the token must carry. The audience is per-consumer: do not reuse
+# the value another product the SIEM signs for is using, or the check that the
+# token was meant for GuardRail stops meaning anything.
+GUARDRAIL_SIEM_SSO_ISSUER=cybersentineldlp-siem
+GUARDRAIL_SIEM_SSO_AUDIENCE=guardrail-pam
+# Leave this blank. It enables HS256, under which this server holds a key that
+# can FORGE the SIEM's assertions rather than only verify them — and with
+# just-in-time provisioning on, a leak of it mints accounts rather than merely
+# impersonating one. It exists only so a SIEM that cannot yet sign with a key
+# from its JWKS is not blocked. Clear it the day they can.
+GUARDRAIL_SIEM_SSO_SECRET=
+# Create the GuardRail account on first sign-in, and keep its role tracking the
+# SIEM afterwards. Turning sync off freezes roles at whatever they were.
+GUARDRAIL_SIEM_SSO_JIT_PROVISION=true
+GUARDRAIL_SIEM_SSO_SYNC_ON_LOGIN=true
+# The role a sign-in gets when the SIEM sends no role GuardRail recognises, and
+# the ceiling on what any SIEM-derived role may become. The Super Admin role is
+# unreachable through SSO whatever these say — it is what switches tenant
+# isolation off, and no claim in a token gets to select it.
+GUARDRAIL_SIEM_SSO_DEFAULT_ROLE=Read-only
+GUARDRAIL_SIEM_SSO_MAX_ROLE=
+# Optional JSON override of the role table, e.g.
+#   {"L3": {"rw": "Senior Operator", "ro": "Auditor"}, "L1": "Read-only"}
+GUARDRAIL_SIEM_SSO_ROLE_MAP=
+# Both deliberately off. TRUST_AMR would let the SIEM's word stand in for a
+# second factor somebody chose to enrol here; ALLOWLIST_BYPASS would exempt
+# SIEM-vouched sessions from this organization's source-address policy. Each is
+# a real control on a broker that stands in front of privileged devices, and
+# neither should switch itself off as a side effect of enabling sign-on. Turn
+# ALLOWLIST_BYPASS on only if analysts sign in from outside the allowed ranges.
+GUARDRAIL_SIEM_SSO_TRUST_AMR=false
+GUARDRAIL_SIEM_SSO_ALLOWLIST_BYPASS=false
 
 # ---- Logging ----
 GUARDRAIL_LOG_LEVEL=info

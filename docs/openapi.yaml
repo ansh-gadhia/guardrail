@@ -143,6 +143,37 @@ paths:
                   local: { type: boolean }
                   ldap: { type: boolean }
                   oidc: { type: boolean }
+                  siem_sso: { type: boolean }
+
+  /auth/sso/exchange:
+    post:
+      tags: [Federation]
+      summary: Trade a SIEM exchange token for a GuardRail session
+      description: >
+        Public. The SIEM authenticates the person and mints a short-lived signed
+        assertion; this trades it for GuardRail's own tokens. 401 means the token
+        is bad and retrying will not help; 503 means GuardRail could not verify
+        it right now (key set or replay store unreachable, or SSO not configured)
+        and a retry is reasonable. See docs/SIEM_SSO.md.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, description: The SIEM exchange token (a JWS) }
+      responses:
+        "200":
+          description: Tokens, or an MFA challenge when the account holds a second factor
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /auth/ldap/login:
     post:

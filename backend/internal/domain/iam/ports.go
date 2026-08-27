@@ -41,6 +41,25 @@ type UserRepository interface {
 	UpdatePasswordHash(ctx context.Context, userID ID, hash string) error
 	// SetMustChangePassword raises or clears the forced-password-change flag.
 	SetMustChangePassword(ctx context.Context, userID ID, must bool) error
+
+	// ---- SIEM single sign-on ----
+
+	// GetBySIEMSubject resolves the account that has claimed a SIEM identity.
+	// Scoped to one organization: the subject is unique deployment-wide, but a
+	// lookup that crossed tenants would let the SIEM's user id decide which
+	// tenant a sign-in lands in, and that is not its job.
+	GetBySIEMSubject(ctx context.Context, orgID ID, subject string) (*User, error)
+	// SetSSOIdentity writes the whole SIEM link: subject, ownership flag and
+	// asserted-role provenance. One call because the three are only ever
+	// meaningful together.
+	SetSSOIdentity(ctx context.Context, userID ID, ident SSOIdentity) error
+	// SetSSOManaged raises or clears the ownership flag alone. Cleared when a
+	// GuardRail administrator edits the roles by hand, so the next sign-in does
+	// not quietly undo their decision.
+	SetSSOManaged(ctx context.Context, userID ID, managed bool) error
+	// UpdateEmail changes the stored address, for when the SIEM reports that the
+	// person behind a known subject is now reachable somewhere else.
+	UpdateEmail(ctx context.Context, userID ID, email Email) error
 }
 
 // RefreshTokenGenerator creates opaque refresh tokens and hashes them for
@@ -131,6 +150,10 @@ type Claims struct {
 	// of their roles'. Carried on the claims so the gate does not re-read the
 	// role graph on the connect path.
 	ApprovalLevel int
+	// SSO marks a session the SIEM vouched for. Read by exactly one decision —
+	// whether the organization's source-address policy applies — and only when
+	// that bypass has been switched on. It grants nothing on its own.
+	SSO bool
 }
 
 // Level is the rank to judge this principal by. Super admins sit above every

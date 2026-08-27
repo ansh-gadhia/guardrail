@@ -16,6 +16,10 @@ func (h *Handler) authProviders(c *gin.Context) {
 		"local": true,
 		"ldap":  h.svc.LDAPEnabled(),
 		"oidc":  h.svc.OIDCEnabled(),
+		// Advertised so the console can say "sign in from the SIEM" instead of
+		// leaving somebody staring at a form they have no password for. There is
+		// no button to render: the flow starts at the SIEM, not here.
+		"siem_sso": h.svc.SIEMSSOEnabled(),
 	})
 }
 

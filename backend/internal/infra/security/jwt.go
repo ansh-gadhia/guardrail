@@ -37,6 +37,10 @@ type guardrailClaims struct {
 	// Level is the approval rank. Carried in the token so the connect path can
 	// judge a request without re-reading the role graph on every attempt.
 	Level int `json:"lvl,omitempty"`
+	// SSO marks a session opened by a SIEM exchange. omitempty, so every token
+	// this deployment has ever issued stays byte-identical until the day somebody
+	// actually signs in through the SIEM.
+	SSO bool `json:"sso,omitempty"`
 }
 
 // Issue signs an access token for the given claims and returns it with its
@@ -58,6 +62,7 @@ func (j *JWTIssuer) Issue(c iam.Claims, now time.Time) (string, time.Time, error
 		Roles:       c.Roles,
 		Permissions: c.Permissions,
 		Level:       c.ApprovalLevel,
+		SSO:         c.SSO,
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := tok.SignedString(j.key)
@@ -103,5 +108,6 @@ func (j *JWTIssuer) Verify(token string) (iam.Claims, error) {
 		Roles:          claims.Roles,
 		Permissions:    claims.Permissions,
 		ApprovalLevel:  claims.Level,
+		SSO:            claims.SSO,
 	}, nil
 }

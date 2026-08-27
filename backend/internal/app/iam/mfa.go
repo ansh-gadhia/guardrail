@@ -105,7 +105,7 @@ func (s *Service) VerifyMFA(ctx context.Context, in MFAVerifyInput) (*TokenPair,
 		return nil, iam.ErrMFAChallengeInvalid
 	}
 	now := s.clock.Now()
-	userID, err := s.mfaChal.Verify(in.MFAToken, now)
+	userID, fromSSO, err := s.mfaChal.Verify(in.MFAToken, now)
 	if err != nil {
 		return nil, iam.ErrMFAChallengeInvalid
 	}
@@ -138,7 +138,7 @@ func (s *Service) VerifyMFA(ctx context.Context, in MFAVerifyInput) (*TokenPair,
 		_ = s.throttle.Reset(ctx, throttleKey)
 	}
 
-	pair, err := s.issueTokens(ctx, user, in.Meta, iam.NewID())
+	pair, err := s.issueTokens(ctx, user, in.Meta, iam.NewID(), fromSSO)
 	if err != nil {
 		return nil, err
 	}

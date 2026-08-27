@@ -90,7 +90,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (*TokenPair, error) 
 	// VerifyMFA. Password validity has already been proven at this point.
 	if s.mfa != nil {
 		if m, e := s.mfa.Get(ctx, user.ID); e == nil && m.Confirmed() {
-			challenge, ce := s.mfaChal.Issue(user.ID, now)
+			challenge, ce := s.mfaChal.Issue(user.ID, false, now)
 			if ce != nil {
 				return nil, ce
 			}
@@ -99,7 +99,7 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (*TokenPair, error) 
 		}
 	}
 
-	pair, err := s.issueTokens(ctx, user, in.Meta, iam.NewID())
+	pair, err := s.issueTokens(ctx, user, in.Meta, iam.NewID(), false)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +246,11 @@ func (s *Service) Refresh(ctx context.Context, rawToken string, meta ReqMeta) (*
 
 	// Rotate: revoke the presented token, mint a new one in the same family.
 	_ = s.sessions.Revoke(ctx, sess.ID, now)
-	pair, err := s.issueTokens(ctx, user, meta, sess.FamilyID)
+	// The rotated family keeps whatever opened it. Re-deriving this from the user
+	// would be wrong in both directions: an SSO user who also signs in with a
+	// password has two families with different provenance, and the same person's
+	// two sessions must not silently share one.
+	pair, err := s.issueTokens(ctx, user, meta, sess.FamilyID, sess.SSO)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +320,7 @@ func (s *Service) ChangePassword(ctx context.Context, actor iam.Claims, current,
 	_ = s.sessions.RevokeAllForUser(ctx, user.ID, now)
 	s.record(ctx, s.pwEvent(user, meta, audit.ResultSuccess, ""))
 	// Re-issue tokens in a brand-new family so the current session survives.
-	return s.issueTokens(ctx, user, meta, iam.NewID())
+	return s.issueTokens(ctx, user, meta, iam.NewID(), false)
 }
 
 func (s *Service) pwEvent(u *iam.User, meta ReqMeta, result audit.Result, reason string) audit.Event {
@@ -345,9 +349,16 @@ func (s *Service) Me(ctx context.Context, claims iam.Claims) (*Principal, error)
 
 // issueTokens mints an access JWT and a rotated refresh token in the given
 // family, persisting the refresh session.
-func (s *Service) issueTokens(ctx context.Context, user *iam.User, meta ReqMeta, familyID iam.ID) (*TokenPair, error) {
+//
+// sso marks a family opened by a SIEM exchange. It is stored on the session row
+// as well as signed into the access token, because a refresh rebuilds the token
+// from the user record — and a marker that lived only in the token would be lost
+// at the first rotation, fifteen minutes in.
+func (s *Service) issueTokens(ctx context.Context, user *iam.User, meta ReqMeta, familyID iam.ID, sso bool) (*TokenPair, error) {
 	now := s.clock.Now()
-	access, accessExp, err := s.tokens.Issue(claimsFromUser(user), now)
+	claims := claimsFromUser(user)
+	claims.SSO = sso
+	access, accessExp, err := s.tokens.Issue(claims, now)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +369,7 @@ func (s *Service) issueTokens(ctx context.Context, user *iam.User, meta ReqMeta,
 	refreshExp := now.Add(s.cfg.RefreshTTL)
 	sess := &iam.AuthSession{
 		ID: iam.NewID(), UserID: user.ID, FamilyID: familyID, RefreshTokenHash: refreshHash,
-		UserAgent: meta.UserAgent, IP: meta.IP, ExpiresAt: refreshExp,
+		UserAgent: meta.UserAgent, IP: meta.IP, ExpiresAt: refreshExp, SSO: sso,
 	}
 	if err := s.sessions.Create(ctx, sess); err != nil {
 		return nil, err

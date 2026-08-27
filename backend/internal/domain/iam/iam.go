@@ -40,6 +40,12 @@ const (
 	ProviderLDAP  AuthProvider = "ldap"
 	ProviderOIDC  AuthProvider = "oidc"
 	ProviderSAML  AuthProvider = "saml"
+	// ProviderSIEM is an account whose sign-in is vouched for by the SIEM's
+	// exchange token. Distinct from ProviderOIDC even though both are federated:
+	// the SIEM is not an OIDC provider to GuardRail, the linking key is different
+	// (SSOIdentity.Subject rather than external_id), and telling them apart is
+	// what lets "change your password there" name the right there.
+	ProviderSIEM AuthProvider = "siem"
 )
 
 // ---- Aggregates ----
@@ -72,8 +78,13 @@ type User struct {
 	// MustChangePassword marks a credential its owner did not choose — an
 	// admin-set temporary password. The console forces a change at first sign-in.
 	MustChangePassword bool
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// SSO links this account to the SIEM's idea of the same person, and records
+	// whether its roles track the SIEM or a local administrator. Zero-valued on
+	// every account that has never signed in through the SIEM, which is most of
+	// them. See SSOIdentity.
+	SSO       SSOIdentity
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // IsActive reports whether the user may authenticate right now.
@@ -263,6 +274,11 @@ type AuthSession struct {
 	ExpiresAt        time.Time
 	RevokedAt        *time.Time
 	CreatedAt        time.Time
+	// SSO marks a family opened by a SIEM exchange rather than by a password.
+	// It is persisted rather than derived because a refresh rebuilds the access
+	// token from the user record: without it here the marker would evaporate at
+	// the first rotation, which is fifteen minutes into the session.
+	SSO bool
 }
 
 // IsUsable reports whether the session can still mint a new access token.

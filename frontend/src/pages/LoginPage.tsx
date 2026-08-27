@@ -157,6 +157,17 @@ export function LoginPage() {
                     </a>
                   </>
                 )}
+
+                {/* No button, because there is nothing here to click: the SIEM
+                    handoff starts at the SIEM and lands on /auth/sso. Saying so
+                    is the whole point — an analyst who has never been issued a
+                    GuardRail password would otherwise stand at this form with no
+                    idea that it is not the door they are meant to use. */}
+                {providers.siem_sso && (
+                  <p className="pt-1 text-center text-xs text-faint">
+                    Analysts signed in to the SIEM can open GuardRail from there — no separate password.
+                  </p>
+                )}
               </form>
             ) : (
               <form onSubmit={submitMFA} className="space-y-4">

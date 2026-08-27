@@ -34,41 +34,57 @@ func NewMFAChallenger(signingKey string, ttl time.Duration) *MFAChallenger {
 }
 
 // Issue returns a signed challenge token valid for the configured TTL.
-func (m *MFAChallenger) Issue(userID iam.ID, now time.Time) (string, error) {
+//
+// sso records that the password half of this sign-in was a SIEM exchange, so the
+// session minted after the second factor still knows what opened it. It is
+// inside the signed payload, not alongside it: a flag a client could edit would
+// let anybody holding a challenge decide their own session was SIEM-vouched.
+func (m *MFAChallenger) Issue(userID iam.ID, sso bool, now time.Time) (string, error) {
 	exp := now.Add(m.ttl).Unix()
-	payload := userID.String() + ":" + strconv.FormatInt(exp, 10)
+	payload := userID.String() + ":" + strconv.FormatInt(exp, 10) + ":" + boolDigit(sso)
 	sig := m.sign(payload)
 	tok := base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + sig
 	return tok, nil
 }
 
-// Verify checks the signature and expiry, returning the embedded user id.
-func (m *MFAChallenger) Verify(token string, now time.Time) (iam.ID, error) {
+// Verify checks the signature and expiry, returning the embedded user id and
+// whether the sign-in it belongs to began at the SIEM.
+func (m *MFAChallenger) Verify(token string, now time.Time) (iam.ID, bool, error) {
 	parts := strings.SplitN(token, ".", 2)
 	if len(parts) != 2 {
-		return iam.ID{}, iam.ErrMFAChallengeInvalid
+		return iam.ID{}, false, iam.ErrMFAChallengeInvalid
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return iam.ID{}, iam.ErrMFAChallengeInvalid
+		return iam.ID{}, false, iam.ErrMFAChallengeInvalid
 	}
 	payload := string(raw)
 	if subtle.ConstantTimeCompare([]byte(m.sign(payload)), []byte(parts[1])) != 1 {
-		return iam.ID{}, iam.ErrMFAChallengeInvalid
+		return iam.ID{}, false, iam.ErrMFAChallengeInvalid
 	}
-	seg := strings.SplitN(payload, ":", 2)
-	if len(seg) != 2 {
-		return iam.ID{}, iam.ErrMFAChallengeInvalid
+	// Two segments or three. A challenge minted by the previous build carries no
+	// sso segment and is treated as not-SSO, which keeps the five-minute window
+	// either side of a rolling restart from logging people out mid-sign-in.
+	seg := strings.Split(payload, ":")
+	if len(seg) != 2 && len(seg) != 3 {
+		return iam.ID{}, false, iam.ErrMFAChallengeInvalid
 	}
 	exp, err := strconv.ParseInt(seg[1], 10, 64)
 	if err != nil || now.Unix() > exp {
-		return iam.ID{}, iam.ErrMFAChallengeInvalid
+		return iam.ID{}, false, iam.ErrMFAChallengeInvalid
 	}
 	id, err := uuid.Parse(seg[0])
 	if err != nil {
-		return iam.ID{}, iam.ErrMFAChallengeInvalid
+		return iam.ID{}, false, iam.ErrMFAChallengeInvalid
 	}
-	return id, nil
+	return id, len(seg) == 3 && seg[2] == "1", nil
+}
+
+func boolDigit(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
 }
 
 func (m *MFAChallenger) sign(payload string) string {

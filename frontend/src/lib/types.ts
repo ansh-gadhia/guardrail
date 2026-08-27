@@ -458,6 +458,11 @@ export interface AuthProviders {
   local: boolean;
   ldap: boolean;
   oidc: boolean;
+  // Whether SIEM single sign-on is wired up. There is no button for it — the
+  // flow starts at the SIEM — so the console uses this only to explain where to
+  // sign in, rather than leaving somebody staring at a form they have no
+  // password for.
+  siem_sso?: boolean;
 }
 
 export interface MFAStatus {

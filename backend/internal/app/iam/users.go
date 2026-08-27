@@ -181,6 +181,15 @@ func (s *Service) AssignRoles(ctx context.Context, actor iam.Claims, userID iam.
 	if err := s.users.SetRoles(ctx, actor.Scope(), userID, roleIDs); err != nil {
 		return err
 	}
+	// A role edited by hand is a local decision, so the account stops tracking the
+	// SIEM from here on.
+	//
+	// Without this, an administrator's change would last exactly until its subject
+	// next signed in and then be silently reverted by the sync — which is worse
+	// than refusing the edit outright, because it looks like it worked. Best
+	// effort: the roles are already written, and failing the whole call now would
+	// report failure for a change that did happen.
+	_ = s.users.SetSSOManaged(ctx, userID, false)
 	// Revoking the user's active sessions forces a fresh authz snapshot.
 	_ = s.sessions.RevokeAllForUser(ctx, userID, s.clock.Now())
 	s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "user.assign_roles",

@@ -30,11 +30,17 @@ POST   /auth/mfa/verify            complete MFA challenge (TOTP or recovery) -> 
 POST   /auth/refresh               rotate refresh -> new access token
 POST   /auth/logout                revoke current session
 GET    /auth/me                     current principal + permissions
-GET    /auth/providers             enabled login methods {local, ldap, oidc}
+GET    /auth/providers             enabled login methods {local, ldap, oidc, siem_sso}
 POST   /auth/ldap/login            directory bind -> tokens (JIT provision)
 GET    /auth/oidc/start            begin OIDC (PKCE) -> 302 to IdP + txn cookie
 GET    /auth/oidc/callback         IdP redirect -> exchange + tokens
+POST   /auth/sso/exchange          SIEM exchange token -> tokens (see SIEM_SSO.md)
 ```
+
+`/auth/sso/exchange` is public and takes `{"token": "<jwt>"}`. It answers 401
+when the token is bad and no retry will help, and 503 when GuardRail could not
+verify it right now — the split is part of the integration contract, not a
+formality. See [SIEM_SSO.md](SIEM_SSO.md).
 
 ### MFA (self-service, authenticated)
 ```

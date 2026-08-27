@@ -22,9 +22,9 @@ func (r *AuthSessionRepo) Create(ctx context.Context, s *iam.AuthSession) error 
 	return r.db.withSystemScope(ctx, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO auth_sessions (id, user_id, family_id, refresh_token_hash,
-				user_agent, ip, expires_at)
-			VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,'')::inet,$7)`,
-			s.ID, s.UserID, s.FamilyID, s.RefreshTokenHash, s.UserAgent, s.IP, s.ExpiresAt)
+				user_agent, ip, expires_at, sso)
+			VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,'')::inet,$7,$8)`,
+			s.ID, s.UserID, s.FamilyID, s.RefreshTokenHash, s.UserAgent, s.IP, s.ExpiresAt, s.SSO)
 		return mapWriteErr(err)
 	})
 }
@@ -35,11 +35,11 @@ func (r *AuthSessionRepo) GetByTokenHash(ctx context.Context, hash []byte) (*iam
 	err := r.db.withSystemScope(ctx, func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx, `
 			SELECT id, user_id, family_id, refresh_token_hash, COALESCE(host(ip),''),
-				expires_at, revoked_at, created_at
+				expires_at, revoked_at, created_at, sso
 			FROM auth_sessions WHERE refresh_token_hash=$1`, hash)
 		var s iam.AuthSession
 		if err := row.Scan(&s.ID, &s.UserID, &s.FamilyID, &s.RefreshTokenHash, &s.IP,
-			&s.ExpiresAt, &s.RevokedAt, &s.CreatedAt); err != nil {
+			&s.ExpiresAt, &s.RevokedAt, &s.CreatedAt, &s.SSO); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return iam.ErrRefreshInvalid
 			}

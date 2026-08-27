@@ -25,7 +25,7 @@ func (s stubAuth) Verify(token string) (iam.Claims, error) {
 func protectedEngine(a Authenticator, perm string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.GET("/x", Authenticate(a, nil, nil), RequirePermission(perm), func(c *gin.Context) {
+	r.GET("/x", Authenticate(a, nil, nil, false), RequirePermission(perm), func(c *gin.Context) {
 		c.Status(http.StatusOK)
 	})
 	return r

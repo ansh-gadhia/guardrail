@@ -180,6 +180,83 @@ func buildFederation(cfg config.FederationConfig, log *zap.Logger) (domiam.OIDCA
 	return oidc, ldap, orgID
 }
 
+// buildSIEMSSO constructs the SIEM single sign-on collaborators, or returns nils
+// when the deployment has not configured it.
+//
+// Every failure here is a WARNING that leaves SSO off, not a fatal error, with
+// one deliberate exception below. A misconfigured optional identity provider
+// must not stop a privileged-access broker from booting: the console still has
+// local sign-in, and an operator who has just mistyped a URL needs to get in and
+// fix it far more than they need the process to refuse to start.
+//
+// The exception is a JWKS URL that is present but unusable — plain HTTP, or a CA
+// bundle that is named and unreadable. Those are refused by NewJWKSSource and
+// land here as a warning that turns SSO off, which is the same fail-closed
+// outcome: what must never happen is the fetch quietly falling back to a weaker
+// trust path while the log still says single sign-on is configured.
+func buildSIEMSSO(
+	cfg config.FederationConfig, rdb *cache.Client, log *zap.Logger,
+) (domiam.SSOVerifier, domiam.ReplayStore, *appiam.SSORoleMap) {
+	if !cfg.SIEMSSOEnabled() {
+		return nil, nil, nil
+	}
+	c := cfg.SIEM
+
+	var keys *security.JWKSSource
+	if c.JWKSURL != "" {
+		src, err := security.NewJWKSSource(security.JWKSConfig{
+			URL:          c.JWKSURL,
+			CABundlePath: c.JWKSCABundle,
+			CacheTTL:     c.JWKSCacheTTL,
+		})
+		if err != nil {
+			log.Warn("SIEM SSO disabled: the JWKS source could not be built", zap.Error(err))
+			return nil, nil, nil
+		}
+		keys = src
+	}
+
+	roleMap, err := appiam.NewSSORoleMap(c.RoleMapJSON, c.DefaultRole)
+	if err != nil {
+		// Loud, and not fatal. A malformed role map must not hand everybody an
+		// administrator's role and must not lock everybody out; falling back to the
+		// built-in table does neither, and this line says which happened.
+		log.Warn("SIEM SSO role map override ignored", zap.Error(err))
+	}
+
+	verifier := security.NewSSOVerifier(keys, security.SSOVerifierConfig{
+		Issuer:       c.Issuer,
+		Audience:     c.Audience,
+		SharedSecret: c.SharedSecret,
+		ClockLeeway:  c.ClockLeeway,
+		MaxTokenAge:  c.MaxTokenAge,
+	})
+
+	fields := []zap.Field{
+		zap.String("issuer", c.Issuer), zap.String("audience", c.Audience),
+		zap.Bool("jit_provision", c.JITProvision), zap.Bool("sync_on_login", c.SyncOnLogin),
+		zap.Bool("trust_amr", c.TrustAMR), zap.Bool("allowlist_bypass", c.AllowlistBypass),
+		zap.String("default_role", c.DefaultRole), zap.String("max_role", c.MaxRole),
+	}
+	if keys != nil {
+		fields = append(fields, zap.String("jwks_url", c.JWKSURL),
+			zap.Bool("jwks_pinned", c.JWKSCABundle != ""))
+	}
+	log.Info("SIEM single sign-on enabled", fields...)
+	if c.SharedSecret != "" {
+		// Said every boot, on purpose. Under a shared secret this process holds a
+		// key that can forge the SIEM's tokens rather than merely verify them, and
+		// with just-in-time provisioning on, a leak of it mints accounts instead of
+		// impersonating one. It is a migration state, and a migration state nobody
+		// is reminded of is a permanent state.
+		log.Warn("SIEM SSO accepts symmetric (HS256) tokens — GuardRail holds a key that can FORGE " +
+			"the SIEM's assertions. Move the SIEM to a key from its JWKS and clear " +
+			"GUARDRAIL_SIEM_SSO_SECRET.")
+	}
+	return verifier, infracache.NewReplayStore(rdb.Client), roleMap
+
+}
+
 // healthcheck performs an in-process HTTP GET against the liveness probe. Returns
 // a process exit code (0 healthy, 1 otherwise).
 // detectPrimaryIP returns the address the kernel would use as the source for the
@@ -305,6 +382,8 @@ func run() error {
 
 	// Federation providers (M3) are optional and activate only when configured.
 	oidcProvider, ldapProvider, fedOrgID := buildFederation(cfg.Federation, log)
+	// SIEM single sign-on rides on the same provisioning organization.
+	ssoVerifier, ssoReplay, ssoRoles := buildSIEMSSO(cfg.Federation, rdb, log)
 
 	iamCfg := appiam.DefaultConfig()
 	iamCfg.RefreshTTL = cfg.Auth.RefreshTokenTTL
@@ -331,6 +410,18 @@ func run() error {
 		FederationOrgID: fedOrgID,
 		// --- Machine tokens ---
 		APITokens: postgres.NewAPITokenRepo(pg),
+		// --- SIEM single sign-on ---
+		SSOVerifier: ssoVerifier,
+		Replay:      ssoReplay,
+		SSORoles:    ssoRoles,
+		SSO: appiam.SSOConfig{
+			JITProvision: cfg.Federation.SIEM.JITProvision,
+			SyncOnLogin:  cfg.Federation.SIEM.SyncOnLogin,
+			TrustAMR:     cfg.Federation.SIEM.TrustAMR,
+			MaxRole:      cfg.Federation.SIEM.MaxRole,
+			NonceFloor:   cfg.Federation.SIEM.NonceFloor,
+			NonceCeiling: cfg.Federation.SIEM.NonceCeiling,
+		},
 	})
 	// Primary super admin from the environment (GUARDRAIL_ADMIN_*). Idempotent:
 	// created once on first boot, a no-op thereafter. Fails closed on a weak
@@ -664,8 +755,11 @@ func run() error {
 		// Each organization's source-address policy, applied to every
 		// authenticated request. The broker owns it because it owns org settings.
 		SourceGuard: brokerSvc,
-		WebDir:      cfg.HTTP.WebDir,
-		Version:     version,
+		// Whether a SIEM-vouched session is exempt from that policy. Off unless a
+		// deployment has explicitly asked for it.
+		SSOAllowlistBypass: cfg.Federation.SIEM.AllowlistBypass,
+		WebDir:             cfg.HTTP.WebDir,
+		Version:            version,
 	})
 	if err != nil {
 		return err

@@ -72,7 +72,14 @@ type Cipher interface {
 
 // MFAChallenger issues and verifies the short-lived, signed token handed to a
 // client after a correct password when a second factor is still required.
+//
+// The challenge carries the sso flag as well as the user, because the session
+// that eventually gets minted is minted on the far side of it. A SIEM-vouched
+// sign-in by somebody who also holds a second factor would otherwise arrive as
+// an ordinary local session — and any behaviour keyed off the marker (today,
+// whether the source-address policy applies) would then be right for everyone
+// except the users who took security most seriously.
 type MFAChallenger interface {
-	Issue(userID ID, now time.Time) (string, error)
-	Verify(token string, now time.Time) (ID, error)
+	Issue(userID ID, sso bool, now time.Time) (string, error)
+	Verify(token string, now time.Time) (ID, bool, error)
 }

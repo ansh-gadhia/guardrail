@@ -40,8 +40,12 @@ type Deps struct {
 	// authenticated request. Optional: nil means no policy is enforced, which is
 	// what a deployment that has never configured one wants.
 	SourceGuard middleware.SourceGuard
-	Version     string // build version, surfaced at /api/v1/version
-	WebDir      string // if set, serve the SPA/console from this dir
+	// SSOAllowlistBypass exempts SIEM-vouched sessions from that policy. Off by
+	// default; see middleware.enforceSource for why the default runs the other
+	// way from the obvious one.
+	SSOAllowlistBypass bool
+	Version            string // build version, surfaced at /api/v1/version
+	WebDir             string // if set, serve the SPA/console from this dir
 }
 
 // New builds the fully-configured Gin engine for the public API listener.
@@ -88,7 +92,7 @@ func New(d Deps) (*gin.Engine, error) {
 	// Feature routes. The authentication middleware is built once from the
 	// injected token verifier and shared by every protected module.
 	if d.Authenticator != nil {
-		authMW := middleware.Authenticate(d.Authenticator, d.APITokens, d.SourceGuard)
+		authMW := middleware.Authenticate(d.Authenticator, d.APITokens, d.SourceGuard, d.SSOAllowlistBypass)
 		if d.IAM != nil {
 			d.IAM.Register(apiV1, authMW)
 			// Machine tokens: issued and revoked here, verified by authMW above.

@@ -123,6 +123,58 @@ func (f *fakeUserRepo) SetMustChangePassword(_ context.Context, id iam.ID, must 
 	return nil
 }
 
+// ---- SIEM single sign-on ----
+
+func (f *fakeUserRepo) GetBySIEMSubject(_ context.Context, orgID iam.ID, subject string) (*iam.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if subject == "" {
+		return nil, iam.ErrNotFound
+	}
+	for _, u := range f.users {
+		if u.OrganizationID == orgID && u.SSO.Subject == subject {
+			return f.clone(u), nil
+		}
+	}
+	return nil, iam.ErrNotFound
+}
+
+func (f *fakeUserRepo) SetSSOIdentity(_ context.Context, id iam.ID, ident iam.SSOIdentity) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if u, ok := f.users[id]; ok {
+		u.SSO = ident
+	}
+	return nil
+}
+
+func (f *fakeUserRepo) SetSSOManaged(_ context.Context, id iam.ID, managed bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if u, ok := f.users[id]; ok {
+		u.SSO.Managed = managed
+	}
+	return nil
+}
+
+// UpdateEmail enforces the same per-organization uniqueness the real index does,
+// so the rename-collision path is exercised rather than assumed away.
+func (f *fakeUserRepo) UpdateEmail(_ context.Context, id iam.ID, email iam.Email) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[id]
+	if !ok {
+		return iam.ErrNotFound
+	}
+	for other, cand := range f.users {
+		if other != id && cand.OrganizationID == u.OrganizationID && cand.Email == email {
+			return iam.ErrConflict
+		}
+	}
+	u.Email = email
+	return nil
+}
+
 // fakeOrgRepo is a minimal iam.OrganizationRepository.
 type fakeOrgRepo struct{ bySlug map[string]*iam.Organization }
 
@@ -156,10 +208,10 @@ func (f *fakeOrgRepo) List(_ context.Context, _ iam.TenantScope, _ iam.Page) ([]
 }
 
 // fakeRoleRepo is a no-op iam.RoleRepository.
-type fakeRoleRepo struct{}
+type fakeRoleRepo struct{ roles []iam.Role }
 
-func (fakeRoleRepo) List(context.Context, iam.TenantScope, iam.Page) ([]iam.Role, error) {
-	return nil, nil
+func (f fakeRoleRepo) List(context.Context, iam.TenantScope, iam.Page) ([]iam.Role, error) {
+	return f.roles, nil
 }
 func (fakeRoleRepo) GetByID(context.Context, iam.TenantScope, iam.ID) (*iam.Role, error) {
 	return nil, iam.ErrNotFound

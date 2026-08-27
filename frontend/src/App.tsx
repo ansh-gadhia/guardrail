@@ -16,6 +16,7 @@ import { SecurityPage } from "./pages/SecurityPage";
 import { OrganizationPage } from "./pages/OrganizationPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { FirstRunPage } from "./pages/FirstRunPage";
+import { SSOCallbackPage } from "./pages/SSOCallbackPage";
 import { NotFoundPage, ErrorBoundary } from "./pages/ErrorPages";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -51,6 +52,10 @@ export default function App() {
     <ErrorBoundary>
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* Where the SIEM drops the browser after it has authenticated somebody.
+          Outside RequireAuth on purpose: the whole point is that there is no
+          session yet, and the token in the URL fragment is what creates one. */}
+      <Route path="/auth/sso" element={<SSOCallbackPage />} />
       <Route
         element={
           <RequireAuth>

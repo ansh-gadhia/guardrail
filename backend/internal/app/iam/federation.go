@@ -127,7 +127,9 @@ func (s *Service) completeFederatedLogin(ctx context.Context, ext *iam.ExternalI
 		return nil, iam.ErrAccountInactive
 	}
 
-	pair, err := s.issueTokens(ctx, user, meta, iam.NewID())
+	// Not the SIEM marker: OIDC and LDAP are their own federation and carry none
+	// of the exchange-token semantics the flag is read for.
+	pair, err := s.issueTokens(ctx, user, meta, iam.NewID(), false)
 	if err != nil {
 		return nil, err
 	}

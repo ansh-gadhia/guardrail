@@ -65,6 +65,15 @@ type Service struct {
 	// and every caller authenticates as a person.
 	apiTokens iam.APITokenRepository
 
+	// SIEM single sign-on collaborators. All optional and all required together:
+	// SIEMSSOEnabled is false unless the verifier, the replay store, the role map
+	// and a provisioning organization are ALL present, so a half-configured
+	// deployment answers "not configured" rather than failing somewhere deeper.
+	ssoVerify iam.SSOVerifier
+	replay    iam.ReplayStore
+	ssoRoles  *SSORoleMap
+	ssoCfg    SSOConfig
+
 	// decoyHash is verified against for unknown users to blunt user-enumeration
 	// timing side channels. Computed once at construction.
 	decoyHash string
@@ -99,6 +108,16 @@ type Deps struct {
 
 	// Optional machine-token wiring. Leave nil to disable API tokens entirely.
 	APITokens iam.APITokenRepository
+
+	// Optional SIEM single sign-on wiring. Leave any of these nil to disable it.
+	// The organization SSO users are provisioned into is FederationOrgID above —
+	// deliberately the same setting the other federated providers use, because it
+	// answers the same question and a second one would be a second thing to get
+	// wrong.
+	SSOVerifier iam.SSOVerifier
+	Replay      iam.ReplayStore
+	SSORoles    *SSORoleMap
+	SSO         SSOConfig
 }
 
 // NewService constructs the IAM service, filling in a system clock if absent.
@@ -118,6 +137,13 @@ func NewService(d Deps) *Service {
 		mfa: d.MFA, totp: d.TOTP, cipher: d.Cipher, mfaChal: d.MFAChal, mfaIssuer: issuer,
 		oidc: d.OIDC, ldap: d.LDAP, fedOrgID: d.FederationOrgID,
 		apiTokens: d.APITokens,
+		ssoVerify: d.SSOVerifier, replay: d.Replay, ssoRoles: d.SSORoles, ssoCfg: d.SSO,
+	}
+	if s.ssoCfg.NonceFloor <= 0 {
+		s.ssoCfg.NonceFloor = DefaultSSOConfig().NonceFloor
+	}
+	if s.ssoCfg.NonceCeiling <= 0 {
+		s.ssoCfg.NonceCeiling = DefaultSSOConfig().NonceCeiling
 	}
 	// Precompute a decoy hash so unknown-user logins still perform a real verify.
 	if h, err := d.Hasher.Hash("guardrail-decoy-" + iam.NewID().String()); err == nil {

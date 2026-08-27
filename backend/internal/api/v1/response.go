@@ -78,6 +78,27 @@ func fail(c *gin.Context, err error) {
 		problem(c, http.StatusConflict, "Not Enrolled", "multi-factor authentication is not enrolled")
 	case errors.Is(err, iam.ErrMFAAlreadyEnrolled):
 		problem(c, http.StatusConflict, "Already Enrolled", "multi-factor authentication is already active")
+	// ---- SIEM single sign-on ----
+	//
+	// The split between 503 and 401 here is the integration's error contract, not
+	// a formality. 401 means the token is bad and retrying will never help; 503
+	// means GuardRail could not check and a retry is reasonable. Collapsing them
+	// sends the SIEM's engineers hunting for a signature fault that does not
+	// exist, or leaves a client retrying a forgery forever.
+	case errors.Is(err, iam.ErrSSONotConfigured):
+		problem(c, http.StatusServiceUnavailable, "SSO Not Configured",
+			"this GuardRail has no SIEM single sign-on configured. Set GUARDRAIL_SIEM_JWKS_URL "+
+				"and GUARDRAIL_FEDERATION_ORG_ID, then restart the API.")
+	case errors.Is(err, iam.ErrSSOUnavailable):
+		problem(c, http.StatusServiceUnavailable, "SSO Temporarily Unavailable",
+			"GuardRail could not verify the exchange token right now — the SIEM's key set or the "+
+				"replay store was unreachable. This is not a problem with your token; try again.")
+	case errors.Is(err, iam.ErrSSOToken):
+		// The wrapped reason is passed through verbatim. The only people who ever
+		// read it are the ones wiring the SIEM up, and "Unauthorized" on its own
+		// tells them nothing about which of a dozen claims was wrong.
+		problem(c, http.StatusUnauthorized, "Exchange Token Rejected",
+			detailFor(err, iam.ErrSSOToken, "the exchange token was rejected"))
 	case errors.Is(err, appiam.ErrThrottled):
 		c.Header("Retry-After", "60")
 		problem(c, http.StatusTooManyRequests, "Too Many Requests", "rate limit exceeded")

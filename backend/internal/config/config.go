@@ -151,6 +151,59 @@ type FederationConfig struct {
 	LDAPBindPassword string
 	LDAPBaseDN       string
 	LDAPUserFilter   string
+
+	// SIEM is single sign-on from the SIEM: it authenticates the person and hands
+	// GuardRail a short-lived signed assertion to trade for a session. It shares
+	// ProvisionOrgID with the other providers above, because it answers the same
+	// question — which tenant does a federated person belong to — and a second
+	// setting for it would be a second thing to get wrong.
+	SIEM SIEMSSOConfig
+}
+
+// SIEMSSOConfig configures the SIEM exchange-token flow. Every field is optional
+// and every default reproduces the behaviour of a deployment that has never
+// heard of the SIEM, which is what let this ship before the SIEM's half existed.
+type SIEMSSOConfig struct {
+	// JWKSURL is where the SIEM publishes its public keys. Setting it (with
+	// ProvisionOrgID) is what enables SSO. HTTPS only.
+	JWKSURL string
+	// JWKSCABundle is the PEM certificate that must have signed the JWKS host's
+	// TLS certificate, or that certificate itself when self-signed. A SIEM on a
+	// private network almost always presents one, so on a fresh deployment the
+	// fetch fails closed until this is pointed at it — which is correct. The
+	// escape hatch is a pinned certificate, not a disabled check, and there is
+	// deliberately no verify-off switch.
+	JWKSCABundle string
+	// SharedSecret enables the symmetric (HS256) path. Leave it empty. It exists
+	// only so a SIEM that cannot yet sign asymmetrically is not blocked, and it
+	// hands this process a key that can FORGE the SIEM's tokens rather than only
+	// check them — which, next to just-in-time provisioning, means a leak of one
+	// config value mints accounts rather than merely impersonating one.
+	SharedSecret string
+
+	Issuer   string // exact iss the token must carry
+	Audience string // exact aud this consumer accepts; do not share it with another product
+
+	JWKSCacheTTL    time.Duration
+	ClockLeeway     time.Duration
+	MaxTokenAge     time.Duration // longest validity a token may CLAIM
+	NonceFloor      time.Duration // minimum replay-store retention
+	NonceCeiling    time.Duration // maximum replay-store retention
+	JITProvision    bool
+	SyncOnLogin     bool
+	TrustAMR        bool
+	AllowlistBypass bool
+	DefaultRole     string
+	MaxRole         string
+	RoleMapJSON     string
+}
+
+// Enabled reports whether the SIEM flow is fully configured. Key material alone
+// is not enough: without a provisioning organization there is no answer to
+// "which tenant is this person in", and the token must never be the thing that
+// answers it.
+func (f FederationConfig) SIEMSSOEnabled() bool {
+	return f.ProvisionOrgID != "" && (f.SIEM.JWKSURL != "" || f.SIEM.SharedSecret != "")
 }
 
 // OIDCEnabled reports whether the OIDC provider is fully configured.
@@ -312,6 +365,31 @@ func Load() (*Config, error) {
 			LDAPBindPassword: getEnv("GUARDRAIL_LDAP_BIND_PASSWORD", ""),
 			LDAPBaseDN:       getEnv("GUARDRAIL_LDAP_BASE_DN", ""),
 			LDAPUserFilter:   getEnv("GUARDRAIL_LDAP_USER_FILTER", ""),
+			SIEM: SIEMSSOConfig{
+				JWKSURL:      getEnv("GUARDRAIL_SIEM_JWKS_URL", ""),
+				JWKSCABundle: getEnv("GUARDRAIL_SIEM_JWKS_CA_BUNDLE", ""),
+				SharedSecret: getEnv("GUARDRAIL_SIEM_SSO_SECRET", ""),
+				Issuer:       getEnv("GUARDRAIL_SIEM_SSO_ISSUER", "cybersentineldlp-siem"),
+				Audience:     getEnv("GUARDRAIL_SIEM_SSO_AUDIENCE", "guardrail-pam"),
+				JWKSCacheTTL: getDuration("GUARDRAIL_SIEM_JWKS_CACHE_TTL", 10*time.Minute),
+				ClockLeeway:  getDuration("GUARDRAIL_SIEM_SSO_CLOCK_LEEWAY", time.Minute),
+				MaxTokenAge:  getDuration("GUARDRAIL_SIEM_SSO_MAX_TOKEN_AGE", 10*time.Minute),
+				NonceFloor:   getDuration("GUARDRAIL_SIEM_SSO_NONCE_FLOOR", 5*time.Minute),
+				NonceCeiling: getDuration("GUARDRAIL_SIEM_SSO_NONCE_CEILING", time.Hour),
+				JITProvision: getBool("GUARDRAIL_SIEM_SSO_JIT_PROVISION", true),
+				SyncOnLogin:  getBool("GUARDRAIL_SIEM_SSO_SYNC_ON_LOGIN", true),
+				// Both default OFF, and both defaults run the opposite way to the
+				// obvious choice. See app/iam.SSOConfig.TrustAMR and
+				// middleware.enforceSource: on a privileged-access broker, a second
+				// factor somebody deliberately enrolled and an administrator's
+				// address allowlist are each doing real work, and neither should be
+				// switched off as a side effect of turning on single sign-on.
+				TrustAMR:        getBool("GUARDRAIL_SIEM_SSO_TRUST_AMR", false),
+				AllowlistBypass: getBool("GUARDRAIL_SIEM_SSO_ALLOWLIST_BYPASS", false),
+				DefaultRole:     getEnv("GUARDRAIL_SIEM_SSO_DEFAULT_ROLE", "Read-only"),
+				MaxRole:         getEnv("GUARDRAIL_SIEM_SSO_MAX_ROLE", ""),
+				RoleMapJSON:     getEnv("GUARDRAIL_SIEM_SSO_ROLE_MAP", ""),
+			},
 		},
 		Browser: BrowserConfig{
 			Enabled:         getBool("GUARDRAIL_BROWSER_ISOLATION", false),

@@ -61,6 +61,11 @@ func (h *Handler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 		auth.POST("/ldap/login", h.ldapLogin)
 		auth.GET("/oidc/start", h.oidcStart)
 		auth.GET("/oidc/callback", h.oidcCallback)
+		// SIEM single sign-on: the console redirects here from the SIEM with a
+		// short-lived signed assertion and trades it for a session. Public, like
+		// /login — the caller has no GuardRail credential yet, and the token is
+		// the entire claim.
+		auth.POST("/sso/exchange", h.ssoExchange)
 	}
 
 	// Self-service MFA management (the acting user manages their own factor).
