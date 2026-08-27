@@ -4,6 +4,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+
+	"github.com/guardrail/guardrail/internal/api/middleware"
 )
 
 // ssoExchangeRequest is the whole request body: one token.
@@ -51,4 +54,20 @@ func (h *Handler) ssoExchange(c *gin.Context) {
 		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Principal: toPrincipalDTO(pair.Principal),
 	})
+}
+
+// ssoResync hands an account back to the SIEM after a local role edit detached
+// it. See app/iam.ResumeSSOSync for why this is explicit rather than automatic.
+func (h *Handler) ssoResync(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		badRequest(c, "invalid user id")
+		return
+	}
+	actor, _ := middleware.ClaimsFrom(c)
+	if err := h.svc.ResumeSSOSync(c.Request.Context(), actor, id, metaFrom(c)); err != nil {
+		fail(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }

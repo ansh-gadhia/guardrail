@@ -271,11 +271,15 @@ services:
       #
       # Setting GUARDRAIL_SIEM_JWKS_URL together with GUARDRAIL_FEDERATION_ORG_ID
       # is what switches the feature on. Everything else has a working default.
-      GUARDRAIL_SIEM_JWKS_URL: ${GUARDRAIL_SIEM_JWKS_URL:-}
-      GUARDRAIL_SIEM_JWKS_CA_BUNDLE: ${GUARDRAIL_SIEM_JWKS_CA_BUNDLE:-}
+      #
+      # Each of the three also answers to the unprefixed name the SIEM's own
+      # documentation uses, so three lines copied from another consumer's .env
+      # work here unchanged. The GUARDRAIL_ spelling wins when both are set.
+      GUARDRAIL_SIEM_JWKS_URL: ${GUARDRAIL_SIEM_JWKS_URL:-${SIEM_JWKS_URL:-}}
+      GUARDRAIL_SIEM_JWKS_CA_BUNDLE: ${GUARDRAIL_SIEM_JWKS_CA_BUNDLE:-${SIEM_JWKS_CA_BUNDLE:-}}
       # Leave empty. It enables HS256, which hands this container a key that can
       # FORGE the SIEM's assertions rather than only check them.
-      GUARDRAIL_SIEM_SSO_SECRET: ${GUARDRAIL_SIEM_SSO_SECRET:-}
+      GUARDRAIL_SIEM_SSO_SECRET: ${GUARDRAIL_SIEM_SSO_SECRET:-${SIEM_SSO_SECRET:-}}
       GUARDRAIL_SIEM_SSO_ISSUER: ${GUARDRAIL_SIEM_SSO_ISSUER:-cybersentineldlp-siem}
       GUARDRAIL_SIEM_SSO_AUDIENCE: ${GUARDRAIL_SIEM_SSO_AUDIENCE:-guardrail-pam}
       GUARDRAIL_SIEM_JWKS_CACHE_TTL: ${GUARDRAIL_SIEM_JWKS_CACHE_TTL:-10m}

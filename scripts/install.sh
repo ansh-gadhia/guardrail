@@ -727,49 +727,54 @@ GUARDRAIL_DESKTOP_ENABLED=${DESKTOP_ENABLED}
 GUARDRAIL_GUACD_RECORDING_DIR=${GUACD_DIR}
 
 # ---- SIEM single sign-on ----
-# Off until the two keys below are filled in, and you should not fill them in by
-# hand. Run this instead — it fetches the SIEM's certificate, shows you what it
-# is before trusting it, pins it, writes these keys and restarts the API:
 #
-#   sudo ${INSTALL_DIR}/siem-sso.sh https://10.200.10.23:3000/api/sso/jwks.json
+# THREE VALUES turn this on. They are the same three the SIEM's other consumers
+# use, and the unprefixed names below are accepted too, so a working block can be
+# copied straight across:
+#
+#   SIEM_JWKS_URL=https://10.200.10.23:3000/api/sso/jwks.json
+#   SIEM_JWKS_CA_BUNDLE=/etc/guardrail/siem/jwks-ca.pem
+#   SIEM_SSO_SECRET=...
+#
+# Easier still, one command does all of it — it puts the certificate where the
+# API container can actually read it, which a path from another product's
+# filesystem will not be:
+#
+#   sudo ${INSTALL_DIR}/siem-sso.sh https://10.200.10.23:3000/api/sso/jwks.json \
+#        --cert /path/to/siem-jwks.pem --secret <hex>
 #   sudo ${INSTALL_DIR}/siem-sso.sh status
 #
-# The SIEM authenticates the analyst and hands GuardRail a short-lived signed
-# assertion; GuardRail never sees a password. See docs/SIEM_SSO.md.
+# Everything after the first three lines is optional and the defaults are the
+# ones to keep. See docs/SIEM_SSO.md.
 GUARDRAIL_SIEM_JWKS_URL=
 GUARDRAIL_SIEM_JWKS_CA_BUNDLE=
-# Which organization SIEM users land in — a slug, e.g. "default". Blank means
-# the only organization on this deployment, which is right unless you run more
-# than one tenant here.
+# HS256, for a SIEM that cannot yet sign from its JWKS. It hands this server a
+# key that can FORGE the SIEM's assertions rather than only verify them, so clear
+# it the day they can sign asymmetrically.
+GUARDRAIL_SIEM_SSO_SECRET=
+
+# --- optional, all defaulted ---
+# Organization SIEM users land in (a slug). Blank = the only one here.
 GUARDRAIL_SIEM_SSO_ORG=
 # Exact strings the token must carry. The audience is GuardRail's OWN: do not
-# reuse the value another product the SIEM signs for is using, or the check that
-# the token was meant for GuardRail stops meaning anything.
+# reuse the value another product the SIEM signs for.
 GUARDRAIL_SIEM_SSO_ISSUER=cybersentineldlp-siem
 GUARDRAIL_SIEM_SSO_AUDIENCE=guardrail-pam
-# HS256, for a SIEM that cannot yet sign from its JWKS. Leave blank: it hands
-# this server a key that can FORGE the SIEM's assertions rather than only verify
-# them. Set it with siem-sso.sh <url> --secret <hex> if you must, and clear it
-# the day the SIEM can sign asymmetrically.
-GUARDRAIL_SIEM_SSO_SECRET=
-# Create the GuardRail account on first sign-in, and keep its role tracking the
-# SIEM afterwards.
+# Create the account on first sign-in; keep its role tracking the SIEM after.
 GUARDRAIL_SIEM_SSO_JIT_PROVISION=true
 GUARDRAIL_SIEM_SSO_SYNC_ON_LOGIN=true
-# The role a sign-in gets when the SIEM sends none GuardRail recognises, and the
-# ceiling on what any SIEM-derived role may become. The Super Admin role is
-# unreachable through SSO whatever these say.
+# Role for a sign-in the SIEM sends no recognised role for, and the ceiling on
+# any SIEM-derived role. Super Admin is unreachable through SSO regardless.
 GUARDRAIL_SIEM_SSO_DEFAULT_ROLE=Read-only
 GUARDRAIL_SIEM_SSO_MAX_ROLE=
-# Optional JSON override of the role table, e.g.
+# JSON override of the role table, e.g.
 #   {"L3": {"rw": "Senior Operator", "ro": "Auditor"}, "L1": "Read-only"}
 GUARDRAIL_SIEM_SSO_ROLE_MAP=
-# Both deliberately off: a second factor somebody enrolled here, and this
+# Both off on purpose: a second factor somebody enrolled here, and this
 # organization's source-address policy, are each doing real work in front of
-# privileged devices. Neither should switch itself off as a side effect of
-# turning sign-on on. Turn ALLOWLIST_BYPASS on only if analysts sign in from
-# outside the allowed ranges — otherwise they get a working sign-in and a
-# console that 403s on every request.
+# privileged devices. Turn ALLOWLIST_BYPASS on only if analysts sign in from
+# outside the allowed ranges — otherwise they get a working sign-in and a console
+# that refuses every request.
 GUARDRAIL_SIEM_SSO_TRUST_AMR=false
 GUARDRAIL_SIEM_SSO_ALLOWLIST_BYPASS=false
 

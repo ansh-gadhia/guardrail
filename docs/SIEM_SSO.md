@@ -19,16 +19,38 @@ the SIEM, which is what let this ship ahead of the SIEM's half.
 
 ## 0. The short version
 
-On the GuardRail server, one command:
+**Three values turn this on**, the same three the SIEM's other consumers already
+have: the JWKS URL, the certificate, and (only if they still sign HS256) the
+shared secret.
 
 ```bash
-sudo /opt/guardrail/siem-sso.sh https://10.200.10.23:3000/api/sso/jwks.json
+sudo /opt/guardrail/siem-sso.sh https://10.200.10.23:3000/api/sso/jwks.json \
+     --cert /path/to/siem-jwks.pem \
+     --secret a1b2c3d4...
 ```
 
-It fetches the SIEM's TLS certificate, shows you its fingerprint and expiry
-before trusting it, pins it, writes the `.env` keys, recreates the API with the
-new environment and checks that the result actually works. `siem-sso.sh status`
-shows what is configured; `siem-sso.sh off` turns it off again.
+Drop `--cert` and it fetches the certificate itself and shows you the fingerprint
+before trusting it. Drop `--secret` and it uses the JWKS alone, which is the
+better place to end up (§12).
+
+GuardRail also answers to the **unprefixed** env names, so a working block from
+another consumer can be pasted straight into `/opt/guardrail/.env`:
+
+```
+SIEM_JWKS_URL=https://10.200.10.23:3000/api/sso/jwks.json
+SIEM_JWKS_CA_BUNDLE=/etc/guardrail/siem/jwks-ca.pem
+SIEM_SSO_SECRET=a1b2c3d4...
+```
+
+One catch if you go that route: the path must be one the **API container** can
+read. `deploy/siem/` is bind-mounted at `/etc/guardrail/siem`, so put the PEM
+there. A path from another product's filesystem exists on the host and nowhere
+the API can see it — which is why the script copies it for you.
+
+Either way it pins the certificate where the API can read it, proves the key set
+fetches through it, writes the `.env` keys, recreates the API with the new
+environment and checks the result. `siem-sso.sh status` shows what is configured;
+`siem-sso.sh off` turns it off again.
 
 You do not need to look up an organization UUID: a single-tenant deployment has
 exactly one right answer and GuardRail uses it. (`--org <slug>` if you run more
@@ -223,6 +245,41 @@ That last row matters more than it looks. Without it, an administrator's change
 would last exactly until its subject next signed in and then be silently
 reverted — which is worse than refusing the edit outright, because it looks like
 it worked.
+
+**So: if a super admin promotes an SSO-provisioned Auditor to Super Admin, does
+the next SIEM sign-in put them back to Auditor? No.** The promotion detaches the
+account, and it stays promoted. Verified end to end:
+
+```
+1. SIEM says L2/read-only          -> Auditor              sso_managed=true
+2. super admin sets Super Admin    -> Super Admin          sso_managed=false
+3. SIEM still says L2/read-only    -> Super Admin          (unchanged)
+```
+
+The same holds in the other direction — a demotion by hand is not undone either.
+Whoever touched it last, locally, wins.
+
+### Handing an account back to the SIEM
+
+That detach would otherwise be a **one-way door**: an administrator who edits
+somebody's roles for a week-long project has, without being told, permanently
+stopped that account tracking the SIEM, and the only way back would be an UPDATE
+against the production database.
+
+```
+POST /api/v1/users/{id}/sso-resync      # user:write
+```
+
+Takes effect on that person's **next** sign-in, and is audited as
+`auth.sso.resync` with the roles they held at the time. It is deliberately
+explicit rather than automatic: every rule that would re-attach an account by
+itself ("when the roles match again", "after N days") silently overwrites a local
+decision at a moment nobody chose. Somebody has to say so.
+
+Two refusals: an account that has never signed in through the SIEM (there is no
+SIEM role to track, so the flag would arm a rule that can never fire), and the
+installation account (handing the one account that can restore the platform to an
+external system to overwrite is exactly what that guard is for).
 
 ---
 

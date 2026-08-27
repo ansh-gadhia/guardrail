@@ -657,3 +657,82 @@ func TestSSOLogin_UnknownOrgSlugIsNamed(t *testing.T) {
 		t.Errorf("the message should quote the slug that was not found: %v", err)
 	}
 }
+
+// ---- handing an account back to the SIEM ----
+
+// The detach in AssignRoles is otherwise a one-way door: an administrator who
+// edits somebody's roles for a week-long project has permanently stopped that
+// account tracking the SIEM, and the only way back would be an UPDATE against
+// the production database.
+func TestSSOResync_ReattachesAfterALocalEdit(t *testing.T) {
+	h := newSSOHarness(t, nil)
+	if _, err := h.login(t, assertion()); err != nil {
+		t.Fatalf("first login: %v", err)
+	}
+	u := h.findUser(t, "analyst@corp.example")
+	admin := iam.Claims{UserID: iam.NewID(), OrganizationID: ssoOrg, IsSuperAdmin: true}
+	readOnly := seededRoles()[4].ID
+
+	// A local edit detaches, and the SIEM stops overwriting it.
+	if err := h.svc.AssignRoles(context.Background(), admin, u.ID, []iam.ID{readOnly}, ReqMeta{}); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	promoted := assertion()
+	promoted.Role, promoted.Access, promoted.Nonce = "Administrator", "read-write", "n2"
+	if _, err := h.login(t, promoted); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if granted, _ := h.users.rolesOf(u.ID); len(granted) != 1 || granted[0] != readOnly {
+		t.Fatalf("the SIEM overwrote a local decision: %v", granted)
+	}
+
+	// Handed back, explicitly.
+	if err := h.svc.ResumeSSOSync(context.Background(), admin, u.ID, ReqMeta{}); err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+	promoted.Nonce = "n3"
+	if _, err := h.login(t, promoted); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	granted, _ := h.users.rolesOf(u.ID)
+	if len(granted) != 1 || granted[0] != seededRoles()[1].ID { // Organization Admin
+		t.Fatalf("the account did not resume tracking the SIEM: %v", granted)
+	}
+}
+
+// Raising the flag on an account that has never signed in through the SIEM would
+// arm a rule that can never fire, and leave the operator waiting for a change
+// that is not coming.
+func TestSSOResync_RefusesAnAccountWithNoSIEMIdentity(t *testing.T) {
+	h := newSSOHarness(t, nil)
+	local := &iam.User{
+		ID: iam.NewID(), OrganizationID: ssoOrg, Email: iam.NewEmail("local@corp.example"),
+		AuthProvider: iam.ProviderLocal, Status: "active", PasswordHash: "x",
+	}
+	h.users.add(local)
+	admin := iam.Claims{UserID: iam.NewID(), OrganizationID: ssoOrg, IsSuperAdmin: true}
+
+	err := h.svc.ResumeSSOSync(context.Background(), admin, local.ID, ReqMeta{})
+	if !errors.Is(err, iam.ErrInvalidInput) {
+		t.Fatalf("want ErrInvalidInput, got %v", err)
+	}
+}
+
+// The installation account is refused, like every other change to it: handing
+// the one account that can restore the platform to an external system to
+// overwrite is exactly what that guard is for.
+func TestSSOResync_RefusesTheInstallationAccount(t *testing.T) {
+	h := newSSOHarness(t, nil)
+	boot := &iam.User{
+		ID: iam.NewID(), OrganizationID: ssoOrg, Email: iam.NewEmail("root@corp.example"),
+		AuthProvider: iam.ProviderLocal, Status: "active", IsSuperAdmin: true,
+		SSO: iam.SSOIdentity{Subject: "siem-root"},
+	}
+	h.users.add(boot)
+	admin := iam.Claims{UserID: iam.NewID(), OrganizationID: ssoOrg, IsSuperAdmin: true}
+
+	err := h.svc.ResumeSSOSync(context.Background(), admin, boot.ID, ReqMeta{})
+	if !errors.Is(err, iam.ErrProtectedAccount) {
+		t.Fatalf("want ErrProtectedAccount, got %v", err)
+	}
+}

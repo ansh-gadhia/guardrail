@@ -577,3 +577,56 @@ func (s *Service) recordSSO(ctx context.Context, orgID iam.ID, u *iam.User, meta
 	}
 	s.record(ctx, e)
 }
+
+// ResumeSSOSync hands an account back to the SIEM.
+//
+// It undoes the detach in AssignRoles, and it exists because that detach is
+// otherwise a ONE-WAY DOOR. An administrator who edits somebody's roles for a
+// week-long project has, without being told, permanently stopped that account
+// tracking the SIEM — and the only way back would be an UPDATE against the
+// production database. "Run this SQL on the box" is not an acceptable answer on
+// a product whose whole argument is that privileged access goes through a
+// broker that records it.
+//
+// Deliberately explicit rather than automatic. There is no safe rule that
+// re-attaches an account by itself: every candidate ("re-attach if the roles
+// match again", "re-attach after N days") silently overwrites a local decision
+// at a moment nobody chose. Somebody has to say so, and it is audited when they
+// do.
+//
+// Takes effect on the person's NEXT sign-in, not now. Their current session
+// keeps the roles it was issued with, which is the same rule every other role
+// change here follows.
+func (s *Service) ResumeSSOSync(ctx context.Context, actor iam.Claims, userID iam.ID, meta ReqMeta) error {
+	// The installation account is refused, like every other change to it. Handing
+	// the one account that can restore the platform to an external system to
+	// overwrite is precisely the failure guardBootstrapAdmin exists to prevent.
+	if err := s.guardBootstrapAdmin(ctx, actor, userID, "resume SIEM role sync"); err != nil {
+		return err
+	}
+	user, err := s.users.GetByID(ctx, actor.Scope(), userID)
+	if err != nil {
+		return err
+	}
+	if user.SSO.Subject == "" {
+		// Nothing to sync FROM. Raising the flag would arm a rule that can never
+		// fire, and the operator would be left waiting for a change that is not
+		// coming.
+		return fmt.Errorf("%w: %s has never signed in through the SIEM, so there is no "+
+			"SIEM role to track", iam.ErrInvalidInput, user.Email)
+	}
+	if user.SSO.Managed {
+		return nil // already tracking; saying so twice is not an error
+	}
+	if err := s.users.SetSSOManaged(ctx, userID, true); err != nil {
+		return err
+	}
+	s.record(ctx, audit.Event{OrganizationID: &user.OrganizationID, Action: "auth.sso.resync",
+		Category: audit.CategoryRole, ActorID: &actor.UserID, ActorEmail: actor.Email,
+		TargetType: "user", TargetID: userID.String(), IP: meta.IP, UserAgent: meta.UserAgent,
+		Result: audit.ResultSuccess, Detail: map[string]any{
+			"target": user.Email.String(), "roles_now": user.RoleNames(),
+			"siem_asserted": user.SSO.SourceRole,
+		}})
+	return nil
+}

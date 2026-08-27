@@ -394,10 +394,20 @@ func Load() (*Config, error) {
 			LDAPBaseDN:       getEnv("GUARDRAIL_LDAP_BASE_DN", ""),
 			LDAPUserFilter:   getEnv("GUARDRAIL_LDAP_USER_FILTER", ""),
 			SIEM: SIEMSSOConfig{
-				Org:          getEnv("GUARDRAIL_SIEM_SSO_ORG", ""),
-				JWKSURL:      getEnv("GUARDRAIL_SIEM_JWKS_URL", ""),
-				JWKSCABundle: getEnv("GUARDRAIL_SIEM_JWKS_CA_BUNDLE", ""),
-				SharedSecret: getEnv("GUARDRAIL_SIEM_SSO_SECRET", ""),
+				Org: getEnv("GUARDRAIL_SIEM_SSO_ORG", ""),
+				// Three settings, and each also answers to the UNPREFIXED name the
+				// SIEM's own documentation uses — the same names its other
+				// consumers already have in their .env files.
+				//
+				// Everything else in this config is GUARDRAIL_*, and that is still
+				// the canonical spelling: the prefixed name wins whenever both are
+				// present. The fallback exists so that wiring a second product to
+				// the same SIEM is a copy-paste of three lines somebody already
+				// has working, rather than a translation exercise where the only
+				// symptom of getting it wrong is that sign-in quietly stays off.
+				JWKSURL:      getEnv("GUARDRAIL_SIEM_JWKS_URL", getEnv("SIEM_JWKS_URL", "")),
+				JWKSCABundle: getEnv("GUARDRAIL_SIEM_JWKS_CA_BUNDLE", getEnv("SIEM_JWKS_CA_BUNDLE", "")),
+				SharedSecret: getEnv("GUARDRAIL_SIEM_SSO_SECRET", getEnv("SIEM_SSO_SECRET", "")),
 				Issuer:       getEnv("GUARDRAIL_SIEM_SSO_ISSUER", "cybersentineldlp-siem"),
 				Audience:     getEnv("GUARDRAIL_SIEM_SSO_AUDIENCE", "guardrail-pam"),
 				JWKSCacheTTL: getDuration("GUARDRAIL_SIEM_JWKS_CACHE_TTL", 10*time.Minute),

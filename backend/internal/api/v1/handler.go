@@ -89,6 +89,10 @@ func (h *Handler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 		// The service refuses the installation account and anybody who outranks
 		// the caller, so user:write is the floor rather than the whole rule.
 		users.POST("/:id/reset-password", middleware.RequirePermission("user:write"), h.resetPassword)
+		// Hands an account back to the SIEM after a local role edit detached it.
+		// Same permission as the edit that detached it: whoever could take the
+		// decision locally can give it back.
+		users.POST("/:id/sso-resync", middleware.RequirePermission("user:write"), h.ssoResync)
 	}
 
 	orgs := rg.Group("/organizations", authMW)

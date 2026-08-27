@@ -114,6 +114,8 @@ ${B}GuardRail — SIEM single sign-on${R}
                                     installer printed has been lost
 
 Options
+  --cert ${D}<path>${R}      use a certificate you already have instead of fetching one.
+                    Skips the fingerprint prompt: you have already vetted it.
   --secret ${D}<hex>${R}     also accept HS256 tokens signed with this shared secret.
                     A migration aid only: it hands this server a key that can
                     FORGE the SIEM's assertions rather than merely check them.
@@ -127,6 +129,12 @@ Options
 
 Examples
   sudo $0 https://10.200.10.23:3000/api/sso/jwks.json
+
+  ${D}# the three values the SIEM hands you, and nothing else:${R}
+  sudo $0 https://10.200.10.23:3000/api/sso/jwks.json \\
+       --cert /etc/cybersentineldlp/certs/siem-jwks.pem \\
+       --secret a1b2c3d4...
+
   sudo $0 token --name siem-feed
 
 The console does the same thing under ${B}Security -> API tokens${R} (super admin only).
@@ -331,11 +339,12 @@ turn_off() {
 # ---------------------------------------------------------------------------
 # setup
 # ---------------------------------------------------------------------------
-JWKS_URL=""; SECRET=""; ORG=""; AUDIENCE=""; ISSUER=""; MAX_ROLE=""; VERIFY=1
+JWKS_URL=""; SECRET=""; ORG=""; AUDIENCE=""; ISSUER=""; MAX_ROLE=""; VERIFY=1; CERT_IN=""
 
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
+            --cert)      CERT_IN="${2:-}"; shift 2 ;;
             --secret)    SECRET="${2:-}"; shift 2 ;;
             --org)       ORG="${2:-}"; shift 2 ;;
             --audience)  AUDIENCE="${2:-}"; shift 2 ;;
@@ -395,26 +404,46 @@ do_setup() {
 
     local hostport; hostport=$(host_port_of "$JWKS_URL")
     step "SIEM certificate"
-    info "asking ${B}${hostport}${R} for the certificate it presents"
 
     local tmpcert
-    if ! tmpcert=$(fetch_certificate "$hostport"); then
-        die "could not reach ${hostport} — check the address, the port and that this server can route to it"
+    if [ -n "$CERT_IN" ]; then
+        # Supplied, not fetched. No prompt: the operator already has this file
+        # because somebody gave it to them, which is a stronger provenance than
+        # anything this script could establish by asking the network.
+        [ -f "$CERT_IN" ] || die "no such file: ${CERT_IN}"
+        openssl x509 -in "$CERT_IN" -noout >/dev/null 2>&1 \
+            || die "${CERT_IN} is not a PEM certificate — if it is a bundle, pass the CA that signed the JWKS host"
+        tmpcert=$(mktemp)
+        cat "$CERT_IN" >"$tmpcert"
+        info "using the certificate you supplied ${D}(${CERT_IN})${R}"
+        printf '\n'
+        openssl x509 -in "$tmpcert" -noout -subject -dates 2>/dev/null | sed 's/^/    /'
+        openssl x509 -in "$tmpcert" -noout -fingerprint -sha256 2>/dev/null | sed 's/^/    /'
+        printf '\n'
+    else
+        info "asking ${B}${hostport}${R} for the certificate it presents"
+        if ! tmpcert=$(fetch_certificate "$hostport"); then
+            die "could not reach ${hostport} — check the address, the port and that this server can route to it. If you already have the certificate, pass --cert <path>"
+        fi
+
+        printf '\n'
+        openssl x509 -in "$tmpcert" -noout -subject -issuer -dates 2>/dev/null | sed 's/^/    /'
+        openssl x509 -in "$tmpcert" -noout -fingerprint -sha256 2>/dev/null | sed 's/^/    /'
+        printf '\n'
+        # Confirmed by a person, deliberately. Pinning is only worth anything if
+        # somebody decided this is the right certificate; fetch-and-trust in one
+        # silent step is trust-on-first-use against whoever answered that address.
+        info "this is what GuardRail will trust to say who may sign in."
+        info "check the fingerprint against what the SIEM's owner tells you it should be."
+        local yn; ask_yn yn "Pin this certificate?" y
+        [ "$yn" = "yes" ] || { rm -f "$tmpcert"; die "nothing was changed"; }
     fi
 
-    printf '\n'
-    openssl x509 -in "$tmpcert" -noout -subject -issuer -dates 2>/dev/null | sed 's/^/    /'
-    openssl x509 -in "$tmpcert" -noout -fingerprint -sha256 2>/dev/null | sed 's/^/    /'
-    printf '\n'
-    # Confirmed by a person, deliberately. Pinning is only worth anything if
-    # somebody decided this is the right certificate; fetch-and-trust in one
-    # silent step is trust-on-first-use against whoever answered that address.
-    info "this is what GuardRail will trust to say who may sign in."
-    info "check the fingerprint against what the SIEM's owner tells you it should be."
-    local yn; ask_yn yn "Pin this certificate?" y
-    [ "$yn" = "yes" ] || { rm -f "$tmpcert"; die "nothing was changed"; }
-
     mkdir -p "$CERT_DIR"
+    # Copied into deploy/siem rather than referenced where it sits. The API reads
+    # it from inside a container, so it has to be under the one directory that is
+    # bind-mounted in — a path like /etc/cybersentineldlp/certs/... exists on the
+    # host and nowhere the API can see.
     cat "$tmpcert" >"$CERT_HOST_PATH"
     chmod 644 "$CERT_HOST_PATH"
     rm -f "$tmpcert"

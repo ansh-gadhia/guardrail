@@ -35,6 +35,7 @@ POST   /auth/ldap/login            directory bind -> tokens (JIT provision)
 GET    /auth/oidc/start            begin OIDC (PKCE) -> 302 to IdP + txn cookie
 GET    /auth/oidc/callback         IdP redirect -> exchange + tokens
 POST   /auth/sso/exchange          SIEM exchange token -> tokens (see SIEM_SSO.md)
+POST   /users/:id/sso-resync       resume SIEM role sync after a local role edit
 ```
 
 `/auth/sso/exchange` is public and takes `{"token": "<jwt>"}`. It answers 401
