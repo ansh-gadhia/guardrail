@@ -232,7 +232,12 @@ func buildSIEMSSO(
 		MaxTokenAge:  c.MaxTokenAge,
 	})
 
+	org := cfg.SIEMOrg()
+	if org == "" {
+		org = "(the only organization on this deployment)"
+	}
 	fields := []zap.Field{
+		zap.String("organization", org),
 		zap.String("issuer", c.Issuer), zap.String("audience", c.Audience),
 		zap.Bool("jit_provision", c.JITProvision), zap.Bool("sync_on_login", c.SyncOnLogin),
 		zap.Bool("trust_amr", c.TrustAMR), zap.Bool("allowlist_bypass", c.AllowlistBypass),
@@ -415,6 +420,7 @@ func run() error {
 		Replay:      ssoReplay,
 		SSORoles:    ssoRoles,
 		SSO: appiam.SSOConfig{
+			OrgRef:       cfg.Federation.SIEMOrg(),
 			JITProvision: cfg.Federation.SIEM.JITProvision,
 			SyncOnLogin:  cfg.Federation.SIEM.SyncOnLogin,
 			TrustAMR:     cfg.Federation.SIEM.TrustAMR,

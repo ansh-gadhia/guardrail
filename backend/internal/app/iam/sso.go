@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/guardrail/guardrail/internal/domain/audit"
 	"github.com/guardrail/guardrail/internal/domain/iam"
 )
@@ -43,6 +45,9 @@ type SSOConfig struct {
 	// real value comes from the token; see iam.SSOAssertion.ReplayRetention.
 	NonceFloor   time.Duration
 	NonceCeiling time.Duration
+	// OrgRef names the organization SIEM users land in, as a slug or a UUID.
+	// Empty means "the only organization on this deployment" — see ssoOrg.
+	OrgRef string
 }
 
 // DefaultSSOConfig returns the shipped policy.
@@ -58,12 +63,60 @@ func DefaultSSOConfig() SSOConfig {
 
 // SIEMSSOEnabled reports whether an exchange could succeed on this deployment.
 //
-// All four collaborators are required. In particular the provisioning
-// organization is: without it there is no answer to "which tenant is this person
-// in", and the one place that must never answer it is the token.
+// The organization is deliberately not part of this. It defaults to the only
+// organization there is (see ssoOrg), which is the right answer on nearly every
+// install; requiring it here would mean advertising SSO as unconfigured on a
+// deployment where everything that actually matters — the keys, the replay
+// store, the role table — is present and correct.
 func (s *Service) SIEMSSOEnabled() bool {
 	return s.ssoVerify != nil && s.ssoVerify.Configured() &&
-		s.replay != nil && s.ssoRoles != nil && s.fedOrgID != (iam.ID{})
+		s.replay != nil && s.ssoRoles != nil
+}
+
+// ssoOrg resolves which tenant a SIEM sign-in belongs to.
+//
+// Three answers, in order, and none of them is ever the token: a uuid, a slug,
+// or — when nothing is configured — the only organization on the deployment.
+// That last case is the one worth having. A single-tenant install has exactly
+// one right answer, so making an operator run a psql query to find a uuid they
+// have no choice about is a setup step that exists only to be got wrong.
+//
+// With several organizations there IS no obvious answer, so this refuses and
+// names the slugs rather than picking one. Filing an analyst into the wrong
+// tenant is not a mistake that announces itself: they would sign in, see an
+// estate that is not theirs, and everything after that is an audit problem.
+//
+// Not cached, deliberately. If a second organization is created later, the
+// answer must change from "this one" to "say which" on the next sign-in — a
+// cached answer would silently keep filing people into the first tenant.
+func (s *Service) ssoOrg(ctx context.Context) (iam.ID, error) {
+	ref := strings.TrimSpace(s.ssoCfg.OrgRef)
+	if ref != "" {
+		if id, err := uuid.Parse(ref); err == nil {
+			return id, nil
+		}
+		org, err := s.orgs.GetBySlug(ctx, ref)
+		if err != nil {
+			return iam.ID{}, fmt.Errorf("%w: no organization has the slug %q — check "+
+				"GUARDRAIL_SIEM_SSO_ORG", iam.ErrSSONotConfigured, ref)
+		}
+		return org.ID, nil
+	}
+
+	orgs, err := s.orgs.List(ctx, iam.TenantScope{IsSuperAdmin: true}, iam.Page{Limit: 50})
+	if err != nil {
+		return iam.ID{}, fmt.Errorf("%w: could not read the organization list", iam.ErrSSOUnavailable)
+	}
+	if len(orgs) == 1 {
+		return orgs[0].ID, nil
+	}
+	slugs := make([]string, 0, len(orgs))
+	for i := range orgs {
+		slugs = append(slugs, orgs[i].Slug)
+	}
+	return iam.ID{}, fmt.Errorf("%w: this deployment has %d organizations, so GUARDRAIL_SIEM_SSO_ORG "+
+		"must name the one SIEM users belong to (%s)",
+		iam.ErrSSONotConfigured, len(orgs), strings.Join(slugs, ", "))
 }
 
 // LoginWithSIEM trades a SIEM exchange token for a GuardRail session.
@@ -78,6 +131,13 @@ func (s *Service) LoginWithSIEM(ctx context.Context, rawToken string, meta ReqMe
 	if !s.SIEMSSOEnabled() {
 		return nil, iam.ErrSSONotConfigured
 	}
+	// Resolved before anything else, so every audit row below — including the
+	// ones written for tokens that never name a real person — is filed under the
+	// tenant whose administrator needs to see it.
+	orgID, err := s.ssoOrg(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// A public, unauthenticated endpoint gets the same brute-force treatment as
 	// the sign-in form. Keyed on source address alone: unlike a password login
@@ -86,7 +146,7 @@ func (s *Service) LoginWithSIEM(ctx context.Context, rawToken string, meta ReqMe
 	throttleKey := "sso:" + meta.IP
 	if s.throttle != nil {
 		if ok, _, err := s.throttle.Allow(ctx, throttleKey); err == nil && !ok {
-			s.recordSSO(ctx, nil, meta, audit.ResultDenied, "throttled", nil)
+			s.recordSSO(ctx, orgID, nil, meta, audit.ResultDenied, "throttled", nil)
 			return nil, ErrThrottled
 		}
 	}
@@ -102,7 +162,7 @@ func (s *Service) LoginWithSIEM(ctx context.Context, rawToken string, meta ReqMe
 		if !errors.Is(err, iam.ErrSSOUnavailable) && s.throttle != nil {
 			_ = s.throttle.Fail(ctx, throttleKey)
 		}
-		s.recordSSO(ctx, nil, meta, audit.ResultFailure, "token_rejected",
+		s.recordSSO(ctx, orgID, nil, meta, audit.ResultFailure, "token_rejected",
 			map[string]any{"error": err.Error()})
 		return nil, err
 	}
@@ -112,12 +172,11 @@ func (s *Service) LoginWithSIEM(ctx context.Context, rawToken string, meta ReqMe
 	// Ordered here deliberately: a replayed token that provisioned an account and
 	// synced a role before being refused would have done most of its damage
 	// already, and the audit trail would show the work without the refusal.
-	if err := s.spendSSONonce(ctx, assertion, meta); err != nil {
+	if err := s.spendSSONonce(ctx, orgID, assertion, meta); err != nil {
 		return nil, err
 	}
 
 	// 3. Resolve the person — by subject, then by email — and reconcile the two.
-	orgID := s.fedOrgID
 	user, err := s.resolveSSOUser(ctx, orgID, assertion, meta)
 	if err != nil {
 		return nil, err
@@ -126,14 +185,14 @@ func (s *Service) LoginWithSIEM(ctx context.Context, rawToken string, meta ReqMe
 	// 4. Provision, if this is somebody's first sign-in.
 	if user == nil {
 		if !s.ssoCfg.JITProvision {
-			s.recordSSO(ctx, nil, meta, audit.ResultDenied, "unknown_user", nil)
+			s.recordSSO(ctx, orgID, nil, meta, audit.ResultDenied, "unknown_user", nil)
 			return nil, fmt.Errorf("%w: this person has no GuardRail account and "+
 				"just-in-time provisioning is switched off here", iam.ErrSSOToken)
 		}
 		if assertion.Email == "" {
 			// A subject alone finds an account; it cannot invent one. There is
 			// nothing to put in the email column, which is the login identifier.
-			s.recordSSO(ctx, nil, meta, audit.ResultDenied, "no_email", nil)
+			s.recordSSO(ctx, orgID, nil, meta, audit.ResultDenied, "no_email", nil)
 			return nil, fmt.Errorf("%w: the token carries no email claim, so no account "+
 				"can be created for it", iam.ErrSSOToken)
 		}
@@ -150,11 +209,11 @@ func (s *Service) LoginWithSIEM(ctx context.Context, rawToken string, meta ReqMe
 	// sign-in after it.
 	now := s.clock.Now()
 	if user.IsLocked(now) {
-		s.recordSSO(ctx, user, meta, audit.ResultDenied, "account_locked", nil)
+		s.recordSSO(ctx, orgID, user, meta, audit.ResultDenied, "account_locked", nil)
 		return nil, iam.ErrAccountLocked
 	}
 	if user.Status != "active" {
-		s.recordSSO(ctx, user, meta, audit.ResultDenied, "inactive", nil)
+		s.recordSSO(ctx, orgID, user, meta, audit.ResultDenied, "inactive", nil)
 		return nil, iam.ErrAccountInactive
 	}
 
@@ -176,7 +235,7 @@ func (s *Service) LoginWithSIEM(ctx context.Context, rawToken string, meta ReqMe
 			if ce != nil {
 				return nil, ce
 			}
-			s.recordSSO(ctx, user, meta, audit.ResultSuccess, "mfa_challenge", nil)
+			s.recordSSO(ctx, orgID, user, meta, audit.ResultSuccess, "mfa_challenge", nil)
 			return &TokenPair{MFARequired: true, MFAToken: challenge, Principal: principalFromUser(user)}, nil
 		}
 	}
@@ -185,7 +244,7 @@ func (s *Service) LoginWithSIEM(ctx context.Context, rawToken string, meta ReqMe
 	if err != nil {
 		return nil, err
 	}
-	s.recordSSO(ctx, user, meta, audit.ResultSuccess, "", map[string]any{
+	s.recordSSO(ctx, orgID, user, meta, audit.ResultSuccess, "", map[string]any{
 		"asserted": Provenance(assertion.Role, assertion.Access),
 		"roles":    user.RoleNames(),
 	})
@@ -203,16 +262,16 @@ func (s *Service) LoginWithSIEM(ctx context.Context, rawToken string, meta ReqMe
 // is in the readiness probe — so a deployment that cannot reach it is not
 // serving logins anyway, and failing open here would buy an availability that
 // does not exist.
-func (s *Service) spendSSONonce(ctx context.Context, a *iam.SSOAssertion, meta ReqMeta) error {
+func (s *Service) spendSSONonce(ctx context.Context, orgID iam.ID, a *iam.SSOAssertion, meta ReqMeta) error {
 	ttl := a.ReplayRetention(s.clock.Now(), s.ssoCfg.NonceFloor, s.ssoCfg.NonceCeiling)
 	fresh, err := s.replay.Consume(ctx, a.Nonce, ttl)
 	if err != nil {
-		s.recordSSO(ctx, nil, meta, audit.ResultFailure, "replay_store_unavailable",
+		s.recordSSO(ctx, orgID, nil, meta, audit.ResultFailure, "replay_store_unavailable",
 			map[string]any{"error": err.Error()})
 		return fmt.Errorf("%w: the replay store could not be reached", iam.ErrSSOUnavailable)
 	}
 	if !fresh {
-		s.recordSSO(ctx, nil, meta, audit.ResultDenied, "replay", nil)
+		s.recordSSO(ctx, orgID, nil, meta, audit.ResultDenied, "replay", nil)
 		return fmt.Errorf("%w: this exchange token has already been used", iam.ErrSSOToken)
 	}
 	return nil
@@ -264,7 +323,7 @@ func (s *Service) backfillSubject(ctx context.Context, u *iam.User, a *iam.SSOAs
 	if u.SSO.Subject != "" {
 		// This account already belongs to a different SIEM identity. Two people
 		// sharing an address is not something to paper over by moving the link.
-		s.recordSSO(ctx, u, meta, audit.ResultDenied, "subject_conflict", map[string]any{
+		s.recordSSO(ctx, u.OrganizationID, u, meta, audit.ResultDenied, "subject_conflict", map[string]any{
 			"stored": u.SSO.Subject, "asserted": a.Subject,
 		})
 		return
@@ -274,7 +333,7 @@ func (s *Service) backfillSubject(ctx context.Context, u *iam.User, a *iam.SSOAs
 	if err := s.users.SetSSOIdentity(ctx, u.ID, ident); err != nil {
 		// Never fatal. The sign-in is valid either way; the account simply stays
 		// email-keyed until next time.
-		s.recordSSO(ctx, u, meta, audit.ResultFailure, "subject_backfill_failed",
+		s.recordSSO(ctx, u.OrganizationID, u, meta, audit.ResultFailure, "subject_backfill_failed",
 			map[string]any{"error": err.Error()})
 		return
 	}
@@ -300,7 +359,7 @@ func (s *Service) reconcileEmail(ctx context.Context, u *iam.User, a *iam.SSOAss
 		// A collision means somebody else in this tenant already holds the
 		// address. Logged and skipped: failing an entire sign-in over a display
 		// attribute is the wrong trade, and the person can still work.
-		s.recordSSO(ctx, u, meta, audit.ResultFailure, "email_rename_skipped", map[string]any{
+		s.recordSSO(ctx, u.OrganizationID, u, meta, audit.ResultFailure, "email_rename_skipped", map[string]any{
 			"from": u.Email.String(), "to": next.String(), "error": err.Error(),
 		})
 		return
@@ -401,7 +460,7 @@ func (s *Service) syncSSORoles(ctx context.Context, u *iam.User, a *iam.SSOAsser
 	}
 	scope := iam.TenantScope{OrganizationID: u.OrganizationID, IsSuperAdmin: true}
 	if err := s.users.SetRoles(ctx, scope, u.ID, []iam.ID{roleID}); err != nil {
-		s.recordSSO(ctx, u, meta, audit.ResultFailure, "role_sync_failed",
+		s.recordSSO(ctx, u.OrganizationID, u, meta, audit.ResultFailure, "role_sync_failed",
 			map[string]any{"error": err.Error()})
 		return
 	}
@@ -493,7 +552,7 @@ func findRoleByName(roles []iam.Role, name string) *iam.Role {
 // user may be nil: most of the failures here happen before any account has been
 // resolved, and a row that names nobody is still the row that shows somebody
 // hammering the exchange endpoint with forged tokens.
-func (s *Service) recordSSO(ctx context.Context, u *iam.User, meta ReqMeta, result audit.Result, reason string, detail map[string]any) {
+func (s *Service) recordSSO(ctx context.Context, orgID iam.ID, u *iam.User, meta ReqMeta, result audit.Result, reason string, detail map[string]any) {
 	if detail == nil {
 		detail = map[string]any{}
 	}
@@ -504,18 +563,17 @@ func (s *Service) recordSSO(ctx context.Context, u *iam.User, meta ReqMeta, resu
 		Action: "auth.sso", Category: audit.CategoryAuth,
 		IP: meta.IP, UserAgent: meta.UserAgent, Result: result, Detail: detail,
 	}
+	// The organization is set even when no account was resolved. Without it the
+	// row carries a NULL organization and is visible to super admins only — and a
+	// stream of rejected exchange tokens is exactly what the tenant's own
+	// administrator needs to see.
+	if orgID != (iam.ID{}) {
+		e.OrganizationID = &orgID
+	}
 	if u != nil {
-		e.OrganizationID = &u.OrganizationID
 		e.ActorID = &u.ID
 		e.ActorEmail = u.Email.String()
 		e.TargetType, e.TargetID = "user", u.ID.String()
-	} else if s.fedOrgID != (iam.ID{}) {
-		// No account, but the tenant is known from configuration. Without this the
-		// row carries a NULL organization and is visible to super admins only —
-		// and a stream of rejected exchange tokens is exactly what the tenant's
-		// own administrator needs to see.
-		orgID := s.fedOrgID
-		e.OrganizationID = &orgID
 	}
 	s.record(ctx, e)
 }

@@ -17,6 +17,31 @@ the SIEM, which is what let this ship ahead of the SIEM's half.
 
 ---
 
+## 0. The short version
+
+On the GuardRail server, one command:
+
+```bash
+sudo /opt/guardrail/siem-sso.sh https://10.200.10.23:3000/api/sso/jwks.json
+```
+
+It fetches the SIEM's TLS certificate, shows you its fingerprint and expiry
+before trusting it, pins it, writes the `.env` keys, recreates the API with the
+new environment and checks that the result actually works. `siem-sso.sh status`
+shows what is configured; `siem-sso.sh off` turns it off again.
+
+You do not need to look up an organization UUID: a single-tenant deployment has
+exactly one right answer and GuardRail uses it. (`--org <slug>` if you run more
+than one tenant here — it will refuse to guess and name them.)
+
+Then on the SIEM side: mint a token and redirect the browser to
+`https://<console>/auth/sso#token=<token>`. That is the whole integration.
+
+Everything below is what that command does, why each piece is the way it is, and
+what to tell the SIEM's engineers.
+
+---
+
 ## 1. The shape of it
 
 | Flow | Who calls | Proof | Result |
@@ -415,8 +440,8 @@ deployment that has never heard of the SIEM.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `GUARDRAIL_FEDERATION_ORG_ID` | — | **Required.** The organization SSO users land in. Shared with OIDC/LDAP. Without it SSO stays off — the tenant must come from configuration, never from the token. |
-| `GUARDRAIL_SIEM_JWKS_URL` | — | **Required.** Where the SIEM publishes its public keys. HTTPS only. |
+| `GUARDRAIL_SIEM_JWKS_URL` | — | **The one required setting.** Where the SIEM publishes its public keys. HTTPS only. Written by `siem-sso.sh`. |
+| `GUARDRAIL_SIEM_SSO_ORG` | — | Which organization SIEM users land in, as a **slug** or a UUID. Empty means "the only organization on this deployment" — right on nearly every install. With several tenants it refuses to guess and names them. Falls back to `GUARDRAIL_FEDERATION_ORG_ID`. |
 | `GUARDRAIL_SIEM_JWKS_CA_BUNDLE` | — | PEM that verifies the JWKS host's TLS certificate (§11). Needed for any self-signed SIEM. |
 | `GUARDRAIL_SIEM_SSO_ISSUER` | `cybersentineldlp-siem` | Exact `iss` |
 | `GUARDRAIL_SIEM_SSO_AUDIENCE` | `guardrail-pam` | Exact `aud`. Do not share it with another consumer. |
@@ -465,6 +490,9 @@ the fetch fails closed on a fresh deployment. **That is correct, and the escape
 hatch is a pinned certificate, not a disabled check.** There is deliberately no
 verify-off switch.
 
+`siem-sso.sh` does all of this for you, including showing you the fingerprint and
+asking before it trusts anything. By hand:
+
 ```bash
 # On the GuardRail server:
 openssl s_client -connect siem.internal:443 -showcerts </dev/null 2>/dev/null \
@@ -473,6 +501,11 @@ openssl x509 -in /opt/guardrail/deploy/siem/jwks-ca.pem -noout -subject -dates -
 # then, in /opt/guardrail/.env:
 #   GUARDRAIL_SIEM_JWKS_CA_BUNDLE=/etc/guardrail/siem/jwks-ca.pem
 ```
+
+The script confirms the fingerprint with a person on purpose: fetching and
+trusting in one silent step is trust-on-first-use against whoever answered that
+address, which is most of what pinning was meant to prevent. Check it against
+what the SIEM's owner tells you it should be.
 
 `deploy/siem/` is bind-mounted read-only into the API container at
 `/etc/guardrail/siem`, so the env var names the **in-container** path.
@@ -571,31 +604,30 @@ to see, and a row with a NULL organization is visible to super admins only.
 # 1. Install as normal.
 curl -fsSL https://…/install.sh | sudo bash
 
-# 2. Find the organization SSO users should land in.
-sudo docker compose -f /opt/guardrail/docker-compose.yml exec postgres \
-  psql -U guardrail -d guardrail -tAc "SELECT id, slug FROM organizations;"
-
-# 3. Pin the SIEM's certificate (see §11).
-sudo openssl s_client -connect siem.internal:443 -showcerts </dev/null 2>/dev/null \
-  | sudo openssl x509 -outform PEM | sudo tee /opt/guardrail/deploy/siem/jwks-ca.pem >/dev/null
-
-# 4. Fill in /opt/guardrail/.env — the keys are already there, blank:
-#      GUARDRAIL_FEDERATION_ORG_ID=<the uuid from step 2>
-#      GUARDRAIL_SIEM_JWKS_URL=https://siem.internal/.well-known/jwks.json
-#      GUARDRAIL_SIEM_JWKS_CA_BUNDLE=/etc/guardrail/siem/jwks-ca.pem
-#      GUARDRAIL_SIEM_SSO_AUDIENCE=guardrail-pam
-sudo nano /opt/guardrail/.env
-
-# 5. up -d, NOT restart (a restart reuses the old environment).
-cd /opt/guardrail && sudo docker compose up -d api
-
-# 6. Confirm.
-sudo docker compose logs api | grep "single sign-on"
-curl -sk https://localhost/api/v1/auth/providers    # "siem_sso": true
+# 2. Wire up SSO. That is the whole step.
+sudo /opt/guardrail/siem-sso.sh https://10.200.10.23:3000/api/sso/jwks.json
 ```
 
-Upgrading an existing server needs no manual `.env` editing beyond steps 3–5:
-`install.sh` adds every key blank, and blank keeps SSO off.
+It shows you the certificate and its fingerprint, asks once, and then does the
+rest — pins it, proves the key set fetches through it, writes the `.env` keys,
+recreates the API (`up -d`, never `restart` — a restart reuses the old
+environment) and confirms `siem_sso: true`.
+
+Useful variants:
+
+```bash
+sudo /opt/guardrail/siem-sso.sh <url> --max-role Operator   # cap what SSO can grant
+sudo /opt/guardrail/siem-sso.sh <url> --org acme            # multi-tenant deployments
+sudo /opt/guardrail/siem-sso.sh <url> --secret <hex>        # also accept HS256 (§12)
+sudo /opt/guardrail/siem-sso.sh status                      # what is configured now
+sudo /opt/guardrail/siem-sso.sh off                         # turn it off
+```
+
+Upgrading an existing server needs nothing by hand: `install.sh` adds every key
+blank (blank keeps SSO off) and drops `siem-sso.sh` alongside `migrate-data.sh`.
+
+If you would rather do it by hand, §11 has the openssl commands and the keys are
+listed in §10 — the script is a convenience, not a requirement.
 
 ### On the SIEM side
 
@@ -608,8 +640,10 @@ Upgrading an existing server needs no manual `.env` editing beyond steps 3–5:
 
 ### First sign-in checklist
 
+- [ ] `siem-sso.sh status` shows the URL, the pinned certificate and its expiry
 - [ ] `GET /api/v1/auth/providers` reports `"siem_sso": true`
 - [ ] The API log line `SIEM single sign-on enabled` shows `jwks_pinned: true`
+      and the organization it resolved
 - [ ] A real handoff lands on the dashboard, not on an error card
 - [ ] The account appears in the console with the role you expected
 - [ ] `auth.sso` and `auth.sso.provision` are in the audit log

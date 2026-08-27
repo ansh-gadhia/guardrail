@@ -104,6 +104,7 @@ type ssoHarness struct {
 	svc      *Service
 	users    *fakeUserRepo
 	sessions *fakeSessionRepo
+	orgs     *fakeOrgRepo
 	replay   *memReplay
 	verifier *stubVerifier
 	audit    *captureAudit
@@ -122,9 +123,14 @@ func newSSOHarness(t *testing.T, tune func(*Deps)) *ssoHarness {
 		t.Fatalf("role map: %v", err)
 	}
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	ssoCfg := DefaultSSOConfig()
+	ssoCfg.OrgRef = "default"
+
+	orgs := newFakeOrgRepo()
+	orgs.bySlug["default"] = &iam.Organization{ID: ssoOrg, Name: "GuardRail Default", Slug: "default", Status: "active"}
 
 	d := Deps{
-		Users: users, Orgs: newFakeOrgRepo(), Roles: fakeRoleRepo{roles: seededRoles()}, Sessions: sessions,
+		Users: users, Orgs: orgs, Roles: fakeRoleRepo{roles: seededRoles()}, Sessions: sessions,
 		Hasher: security.NewArgon2Hasher(security.Argon2Params{
 			Memory: 8 * 1024, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32,
 		}),
@@ -137,12 +143,12 @@ func newSSOHarness(t *testing.T, tune func(*Deps)) *ssoHarness {
 		SSOVerifier:     verifier,
 		Replay:          replay,
 		SSORoles:        roleMap,
-		SSO:             DefaultSSOConfig(),
+		SSO:             ssoCfg,
 	}
 	if tune != nil {
 		tune(&d)
 	}
-	return &ssoHarness{svc: NewService(d), users: users, sessions: sessions,
+	return &ssoHarness{svc: NewService(d), users: users, sessions: sessions, orgs: orgs,
 		replay: replay, verifier: verifier, audit: rec, now: now}
 }
 
@@ -575,12 +581,79 @@ func TestPasswordLogin_IsNotMarkedSSO(t *testing.T) {
 
 // ---- not configured ----
 
-func TestSSOLogin_DisabledWithoutAProvisioningOrg(t *testing.T) {
-	h := newSSOHarness(t, func(d *Deps) { d.FederationOrgID = iam.ID{} })
+func TestSSOLogin_DisabledWithoutKeyMaterial(t *testing.T) {
+	h := newSSOHarness(t, func(d *Deps) { d.SSOVerifier = nil })
 	if h.svc.SIEMSSOEnabled() {
-		t.Fatal("SSO must not report itself enabled without a provisioning organization")
+		t.Fatal("SSO must not report itself enabled with no verifier")
 	}
 	if _, err := h.login(t, assertion()); !errors.Is(err, iam.ErrSSONotConfigured) {
 		t.Fatalf("want ErrSSONotConfigured, got %v", err)
+	}
+}
+
+// ---- which organization ----
+
+// The common case: a single-tenant install, nothing configured. There is exactly
+// one right answer, and making somebody paste a uuid they have no choice about
+// is a setup step that exists only to be got wrong.
+func TestSSOLogin_SingleTenantNeedsNoOrgSetting(t *testing.T) {
+	h := newSSOHarness(t, func(d *Deps) { d.SSO.OrgRef = "" })
+
+	if _, err := h.login(t, assertion()); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if u := h.findUser(t, "analyst@corp.example"); u.OrganizationID != ssoOrg {
+		t.Fatalf("landed in %s, want %s", u.OrganizationID, ssoOrg)
+	}
+}
+
+// A slug is accepted, because that is the name an operator actually knows.
+func TestSSOLogin_OrgBySlug(t *testing.T) {
+	h := newSSOHarness(t, func(d *Deps) { d.SSO.OrgRef = "default" })
+
+	if _, err := h.login(t, assertion()); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if u := h.findUser(t, "analyst@corp.example"); u.OrganizationID != ssoOrg {
+		t.Fatalf("landed in %s, want %s", u.OrganizationID, ssoOrg)
+	}
+}
+
+func TestSSOLogin_OrgByUUID(t *testing.T) {
+	h := newSSOHarness(t, func(d *Deps) { d.SSO.OrgRef = ssoOrg.String() })
+
+	if _, err := h.login(t, assertion()); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+}
+
+// With several tenants there is no obvious answer, so it refuses and names them
+// rather than picking one. Filing an analyst into the wrong tenant does not
+// announce itself — they sign in, see an estate that is not theirs, and
+// everything after that is an audit problem.
+func TestSSOLogin_MultiTenantRefusesToGuess(t *testing.T) {
+	h := newSSOHarness(t, func(d *Deps) { d.SSO.OrgRef = "" })
+	h.orgs.bySlug["acme"] = &iam.Organization{ID: iam.NewID(), Name: "Acme", Slug: "acme", Status: "active"}
+
+	_, err := h.login(t, assertion())
+	if !errors.Is(err, iam.ErrSSONotConfigured) {
+		t.Fatalf("want ErrSSONotConfigured, got %v", err)
+	}
+	for _, want := range []string{"acme", "default", "GUARDRAIL_SIEM_SSO_ORG"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message should name %q so the operator can act on it: %v", want, err)
+		}
+	}
+}
+
+func TestSSOLogin_UnknownOrgSlugIsNamed(t *testing.T) {
+	h := newSSOHarness(t, func(d *Deps) { d.SSO.OrgRef = "not-a-real-tenant" })
+
+	_, err := h.login(t, assertion())
+	if !errors.Is(err, iam.ErrSSONotConfigured) {
+		t.Fatalf("want ErrSSONotConfigured, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "not-a-real-tenant") {
+		t.Errorf("the message should quote the slug that was not found: %v", err)
 	}
 }

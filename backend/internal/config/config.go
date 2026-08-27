@@ -164,8 +164,23 @@ type FederationConfig struct {
 // and every default reproduces the behaviour of a deployment that has never
 // heard of the SIEM, which is what let this ship before the SIEM's half existed.
 type SIEMSSOConfig struct {
-	// JWKSURL is where the SIEM publishes its public keys. Setting it (with
-	// ProvisionOrgID) is what enables SSO. HTTPS only.
+	// Org is the organization SIEM users land in, as a SLUG ("default") or a
+	// UUID. Both are accepted because an operator knows the slug and would have
+	// to go and look up the uuid.
+	//
+	// Empty is the normal case and means "the only organization on this
+	// deployment". Nearly every install is single-tenant, and on one of those
+	// there is exactly one right answer — making somebody run a psql query to
+	// find a uuid they have no choice about is a setup step that exists only to
+	// be got wrong. On a deployment with several organizations there is no
+	// obvious answer, so leaving this empty is refused at sign-in with a message
+	// naming the slugs to choose from.
+	//
+	// It falls back to GUARDRAIL_FEDERATION_ORG_ID, so a deployment that already
+	// set that for OIDC or LDAP needs nothing here at all.
+	Org string
+	// JWKSURL is where the SIEM publishes its public keys. Setting it is what
+	// enables SSO. HTTPS only.
 	JWKSURL string
 	// JWKSCABundle is the PEM certificate that must have signed the JWKS host's
 	// TLS certificate, or that certificate itself when self-signed. A SIEM on a
@@ -198,12 +213,25 @@ type SIEMSSOConfig struct {
 	RoleMapJSON     string
 }
 
-// Enabled reports whether the SIEM flow is fully configured. Key material alone
-// is not enough: without a provisioning organization there is no answer to
-// "which tenant is this person in", and the token must never be the thing that
-// answers it.
+// SIEMSSOEnabled reports whether the SIEM flow is configured.
+//
+// Key material is the whole requirement. The organization is deliberately NOT
+// part of it: it defaults to the only organization on the deployment, which is
+// the right answer on nearly every install and removes the one setup step that
+// could not be guessed. Which tenant a person lands in is still decided by this
+// server — the token never gets a say — it is just decided by counting rather
+// than by making somebody paste a uuid.
 func (f FederationConfig) SIEMSSOEnabled() bool {
-	return f.ProvisionOrgID != "" && (f.SIEM.JWKSURL != "" || f.SIEM.SharedSecret != "")
+	return f.SIEM.JWKSURL != "" || f.SIEM.SharedSecret != ""
+}
+
+// SIEMOrg is the organization reference SSO should use, falling back to the one
+// the other federated providers already share.
+func (f FederationConfig) SIEMOrg() string {
+	if f.SIEM.Org != "" {
+		return f.SIEM.Org
+	}
+	return f.ProvisionOrgID
 }
 
 // OIDCEnabled reports whether the OIDC provider is fully configured.
@@ -366,6 +394,7 @@ func Load() (*Config, error) {
 			LDAPBaseDN:       getEnv("GUARDRAIL_LDAP_BASE_DN", ""),
 			LDAPUserFilter:   getEnv("GUARDRAIL_LDAP_USER_FILTER", ""),
 			SIEM: SIEMSSOConfig{
+				Org:          getEnv("GUARDRAIL_SIEM_SSO_ORG", ""),
 				JWKSURL:      getEnv("GUARDRAIL_SIEM_JWKS_URL", ""),
 				JWKSCABundle: getEnv("GUARDRAIL_SIEM_JWKS_CA_BUNDLE", ""),
 				SharedSecret: getEnv("GUARDRAIL_SIEM_SSO_SECRET", ""),
