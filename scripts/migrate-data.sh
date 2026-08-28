@@ -59,6 +59,36 @@ die()   { err "$*"; exit 1; }
 step()  { printf '\n%s\n' "${B}$*${R}"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+fmt_secs() { # fmt_secs SECONDS -> "9s" / "2m04s"
+    local s=${1:-0}
+    if [ "$s" -lt 60 ]; then printf '%ds' "$s"
+    else printf '%dm%02ds' $((s / 60)) $((s % 60)); fi
+}
+
+term_cols() {
+    local c=""
+    if have tput; then c=$(tput cols 2>/dev/null || true); fi
+    [ -n "$c" ] || c=${COLUMNS:-80}
+    case "$c" in '' | *[!0-9]*) c=80 ;; esac
+    printf '%s' "$c"
+}
+
+# The command's most recent line of output, flattened and cut to WIDTH. Splitting
+# on \r matters: a command that redraws in place writes a whole screenful of
+# overwrites between two newlines, and the last of those is the one it means.
+last_line() { # last_line LOGFILE WIDTH
+    local w=${2:-0}
+    case "$w" in '' | *[!0-9]*) return 0 ;; esac
+    [ "$w" -ge 12 ] || return 0
+    tail -c 4096 "$1" 2>/dev/null |
+        tr '\r' '\n' |
+        sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g' -e 's/[^[:print:]]//g' |
+        grep -v '^[[:space:]]*$' |
+        tail -1 |
+        cut -c1-"$w" || true
+    return 0
+}
 need_root() { [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0"; }
 
 compose() { docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"; }
@@ -105,21 +135,67 @@ ask_yn() { # ask_yn VAR "Prompt" "y|n"
     done
 }
 
+# Spinner plus an elapsed clock and the command's own last line of output. The
+# clock is the point: every step this script runs is either slow or broken, and a
+# bare spinner reads the same either way.
 spin() {
     local msg="$1"; shift
     if [ ! -t 1 ]; then printf '  ▸ %s\n' "$msg"; "$@"; return; fi
-    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 rc=0 log
+    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 rc=0 log note="" room
+    local t0=$SECONDS
+    room=$(( $(term_cols) - ${#msg} - 24 ))
     log=$(mktemp)
     "$@" >"$log" 2>&1 &
     local pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         i=$(( (i + 1) % ${#frames} ))
-        printf '\r  %s %s' "${CYN}${frames:$i:1}${R}" "$msg"
+        if [ $((i % 5)) -eq 0 ]; then note=$(last_line "$log" "$room" || true); fi
+        printf '\r\033[K  %s %s %s%s' "${CYN}${frames:$i:1}${R}" "$msg" \
+            "${D}$(fmt_secs $((SECONDS - t0)))${R}" "${note:+  ${D}${note}${R}}"
         sleep 0.08
     done
     wait "$pid" || rc=$?
-    if [ "$rc" -eq 0 ]; then printf '\r  %s %s\n' "${GRN}✔${R}" "$msg"
-    else printf '\r  %s %s\n' "${RED}✘${R}" "$msg"; sed 's/^/      /' "$log" >&2; fi
+    if [ "$rc" -eq 0 ]; then printf '\r\033[K  %s %s %s\n' "${GRN}✔${R}" "$msg" "${D}$(fmt_secs $((SECONDS - t0)))${R}"
+    else printf '\r\033[K  %s %s\n' "${RED}✘${R}" "$msg"; sed 's/^/      /' "$log" >&2; fi
+    rm -f "$log"
+    return "$rc"
+}
+
+# spin() for the copy itself, reporting how much has landed at the destination
+# instead of the command's output — tar says nothing at all while it works, and a
+# multi-gigabyte Postgres directory is exactly where an operator starts wondering
+# whether the thing has died with the stack already stopped.
+#
+# The destination is only ever READ. The copy pipeline is left exactly as it was:
+# the one thing worse than a silent migration is an instrumented one that damages
+# what it was called in to move.
+spin_copy() { # spin_copy MSG TOTAL_BYTES DEST CMD...
+    local msg="$1" total="$2" dst="$3"; shift 3
+    if [ ! -t 1 ]; then printf '  ▸ %s\n' "$msg"; "$@"; return; fi
+    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 rc=0 log note="" got=0
+    local t0=$SECONDS last=-1
+    log=$(mktemp)
+    "$@" >"$log" 2>&1 &
+    local pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i + 1) % ${#frames} ))
+        # du walks the whole tree, so it runs at most once every two seconds
+        # rather than on every frame; the spinner and the clock carry the rest.
+        if [ $((SECONDS - last)) -ge 2 ]; then
+            last=$SECONDS
+            got=$(tree_bytes "$dst")
+            note="$(human "$got")"
+            if [ "${total:-0}" -gt 0 ]; then
+                note="$note of $(human "$total")  $((got * 100 / total))%"
+            fi
+        fi
+        printf '\r\033[K  %s %s %s%s' "${CYN}${frames:$i:1}${R}" "$msg" \
+            "${D}$(fmt_secs $((SECONDS - t0)))${R}" "${note:+  ${D}${note}${R}}"
+        sleep 0.08
+    done
+    wait "$pid" || rc=$?
+    if [ "$rc" -eq 0 ]; then printf '\r\033[K  %s %s %s\n' "${GRN}✔${R}" "$msg" "${D}$(fmt_secs $((SECONDS - t0)))${R}"
+    else printf '\r\033[K  %s %s\n' "${RED}✘${R}" "$msg"; sed 's/^/      /' "$log" >&2; fi
     rm -f "$log"
     return "$rc"
 }
@@ -471,7 +547,9 @@ do_relocate() { # do_relocate move|copy
     mkdir -p "$DATA_DIR"
     stop_stack
     for i in "${!IDX[@]}"; do
-        spin "${DS_LABEL[${IDX[$i]}]} → ${TO[$i]}" copy_tree "${FROM[$i]}" "${TO[$i]}"
+        spin_copy "${DS_LABEL[${IDX[$i]}]} → ${TO[$i]}" \
+            "$(tree_bytes "${FROM[$i]}")" "${TO[$i]}" \
+            copy_tree "${FROM[$i]}" "${TO[$i]}"
         # Ownership of the tree comes across in the archive; this fixes the top
         # directory for the case where it did not, so the service can still
         # create new files under it.

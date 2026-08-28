@@ -57,6 +57,61 @@ die()   { err "$*"; exit 1; }
 step()  { printf '\n%s\n' "${B}$*${R}"; }
 
 # ---------------------------------------------------------------------------
+# Progress reporting
+#
+# Every long step here either moves bytes over the network or waits on something
+# that does, and the honest question an operator asks is always the same one: is
+# this working, or is it stuck? A bare spinner cannot answer it. These four
+# helpers exist so that every such step can: an elapsed clock, the command's own
+# last line of output, transferred bytes, or — best of all, where the command
+# already draws its own bars — the command's output left alone on the terminal.
+# ---------------------------------------------------------------------------
+
+fmt_secs() { # fmt_secs SECONDS -> "9s" / "2m04s"
+    local s=${1:-0}
+    if [ "$s" -lt 60 ]; then printf '%ds' "$s"
+    else printf '%dm%02ds' $((s / 60)) $((s % 60)); fi
+}
+
+hbytes() { # hbytes BYTES -> "413.7 MB"
+    local b=${1:-0}
+    case "$b" in '' | *[!0-9]*) b=0 ;; esac
+    if   [ "$b" -ge 1073741824 ]; then printf '%d.%d GB' $((b / 1073741824)) $(((b % 1073741824) * 10 / 1073741824))
+    elif [ "$b" -ge 1048576 ];    then printf '%d.%d MB' $((b / 1048576))    $(((b % 1048576) * 10 / 1048576))
+    elif [ "$b" -ge 1024 ];       then printf '%d KB'    $((b / 1024))
+    else                               printf '%d B'     "$b"
+    fi
+}
+
+term_cols() {
+    local c=""
+    if command -v tput >/dev/null 2>&1; then c=$(tput cols 2>/dev/null || true); fi
+    [ -n "$c" ] || c=${COLUMNS:-80}
+    case "$c" in '' | *[!0-9]*) c=80 ;; esac
+    printf '%s' "$c"
+}
+
+# The command's most recent line of output, flattened and cut to WIDTH.
+#
+# Only the tail of the log is read. apt and docker redraw with carriage returns,
+# so the last NEWLINE-terminated line of a long-running command's log is often a
+# whole screenful of overwrites concatenated together — splitting on \r is what
+# turns that back into the one line the command currently means. Reading the
+# whole file several times a second would also be its own cost on a big log.
+last_line() { # last_line LOGFILE WIDTH
+    local w=${2:-0}
+    case "$w" in '' | *[!0-9]*) return 0 ;; esac
+    [ "$w" -ge 12 ] || return 0
+    tail -c 4096 "$1" 2>/dev/null |
+        tr '\r' '\n' |
+        sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g' -e 's/[^[:print:]]//g' |
+        grep -v '^[[:space:]]*$' |
+        tail -1 |
+        cut -c1-"$w" || true
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Banner
 # ---------------------------------------------------------------------------
 #
@@ -146,31 +201,140 @@ banner() {
     return 0
 }
 
+# Runs "$@" out of sight, showing a spinner, an elapsed clock, and the command's
+# own most recent line of output.
+#
+# The clock and the tail are not decoration. A bare spinner cannot tell an
+# operator whether apt is fetching a 300MB package or whether the box is wedged
+# on a DNS lookup, and both look identical for as long as it takes to give up.
+#
+# Anything that draws its own progress bars — an image pull, above all — belongs
+# in stream() instead, which leaves the terminal to the command rather than
+# swallowing the one thing worth watching.
 spin() {
-    # Runs "$@" while showing a spinner; prints nothing extra when not a tty.
     local msg="$1"; shift
     if [ ! -t 1 ]; then
         printf '  ▸ %s\n' "$msg"
         "$@"
         return
     fi
-    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 rc=0
+    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 rc=0 note="" cols room
+    local t0=$SECONDS
+    cols=$(term_cols)
+    room=$((cols - ${#msg} - 24))
     local log; log=$(mktemp)
     "$@" >"$log" 2>&1 &
     local pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         i=$(( (i + 1) % ${#frames} ))
-        printf '\r  %s %s' "${CYN}${frames:$i:1}${R}" "$msg"
+        # The tail costs two forks, so it refreshes every fifth frame (~0.4s)
+        # while the spinner keeps turning at 0.08s. Reading it every frame is
+        # thousands of processes across a long apt run.
+        if [ $((i % 5)) -eq 0 ]; then note=$(last_line "$log" "$room" || true); fi
+        printf '\r\033[K  %s %s %s%s' "${CYN}${frames:$i:1}${R}" "$msg" \
+            "${D}$(fmt_secs $((SECONDS - t0)))${R}" "${note:+  ${D}${note}${R}}"
         sleep 0.08
     done
     wait "$pid" || rc=$?
     if [ "$rc" -eq 0 ]; then
-        printf '\r  %s %s\n' "${GRN}✔${R}" "$msg"
+        printf '\r\033[K  %s %s %s\n' "${GRN}✔${R}" "$msg" "${D}$(fmt_secs $((SECONDS - t0)))${R}"
     else
-        printf '\r  %s %s\n' "${RED}✘${R}" "$msg"
+        printf '\r\033[K  %s %s\n' "${RED}✘${R}" "$msg"
         sed 's/^/      /' "$log" >&2
     fi
     rm -f "$log"
+    return "$rc"
+}
+
+# Runs "$@" with its output left where the command put it — on the terminal —
+# framed by the same ✔/✘ lines spin() prints.
+#
+# For anything pulling bytes from a registry this is the right helper and spin()
+# is the wrong one. Docker's per-layer bars carry sizes, percentages and rates
+# for every image at once; no spinner reconstructs that, and hiding it behind one
+# is what makes a four-minute pull read as a hang.
+stream() {
+    local msg="$1"; shift
+    local rc=0 t0=$SECONDS
+    printf '  %s %s\n' "${CYN}▸${R}" "$msg"
+    "$@" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf '  %s %s %s\n' "${GRN}✔${R}" "$msg" "${D}$(fmt_secs $((SECONDS - t0)))${R}"
+    else
+        printf '  %s %s\n' "${RED}✘${R}" "$msg"
+    fi
+    return "$rc"
+}
+
+# The size the server says the body will be, or 0 when it will not say.
+#
+# Asked for up front with a HEAD rather than read out of --dump-header while the
+# transfer runs: curl block-buffers that file, so the length only lands when the
+# transfer it was meant to measure has already finished. The last declared length
+# wins, because a redirect contributes a header block of its own.
+remote_length() { # remote_length URL
+    local out n=""
+    # Gated on curl's own exit status, not just on finding the header: -I still
+    # prints the headers of a 404, and GitHub's 404 declares a 14-byte body — so
+    # an ungated probe reports the miss as a download that is 0% of 14 B.
+    if out=$(curl -fsSLI --max-time 8 "$1" 2>/dev/null); then
+        n=$(printf '%s' "$out" | tr -d '\r' |
+            grep -i '^content-length:' | tail -1 | tr -dc '0-9' || true)
+    fi
+    printf '%s' "${n:-0}"
+}
+
+file_bytes() { # file_bytes PATH
+    local n=0
+    # The -e guard is the point: `wc -c <missing` is a REDIRECTION failure, which
+    # bash reports on its own stderr before the command's 2>/dev/null can apply.
+    # Polled every tenth of a second against a file curl has not created yet,
+    # that printed an error per frame straight over the progress line.
+    if [ -e "$1" ]; then
+        n=$(stat -c %s "$1" 2>/dev/null || true)
+        [ -n "$n" ] || n=$(wc -c 2>/dev/null <"$1" || true)
+    fi
+    n=${n//[[:space:]]/}
+    case "$n" in '' | *[!0-9]*) n=0 ;; esac
+    printf '%s' "$n"
+}
+
+# Fetches URL to DEST, reporting bytes received, a rate, and a percentage when
+# the server declares a length.
+#
+# codeload builds its tarballs on the fly and sends no Content-Length, so a
+# percentage cannot be assumed here — bytes and a rate are the honest report, and
+# they are still the whole difference between "downloading" and "hung".
+#
+# A failed attempt erases its line and prints nothing: the only caller tries two
+# URLs and expects one of them to 404 nearly every time.
+download() { # download URL DEST MSG
+    local url="$1" dest="$2" msg="$3" rc=0
+    if [ ! -t 1 ]; then
+        printf '  ▸ %s\n' "$msg"
+        curl -fsSL -o "$dest" "$url" || rc=$?
+        return "$rc"
+    fi
+    local total; total=$(remote_length "$url")
+    curl -fsSL -o "$dest" "$url" 2>/dev/null &
+    local pid=$! frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' i=0 got=0 el=0 note=""
+    local t0=$SECONDS
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i + 1) % ${#frames} ))
+        got=$(file_bytes "$dest")
+        el=$((SECONDS - t0))
+        note="$(hbytes "$got")"
+        if [ "$total" -gt 0 ]; then note="$note of $(hbytes "$total")  $((got * 100 / total))%"; fi
+        if [ "$el" -gt 0 ]; then note="$note  ·  $(hbytes $((got / el)))/s"; fi
+        printf '\r\033[K  %s %s %s' "${CYN}${frames:$i:1}${R}" "$msg" "${D}${note}${R}"
+        sleep 0.1
+    done
+    wait "$pid" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf '\r\033[K  %s %s %s\n' "${GRN}✔${R}" "$msg" "${D}$(hbytes "$(file_bytes "$dest")")${R}"
+    else
+        printf '\r\033[K'
+    fi
     return "$rc"
 }
 
@@ -305,13 +469,15 @@ install_docker() {
     else
         info "installing Docker (this can take a minute)"
         if have apt-get; then
-            spin "apt-get update" env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+            # -q, not -qq: the second q silences the per-package "Get:" lines,
+            # which are the only progress this step has to show.
+            spin "apt-get update" env DEBIAN_FRONTEND=noninteractive apt-get update -q
             spin "installing prerequisites" env DEBIAN_FRONTEND=noninteractive \
-                apt-get install -y -qq ca-certificates curl openssl
+                apt-get install -y -q ca-certificates curl openssl
         elif have dnf; then
-            spin "installing prerequisites" dnf install -y -q ca-certificates curl openssl
+            spin "installing prerequisites" dnf install -y ca-certificates curl openssl
         elif have yum; then
-            spin "installing prerequisites" yum install -y -q ca-certificates curl openssl
+            spin "installing prerequisites" yum install -y ca-certificates curl openssl
         fi
         # get.docker.com covers Debian/Ubuntu/RHEL/Fedora/SUSE and installs the
         # compose plugin with it. Preferred over distro packages, which on Ubuntu
@@ -382,7 +548,10 @@ fetch_release() {
         local ok=0
         for kind in heads tags; do
             local url="https://codeload.github.com/${REPO}/tar.gz/refs/${kind}/${REF}"
-            if curl -fsSL "$url" 2>/dev/null | tar xz -C "$tmp" --strip-components=1 2>/dev/null; then
+            # To a file rather than straight into tar: a pipe cannot be
+            # measured, and this is a download over someone else's link.
+            if download "$url" "$tmp/src.tar.gz" "downloading host files (${REF})" &&
+                tar xzf "$tmp/src.tar.gz" -C "$tmp" --strip-components=1 2>/dev/null; then
                 ok=1
                 info "host files from ${B}${REF}${R} ${D}(${kind})${R}"
                 break
@@ -936,30 +1105,42 @@ start_stack() {
     local -a prof=()
     mapfile -t prof < <(profiles)
     step "Starting ${APP_NAME}"
-    spin "pulling images (${VERSION})" \
-        docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "${prof[@]}" pull --quiet \
+    # Neither --quiet nor behind the spinner. This is the step that moves
+    # hundreds of megabytes, and docker's own per-layer bars — sizes, percentages
+    # and rates, for every image at once — are the only real progress report
+    # available for it. Hiding them behind a spinner is what made a first install
+    # look hung for four minutes on a slow link.
+    stream "pulling images (${VERSION})" \
+        docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "${prof[@]}" pull \
         || warn "could not pull ${B}:${VERSION}${R} — starting with whatever is already on this host. If the stack does not come up, that tag has not been published yet; pick another with GUARDRAIL_VERSION=."
     # Brings up the one-shot migrate and seed containers too: `api` declares them
     # as service_completed_successfully dependencies, and compose re-runs a
     # completed one-shot on every `up`. That is what applies a release's new
     # migrations — an update does not need a separate step, and must not skip it.
-    spin "starting services" \
+    # Streamed for the same reason: compose reports each container as it is
+    # created and each one-shot as it finishes, and on a first install the
+    # migration container is where the wait actually is.
+    stream "starting services" \
         docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "${prof[@]}" up -d --remove-orphans
 }
 
 wait_healthy() {
-    local tries=60
-    printf '  %s waiting for the API to answer' "${CYN}⠿${R}"
+    local tries=60 t0=$SECONDS
+    [ -t 1 ] || printf '  ▸ waiting for the API to answer\n'
     while [ "$tries" -gt 0 ]; do
         if curl -fsk --max-time 3 "https://127.0.0.1:${HTTPS_PORT}/healthz" >/dev/null 2>&1; then
-            printf '\r'; ok "API is healthy                        "
+            [ -t 1 ] && printf '\r\033[K'
+            ok "API is healthy ${D}($(fmt_secs $((SECONDS - t0))))${R}"
             return 0
         fi
-        printf '.'
+        # The clock matters more than dots here: the first boot runs migrations,
+        # so "40s and counting" is a normal reading and a silent minute is not.
+        [ -t 1 ] && printf '\r\033[K  %s waiting for the API to answer %s' \
+            "${CYN}⠿${R}" "${D}$(fmt_secs $((SECONDS - t0)))${R}"
         sleep 2
         tries=$((tries - 1))
     done
-    printf '\r'
+    [ -t 1 ] && printf '\r\033[K'
     warn "the API did not become healthy in time — check: docker compose -p $PROJECT logs api"
     return 0
 }
