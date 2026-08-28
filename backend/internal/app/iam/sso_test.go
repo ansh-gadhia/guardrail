@@ -765,7 +765,7 @@ func TestSSOLogin_PrincipalDrivesTheFirstRunOffer(t *testing.T) {
 	}
 	// The condition the console gates on, asserted here so a change to any field
 	// behind it is caught by a test that says what it was for.
-	if !(p.FirstLogin && !p.MFAEnabled) {
+	if !p.FirstLogin || p.MFAEnabled {
 		t.Fatal("the two-factor offer would not be shown to a new SIEM user")
 	}
 

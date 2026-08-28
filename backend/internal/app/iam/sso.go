@@ -229,7 +229,7 @@ func (s *Service) LoginWithSIEM(ctx context.Context, rawToken string, meta ReqMe
 	// a claim in the token says MFA happened would mean a forged token bypasses
 	// the one control that a forged token cannot itself satisfy — which is the
 	// whole reason somebody enrolled it.
-	if s.mfa != nil && !(s.ssoCfg.TrustAMR && assertion.AssertsMFA()) {
+	if s.mfa != nil && (!s.ssoCfg.TrustAMR || !assertion.AssertsMFA()) {
 		if m, e := s.mfa.Get(ctx, user.ID); e == nil && m.Confirmed() {
 			challenge, ce := s.mfaChal.Issue(user.ID, true, now)
 			if ce != nil {

@@ -185,7 +185,7 @@ func (v *SSOTokenVerifier) VerifySSOToken(ctx context.Context, raw string) (*iam
 		return nil, reject("the token carries no exp claim")
 	}
 	now := v.now()
-	if life := claims.ExpiresAt.Time.Sub(now); life > v.cfg.MaxTokenAge {
+	if life := claims.ExpiresAt.Sub(now); life > v.cfg.MaxTokenAge {
 		return nil, reject(fmt.Sprintf(
 			"the token claims %s of validity; the maximum here is %s — a handoff token is not a session token",
 			life.Round(time.Second), v.cfg.MaxTokenAge))

@@ -2,6 +2,7 @@ package security
 
 import (
 	"crypto"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -114,14 +115,19 @@ func (k *jwk) rsaKey() (*rsa.PublicKey, error) {
 }
 
 func (k *jwk) ecKey() (*ecdsa.PublicKey, error) {
-	var curve elliptic.Curve
+	// Both spellings of the same curve: elliptic for the key ecdsa.Verify wants,
+	// ecdh for the on-curve check below.
+	var (
+		curve     elliptic.Curve
+		agreement ecdh.Curve
+	)
 	switch k.Crv {
 	case "P-256":
-		curve = elliptic.P256()
+		curve, agreement = elliptic.P256(), ecdh.P256()
 	case "P-384":
-		curve = elliptic.P384()
+		curve, agreement = elliptic.P384(), ecdh.P384()
 	case "P-521":
-		curve = elliptic.P521()
+		curve, agreement = elliptic.P521(), ecdh.P521()
 	default:
 		return nil, fmt.Errorf("security: unsupported ec curve %q", k.Crv)
 	}
@@ -135,8 +141,23 @@ func (k *jwk) ecKey() (*ecdsa.PublicKey, error) {
 	}
 	// Checked, not assumed. A pair of integers that is not on the curve is not a
 	// public key, and handing one to a verifier is how invalid-curve attacks
-	// start. This costs one scalar check per key set fetch, not per token.
-	if !curve.IsOnCurve(x, y) {
+	// start. This costs one check per key set fetch, not per token.
+	//
+	// Through crypto/ecdh rather than elliptic.IsOnCurve, which is deprecated as
+	// a low-level unsafe API. NewPublicKey takes the SEC 1 uncompressed encoding
+	// of the same point and applies the same check, so this is the supported
+	// spelling of what was already here, not a change of mind about what is safe.
+	size := (curve.Params().BitSize + 7) / 8
+	// Bounds first: FillBytes PANICS on a coordinate too wide for the field, and
+	// both of these arrived as base64 from a URL the SIEM controls.
+	if x.BitLen() > size*8 || y.BitLen() > size*8 {
+		return nil, fmt.Errorf("security: ec coordinate is too wide for curve %s", k.Crv)
+	}
+	point := make([]byte, 1+2*size)
+	point[0] = 4 // uncompressed
+	x.FillBytes(point[1 : 1+size])
+	y.FillBytes(point[1+size:])
+	if _, err := agreement.NewPublicKey(point); err != nil {
 		return nil, fmt.Errorf("security: ec point is not on curve %s", k.Crv)
 	}
 	return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil
