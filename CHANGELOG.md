@@ -139,6 +139,29 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   in place resumes a running shell mid-way through different code.
 
 ### Fixed
+- **A leaked umask made the pinned SIEM certificate unreadable to the API.**
+  `write_env` sets `umask 077` to protect `.env` — it holds the vault master key —
+  and never restored it. umask is a property of the whole process, so every path
+  created after it in the same run inherited the mode, and `generate_cert` runs
+  next: `deploy/tls` came out 0700 (harmless, Traefik is root) and `deploy/siem`
+  came out 0700 (not harmless, the api container runs as a non-root user). SIEM
+  sign-on then refused to start with `permission denied` on a file that is plainly
+  present and that root can read, while `siem-sso.sh` reported the configuration
+  as correct — because it was. The umask is now scoped to the write, both
+  directories state their mode outright instead of inheriting one, and the mode
+  is reapplied on every run so an existing deployment is repaired by re-running
+  the installer or `siem-sso.sh`.
+
+- **`siem-sso.sh status` blamed the restart for everything.** `the running API
+  reports it as DISABLED — it may not have been restarted` was the only
+  explanation it offered, which is right often enough to send an operator round
+  the same loop three times. It now quotes the reason the API logged at boot,
+  checks the certificate's directory for the search bit and the file for the read
+  bit — naming the exact `chmod` when either is wrong — says when the
+  configuration names a certificate that is not there, and only then suggests a
+  restart, as `--force-recreate` rather than the `up -d` that leaves a container
+  Compose considers current exactly where it is.
+
 - **SIEM SSO accepted the wrong issuer.** The default `iss` was
   `cybersentineldlp-siem`, which is the DLP's own issuer. Every SIEM launcher
   console — WAF, URL-Filtering, SentinelAI and GuardRail — rides the launcher

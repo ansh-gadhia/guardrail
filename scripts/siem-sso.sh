@@ -325,13 +325,62 @@ console_url() {
     printf 'https://127.0.0.1:%s' "$port"
 }
 
+# why_disabled names the reason instead of guessing at one.
+#
+# "it may not have been restarted" was the only thing this used to say, which is
+# right often enough to be misleading: an operator restarts the API, nothing
+# changes, and they restart it again. The API already knows why it turned SSO
+# off and says so at boot, so the log is asked first and the answer quoted. The
+# checks after it cover the causes that leave no log line at all.
+why_disabled() {
+    local logged=""
+    logged=$(compose logs api 2>/dev/null | grep -i 'SIEM SSO disabled' | tail -1 || true)
+    if [ -n "$logged" ]; then
+        info "the API said why at boot:"
+        printf '    %s\n' "${D}${logged#*msg\":\"}${R}"
+    fi
+
+    # A 0644 certificate inside a 0700 directory is exactly as unreadable as a
+    # 0600 one, and this is the failure that looks least like itself: the file is
+    # plainly there, root can cat it, and the API — which reads it as a non-root
+    # user inside the container — cannot. Older installs created the directory
+    # under a umask that leaked out of the .env write.
+    local dmode fmode
+    dmode=$(stat -c '%a' "$CERT_DIR" 2>/dev/null || true)
+    fmode=$(stat -c '%a' "$CERT_HOST_PATH" 2>/dev/null || true)
+    # The SEARCH bit is what matters on the directory, not read: opening a path
+    # already known needs x, and r only lists. Testing for r would flag 0711 —
+    # unusual, but it works — and a diagnostic that names a healthy thing as the
+    # fault is worse than one that says nothing.
+    case "${dmode: -1}" in
+        ""|1|3|5|7) ;;
+        *) warn "${CERT_DIR} is mode ${B}${dmode}${R} — the API reads it as a non-root user and cannot"
+           info "fix: ${B}sudo chmod 755 ${CERT_DIR}${R}" ;;
+    esac
+    case "${fmode: -1}" in
+        ""|4|5|6|7) ;;
+        *) warn "${CERT_HOST_PATH} is mode ${B}${fmode}${R} — unreadable to the API"
+           info "fix: ${B}sudo chmod 644 ${CERT_HOST_PATH}${R}" ;;
+    esac
+
+    if [ -n "$(env_get GUARDRAIL_SIEM_JWKS_URL)" ] && [ ! -f "$CERT_HOST_PATH" ]; then
+        warn "no certificate at ${CERT_HOST_PATH} — the pinned fetch cannot be built"
+    fi
+
+    # Said last, because it is the least specific of the four and the one an
+    # operator will try anyway. `up -d` alone will not do it: compose leaves a
+    # container it considers current exactly where it is.
+    info "if the configuration changed since the container started:"
+    info "  ${B}cd ${INSTALL_DIR} && docker compose up -d --force-recreate api${R}"
+}
+
 probe_live() {
     local out
     out=$(curl -sk --max-time 5 "$(console_url)/api/v1/auth/providers" 2>/dev/null || true)
     case "$out" in
         *'"siem_sso":true'*)  ok "the running API reports SIEM single sign-on as ${B}enabled${R}" ;;
-        *'"siem_sso":false'*) warn "the running API reports it as DISABLED — it may not have been restarted"
-                              info "run: ${B}cd ${INSTALL_DIR} && docker compose up -d api${R}" ;;
+        *'"siem_sso":false'*) warn "the running API reports it as ${B}DISABLED${R}"
+                              why_disabled ;;
         *) info "could not reach the API on this host to confirm ${D}(that is fine if it is bound elsewhere)${R}" ;;
     esac
 }
@@ -454,6 +503,13 @@ do_setup() {
     fi
 
     mkdir -p "$CERT_DIR"
+    # Both modes stated outright, on every run, and the DIRECTORY matters as much
+    # as the file: the API reads this as a non-root user inside the container, and
+    # a 0644 certificate inside a 0700 directory is exactly as unreadable as a
+    # 0600 one. Older installs created this directory under a leaked umask, so
+    # this repairs them rather than assuming whoever made it got it right. Both
+    # hold a public certificate; there is nothing here to keep private.
+    chmod 755 "$CERT_DIR" 2>/dev/null || true
     # Copied into deploy/siem rather than referenced where it sits. The API reads
     # it from inside a container, so it has to be under the one directory that is
     # bind-mounted in — a path like /etc/cybersentineldlp/certs/... exists on the

@@ -759,7 +759,15 @@ generate_cert() {
     # Created empty on every install so the compose bind mount always has a real
     # directory to point at, and so an operator adding SSO afterwards has an
     # obvious place to drop the file rather than inventing one.
+    #
+    # The mode is set explicitly rather than left to the ambient umask, and set on
+    # every run rather than only at creation: the api container reads this
+    # directory as a NON-ROOT user, so 0700 here is a permission error at boot
+    # that names a file which is plainly present. Stating it also repairs a
+    # deployment that already has the directory locked down. It holds a public
+    # certificate — a public key — so 0755 is the honest mode for it.
     mkdir -p "$INSTALL_DIR/deploy/siem"
+    chmod 755 "$INSTALL_DIR/deploy/siem" 2>/dev/null || true
     local sans="DNS:localhost,IP:127.0.0.1"
     local ip; ip=$(host_ip)
     [ -n "$ip" ] && sans="$sans,IP:$ip"
@@ -856,6 +864,13 @@ migrate_env() {
 
 write_env() {
     local ip; ip=$(host_ip)
+    # Restored before this function returns, NOT left set. umask is a property of
+    # the whole process, so a function that changes it and walks away is changing
+    # the mode of every path the rest of the run creates. That is what made
+    # generate_cert's deploy/siem 0700: unreadable to the api container, which
+    # runs as a non-root user, and invisible until SIEM sign-on refused to start
+    # with a permission error naming a file that was plainly there.
+    local __we_umask; __we_umask=$(umask)
     umask 077
     resolve_data_paths
     cat >"$ENV_FILE" <<EOF
@@ -992,6 +1007,7 @@ GUARDRAIL_LOG_LEVEL=info
 GUARDRAIL_LOG_FORMAT=json
 EOF
     chmod 600 "$ENV_FILE"
+    umask "$__we_umask"
     ok "configuration written to ${B}${ENV_FILE}${R} ${D}(mode 600)${R}"
     [ -n "$ip" ] && info "server address detected as ${B}${ip}${R}"
 }
