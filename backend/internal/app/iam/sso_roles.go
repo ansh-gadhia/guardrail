@@ -22,6 +22,13 @@ const (
 	siemRoleL1            = "L1"
 	siemRoleL2            = "L2"
 	siemRoleL3            = "L3"
+	// A tier of its own on the SIEM's side, not an access mode: an account that
+	// watches the consoles and holds no analyst tier at all. It is listed here so
+	// it is RECOGNISED rather than merely landing on the same answer by default —
+	// Resolve's second return is what sync-on-login uses to decide whether to
+	// re-apply a role, so an unrecognised role means a person's role stops
+	// tracking the SIEM the moment somebody edits it here.
+	siemRoleReadOnly = "READONLY"
 )
 
 // Access modes, after normalisation.
@@ -60,11 +67,18 @@ const (
 // sessions, recordings and the audit trail and starts nothing; on a broker whose
 // whole job is standing between people and privileged access, "read-only" has to
 // mean it.
+//
+// read-only as a ROLE is the floor, and it stays the floor in either access mode.
+// The role claim is a ceiling, not a hint: an account the SIEM ranks below its
+// analyst tiers does not become an Operator because a separate claim says
+// read-write. The two claims disagreeing is precisely the case where taking the
+// lower one is the whole point.
 var defaultSSORoleTable = map[string]map[string]string{
 	siemRoleAdministrator: {accessReadWrite: RoleOrgAdmin, accessReadOnly: RoleAuditor},
 	siemRoleL3:            {accessReadWrite: RoleOperator, accessReadOnly: RoleAuditor},
 	siemRoleL2:            {accessReadWrite: RoleOperator, accessReadOnly: RoleAuditor},
 	siemRoleL1:            {accessReadWrite: RoleReadOnly, accessReadOnly: RoleReadOnly},
+	siemRoleReadOnly:      {accessReadWrite: RoleReadOnly, accessReadOnly: RoleReadOnly},
 }
 
 // SSORoleMap translates a SIEM role + access mode into a GuardRail role name.
@@ -209,6 +223,8 @@ func normalizeSIEMRole(s string) string {
 		return siemRoleL2
 	case "L3", "L3ANALYST", "TIER3", "T3", "LEVEL3", "ANALYSTL3":
 		return siemRoleL3
+	case "READONLY", "READONLYANALYST", "VIEWER", "VIEWONLY", "NOACCESS":
+		return siemRoleReadOnly
 	default:
 		return k
 	}

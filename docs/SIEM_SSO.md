@@ -76,7 +76,7 @@ already has the better answer for it, and it is not this.
 
 - **Endpoint:** `POST /api/v1/auth/sso/exchange` — public, no `Authorization` header
 - **Callback page:** `https://<console>/auth/sso#token=<exchange-token>`
-- **Issuer string:** `cybersentineldlp-siem` (configurable)
+- **Issuer string:** `cybersentinel-siem` (configurable)
 - **Audience:** `guardrail-pam` — **GuardRail's own**, not shared with any other consumer
 - **Token life:** ~30 s, single use
 
@@ -123,7 +123,7 @@ merely work.
 {
   // ── required ─────────────────────────────────────────
   "purpose": "sso_exchange",           // exact string
-  "iss":     "cybersentineldlp-siem",  // exact string
+  "iss":     "cybersentinel-siem",  // exact string
   "aud":     "guardrail-pam",          // GuardRail's own audience
   "sub":     "7f31c0a2-…",             // the SIEM's immutable user id — the join key
   "nonce":   "9f2c4e…",                // unique per token (uuid4 hex is fine)
@@ -135,7 +135,7 @@ merely work.
   "full_name": "J. Doe",               // optional, cosmetic ("name" also accepted)
 
   // ── privileges ───────────────────────────────────────
-  "role":   "L2",                      // Administrator | L1 | L2 | L3
+  "role":   "L2-Analyst",              // administrator | L3-Analyst | L2-Analyst | L1-Analyst | read-only
   "access": "read-write",              // read-write | read-only  (absent ⇒ read-only)
 
   // ── optional ─────────────────────────────────────────
@@ -300,6 +300,7 @@ uppercased, then looked up in an alias table.
 ```
 role    ADMINISTRATOR | ADMIN | SIEMADMIN | SUPERADMIN   -> Administrator
         L1 | L1ANALYST | TIER1 | T1 | LEVEL1             -> L1   (same for L2, L3)
+        READONLY | READONLYANALYST | VIEWER | VIEWONLY  -> read-only
 access  RW | READWRITE | WRITE | READANDWRITE | FULL | EDIT -> read-write
         RO | READONLY | READ | VIEW | VIEWONLY           -> read-only  (and anything else)
 ```
@@ -320,6 +321,8 @@ accounts at four privilege levels; there is nothing shared between them.
 | L2 | read-only | **Auditor** | 0 | — | — | ✔ | ✔ | — | — | — |
 | L1 | read-write | **Read-only** | 0 | — | — | ✔ | — | — | — | — |
 | L1 | read-only | **Read-only** | 0 | — | — | ✔ | — | — | — | — |
+| read-only | read-write | **Read-only** | 0 | — | — | ✔ | — | — | — | — |
+| read-only | read-only | **Read-only** | 0 | — | — | ✔ | — | — | — | — |
 
 The exact permission keys behind each, straight out of `db/seed.sql`:
 
@@ -358,6 +361,10 @@ Three cells worth explaining:
 - **read-only never maps to a role that can connect to a device.** On a broker
   whose whole job is standing between people and privileged access, "read-only"
   has to mean it.
+- **A `read-only` role claim wins over a `read-write` access claim.** The role is
+  the tier; the access mode only narrows it. An account the SIEM ranks below its
+  analyst tiers does not become an Operator because a second claim disagrees —
+  the two disagreeing is exactly the case where taking the lower one is the point.
 
 ### The bar, and the ceiling
 
@@ -578,7 +585,7 @@ deployment that has never heard of the SIEM.
 | `GUARDRAIL_SIEM_JWKS_URL` | — | **The one required setting.** Where the SIEM publishes its public keys. HTTPS only. Written by `siem-sso.sh`. |
 | `GUARDRAIL_SIEM_SSO_ORG` | — | Which organization SIEM users land in, as a **slug** or a UUID. Empty means "the only organization on this deployment" — right on nearly every install. With several tenants it refuses to guess and names them. Falls back to `GUARDRAIL_FEDERATION_ORG_ID`. |
 | `GUARDRAIL_SIEM_JWKS_CA_BUNDLE` | — | PEM that verifies the JWKS host's TLS certificate (§11). Needed for any self-signed SIEM. |
-| `GUARDRAIL_SIEM_SSO_ISSUER` | `cybersentineldlp-siem` | Exact `iss` |
+| `GUARDRAIL_SIEM_SSO_ISSUER` | `cybersentinel-siem` | Exact `iss` |
 | `GUARDRAIL_SIEM_SSO_AUDIENCE` | `guardrail-pam` | Exact `aud`. Do not share it with another consumer. |
 | `GUARDRAIL_SIEM_SSO_SECRET` | — | Enables HS256. **Leave empty** (§12). |
 | `GUARDRAIL_SIEM_JWKS_CACHE_TTL` | `10m` | Key-set freshness; an unknown `kid` forces one early refetch |

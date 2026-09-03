@@ -36,6 +36,15 @@ CERT_HOST_PATH="$CERT_DIR/jwks-ca.pem"
 # The path INSIDE the api container, where deploy/siem is bind-mounted read-only.
 CERT_CONTAINER_PATH="/etc/guardrail/siem/jwks-ca.pem"
 
+# The iss every SIEM launcher console is signed with. The launcher plane — WAF,
+# URL-Filtering, SentinelAI, GuardRail — mints this one string; the DLP's own
+# issuer below is a different product on the same appliance and never appears in
+# a launcher token. A deployment still carrying the old value refuses every real
+# sign-in for a mismatch nobody chose, so it is corrected on sight rather than
+# left to be found in a verifier log.
+DEFAULT_ISSUER="cybersentinel-siem"
+LEGACY_ISSUER="cybersentineldlp-siem"
+
 if [ -t 1 ]; then
     R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
     RED=$'\033[31m'; GRN=$'\033[32m'; YLW=$'\033[33m'; CYN=$'\033[36m'
@@ -123,7 +132,7 @@ Options
   --org ${D}<slug>${R}       which organization SIEM users land in. Defaults to the
                     only one on this deployment, which is almost always right.
   --audience ${D}<s>${R}     the aud this GuardRail accepts   ${D}(default: guardrail-pam)${R}
-  --issuer ${D}<s>${R}       the iss tokens must carry        ${D}(default: cybersentineldlp-siem)${R}
+  --issuer ${D}<s>${R}       the iss tokens must carry        ${D}(default: cybersentinel-siem)${R}
   --max-role ${D}<s>${R}     ceiling on any SSO-derived role, e.g. "Operator"
   --no-verify       skip the post-restart check (not recommended)
 
@@ -282,6 +291,11 @@ show_status() {
     printf '  %-22s %s\n' "JWKS URL" "${url:-(none)}"
     printf '  %-22s %s\n' "pinned certificate" "$(env_or GUARDRAIL_SIEM_JWKS_CA_BUNDLE '(system trust store — not pinned)')"
     printf '  %-22s %s\n' "issuer" "$(env_get GUARDRAIL_SIEM_SSO_ISSUER)"
+    if [ "$(env_get GUARDRAIL_SIEM_SSO_ISSUER)" = "$LEGACY_ISSUER" ]; then
+        warn "that issuer is the DLP's, not the launcher plane's — every launcher token"
+        warn "carries iss ${B}${DEFAULT_ISSUER}${R}, and this deployment would refuse all of them"
+        info "fix: ${B}sudo $0 $(env_get GUARDRAIL_SIEM_JWKS_URL) --issuer ${DEFAULT_ISSUER}${R}"
+    fi
     printf '  %-22s %s\n' "audience" "$(env_get GUARDRAIL_SIEM_SSO_AUDIENCE)"
     printf '  %-22s %s\n' "organization" "$(env_or GUARDRAIL_SIEM_SSO_ORG '(the only one on this deployment)')"
     printf '  %-22s %s\n' "default role" "$(env_get GUARDRAIL_SIEM_SSO_DEFAULT_ROLE)"
@@ -476,7 +490,17 @@ do_setup() {
     env_set GUARDRAIL_SIEM_JWKS_URL "$JWKS_URL"
     env_set GUARDRAIL_SIEM_JWKS_CA_BUNDLE "$CERT_CONTAINER_PATH"
     [ -n "$AUDIENCE" ] && env_set GUARDRAIL_SIEM_SSO_AUDIENCE "$AUDIENCE"
-    [ -n "$ISSUER" ]   && env_set GUARDRAIL_SIEM_SSO_ISSUER "$ISSUER"
+    if [ -n "$ISSUER" ]; then
+        env_set GUARDRAIL_SIEM_SSO_ISSUER "$ISSUER"
+    elif [ "$(env_get GUARDRAIL_SIEM_SSO_ISSUER)" = "$LEGACY_ISSUER" ]; then
+        # Only this one superseded literal is rewritten. An operator who set
+        # something of their own keeps it: the job is to correct a default nobody
+        # chose, never to overwrite a decision somebody made.
+        env_set GUARDRAIL_SIEM_SSO_ISSUER "$DEFAULT_ISSUER"
+        info "issuer updated to ${B}${DEFAULT_ISSUER}${R} ${D}(${LEGACY_ISSUER} is the DLP's, not the launcher's)${R}"
+    elif [ -z "$(env_get GUARDRAIL_SIEM_SSO_ISSUER)" ]; then
+        env_set GUARDRAIL_SIEM_SSO_ISSUER "$DEFAULT_ISSUER"
+    fi
     [ -n "$ORG" ]      && env_set GUARDRAIL_SIEM_SSO_ORG "$ORG"
     [ -n "$MAX_ROLE" ] && env_set GUARDRAIL_SIEM_SSO_MAX_ROLE "$MAX_ROLE"
     if [ -n "$SECRET" ]; then

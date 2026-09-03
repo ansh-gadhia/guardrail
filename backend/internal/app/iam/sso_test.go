@@ -871,3 +871,43 @@ func TestSSOLogin_ConfirmedFactorEndsTheOfferAndGatesTheLogin(t *testing.T) {
 		t.Fatal("the challenge lost the SSO marker, so the session after it would not be SIEM-vouched")
 	}
 }
+
+// The SIEM's exact wire vocabulary, taken from the integration contract:
+// role is one of administrator | L3-Analyst | L2-Analyst | L1-Analyst | read-only,
+// access is read-write | read-only.
+//
+// Every one of these must come back RECOGNISED, not merely land on a sensible
+// role by accident. Resolve's second return is what sync-on-login consults
+// before re-applying a role, so a spelling that falls through to the default
+// resolves correctly on the first sign-in and then quietly stops tracking the
+// SIEM for the rest of that account's life.
+func TestSSORoleMap_SIEMWireVocabulary(t *testing.T) {
+	m, err := NewSSORoleMap("", "")
+	if err != nil {
+		t.Fatalf("NewSSORoleMap: %v", err)
+	}
+	cases := []struct{ role, access, want string }{
+		{"administrator", "read-write", RoleOrgAdmin},
+		{"administrator", "read-only", RoleAuditor},
+		{"L3-Analyst", "read-write", RoleOperator},
+		{"L3-Analyst", "read-only", RoleAuditor},
+		{"L2-Analyst", "read-write", RoleOperator},
+		{"L2-Analyst", "read-only", RoleAuditor},
+		{"L1-Analyst", "read-write", RoleReadOnly},
+		{"L1-Analyst", "read-only", RoleReadOnly},
+		// The role claim is a ceiling, not a hint: read-write alongside a
+		// read-only tier does not buy a device connection.
+		{"read-only", "read-write", RoleReadOnly},
+		{"read-only", "read-only", RoleReadOnly},
+	}
+	for _, c := range cases {
+		got, recognised := m.Resolve(c.role, c.access)
+		if got != c.want {
+			t.Errorf("%s/%s: got %q, want %q", c.role, c.access, got, c.want)
+		}
+		if !recognised {
+			t.Errorf("%s/%s resolved to %q but was not recognised — sync-on-login would stop tracking it",
+				c.role, c.access, got)
+		}
+	}
+}

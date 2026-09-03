@@ -408,7 +408,7 @@ func Load() (*Config, error) {
 				JWKSURL:      getEnv("GUARDRAIL_SIEM_JWKS_URL", getEnv("SIEM_JWKS_URL", "")),
 				JWKSCABundle: getEnv("GUARDRAIL_SIEM_JWKS_CA_BUNDLE", getEnv("SIEM_JWKS_CA_BUNDLE", "")),
 				SharedSecret: getEnv("GUARDRAIL_SIEM_SSO_SECRET", getEnv("SIEM_SSO_SECRET", "")),
-				Issuer:       getEnv("GUARDRAIL_SIEM_SSO_ISSUER", "cybersentineldlp-siem"),
+				Issuer:       getEnv("GUARDRAIL_SIEM_SSO_ISSUER", "cybersentinel-siem"),
 				Audience:     getEnv("GUARDRAIL_SIEM_SSO_AUDIENCE", "guardrail-pam"),
 				JWKSCacheTTL: getDuration("GUARDRAIL_SIEM_JWKS_CACHE_TTL", 10*time.Minute),
 				ClockLeeway:  getDuration("GUARDRAIL_SIEM_SSO_CLOCK_LEEWAY", time.Minute),

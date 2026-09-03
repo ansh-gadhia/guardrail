@@ -280,7 +280,7 @@ services:
       # Leave empty. It enables HS256, which hands this container a key that can
       # FORGE the SIEM's assertions rather than only check them.
       GUARDRAIL_SIEM_SSO_SECRET: ${GUARDRAIL_SIEM_SSO_SECRET:-${SIEM_SSO_SECRET:-}}
-      GUARDRAIL_SIEM_SSO_ISSUER: ${GUARDRAIL_SIEM_SSO_ISSUER:-cybersentineldlp-siem}
+      GUARDRAIL_SIEM_SSO_ISSUER: ${GUARDRAIL_SIEM_SSO_ISSUER:-cybersentinel-siem}
       GUARDRAIL_SIEM_SSO_AUDIENCE: ${GUARDRAIL_SIEM_SSO_AUDIENCE:-guardrail-pam}
       GUARDRAIL_SIEM_JWKS_CACHE_TTL: ${GUARDRAIL_SIEM_JWKS_CACHE_TTL:-10m}
       GUARDRAIL_SIEM_SSO_CLOCK_LEEWAY: ${GUARDRAIL_SIEM_SSO_CLOCK_LEEWAY:-1m}
