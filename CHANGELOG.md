@@ -139,6 +139,27 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   in place resumes a running shell mid-way through different code.
 
 ### Fixed
+- **A fresh install could accept an admin password the server then refuses to
+  start on.** `ask_password` checked length and nothing else, while the server
+  runs `ValidatePassword` — length, a strength score, and a leet-tolerant common
+  word check — from `EnsureBootstrapAdmin`, and `main` turns a failure there into
+  a startup error. The result was an install that finished asking questions and
+  then sat in `wait_healthy` for a minute, with the real reason in
+  `docker compose logs api`. It landed on exactly the passwords someone
+  installing this reaches for first: `admin` and `guardrail` are both on the
+  common list, so `Guardrail2024!` — twelve characters, mixed case, digit,
+  symbol — was accepted here and refused there. The prompt now mirrors the
+  server's rubric and says which of the three rules was missed. Checked against
+  the Go implementation on 20 fixtures, including leet spellings: identical
+  score and verdict on every one.
+
+- **Host-side file modes are stated rather than inherited.** `enforce_modes` sets
+  every path the containers read — and it sets rather than checks, on install and
+  on update, so a server built by an older installer is repaired by running this
+  one again. `.env` stays 0600 and Traefik's key stays 0600; `deploy/siem`,
+  `deploy/postgres`, `deploy/traefik` and the migrations become readable to the
+  non-root users that actually open them.
+
 - **A leaked umask made the pinned SIEM certificate unreadable to the API.**
   `write_env` sets `umask 077` to protect `.env` — it holds the vault master key —
   and never restored it. umask is a property of the whole process, so every path

@@ -663,6 +663,57 @@ ask_port() { # ask_port VAR "Prompt" default
     done
 }
 
+# The server's password policy, mirrored from internal/domain/iam/password.go.
+#
+# Not belt-and-braces: EnsureBootstrapAdmin runs ValidatePassword and main turns
+# a failure into a startup error, so a password the server rejects is a stack
+# that NEVER COMES UP. The installer would then sit in wait_healthy for a minute
+# and give up, with the actual reason buried in `docker compose logs api`. Length
+# alone was checked here, which is two thirds of the rule.
+#
+# It matters most for exactly the passwords someone installing this reaches for:
+# "admin" and "guardrail" are both on the common-word list, so Guardrail2024! is
+# twelve characters, mixed case, digits, a symbol — and refused.
+pw_common() { # pw_common PW — true when built around a common word
+    local pw=$1 w re c i
+    for w in password letmein welcome admin administrator qwerty iloveyou \
+             monkey dragon sunshine princess guardrail changeme secret master; do
+        re=""
+        for ((i = 0; i < ${#w}; i++)); do
+            c=${w:i:1}
+            case "$c" in
+                a) re="${re}[a4@]" ;;  b) re="${re}[b8]" ;;    e) re="${re}[e3]" ;;
+                g) re="${re}[g9]" ;;   i) re="${re}[i1!|]" ;;  l) re="${re}[l1|]" ;;
+                o) re="${re}[o0]" ;;   s) re="${re}[s5\$]" ;;  t) re="${re}[t7+]" ;;
+                z) re="${re}[z2]" ;;   *) re="${re}${c}" ;;
+            esac
+        done
+        if printf '%s' "$pw" | grep -qiE -- "$re"; then return 0; fi
+    done
+    return 1
+}
+
+pw_score() { # pw_score PW — 0..4 on the server's rubric
+    local pw=$1 n=${#1} s=0 lo=0 up=0 di=0 sy=0 c i
+    if pw_common "$pw"; then printf '0'; return 0; fi
+    if [ "$n" -ge 8 ];  then s=$((s + 1)); fi
+    if [ "$n" -ge 12 ]; then s=$((s + 1)); fi
+    if [ "$n" -ge 20 ]; then s=$((s + 1)); fi
+    for ((i = 0; i < n; i++)); do
+        c=${pw:i:1}
+        case "$c" in
+            [a-z]) lo=1 ;;
+            [A-Z]) up=1 ;;
+            [0-9]) di=1 ;;
+            *)     sy=1 ;;
+        esac
+    done
+    if [ "$lo$up$di" = "111" ]; then s=$((s + 1)); fi
+    if [ "$sy" = "1" ];         then s=$((s + 1)); fi
+    if [ "$s" -gt 4 ];          then s=4; fi
+    printf '%s' "$s"
+}
+
 ask_password() { # ask_password VAR
     local __pw_var="$1" __pw_a="" __pw_b=""
     while true; do
@@ -672,6 +723,19 @@ ask_password() { # ask_password VAR
             # shorter than 12, so accepting one here would produce an install
             # that fails at boot with a message the operator never sees.
             warn "too short — the server refuses to start with fewer than 12 characters"
+            continue
+        fi
+        if pw_common "$__pw_a"; then
+            warn "built around a common word — the server scores this too weak and will not start"
+            info "${D}admin, guardrail, password, changeme and the like are refused however they are spelled${R}"
+            continue
+        fi
+        # 3 is StrengthGood, the weakest the platform accepts. Past 12 characters
+        # the rule comes down to one more point: mixed case with a digit, or a
+        # symbol, or length on its own at 20.
+        if [ "$(pw_score "$__pw_a")" -lt 3 ]; then
+            warn "too weak — the server asks for more than length alone, and will not start"
+            info "${D}add a capital, a digit and a symbol — or make it 20 characters or more${R}"
             continue
         fi
         read_secret __pw_b "  Confirm password: " || no_input
@@ -758,16 +822,10 @@ generate_cert() {
     # Where a pinned SIEM certificate goes, if single sign-on is wired up later.
     # Created empty on every install so the compose bind mount always has a real
     # directory to point at, and so an operator adding SSO afterwards has an
-    # obvious place to drop the file rather than inventing one.
-    #
-    # The mode is set explicitly rather than left to the ambient umask, and set on
-    # every run rather than only at creation: the api container reads this
-    # directory as a NON-ROOT user, so 0700 here is a permission error at boot
-    # that names a file which is plainly present. Stating it also repairs a
-    # deployment that already has the directory locked down. It holds a public
-    # certificate — a public key — so 0755 is the honest mode for it.
+    # obvious place to drop the file rather than inventing one. enforce_modes
+    # owns the mode of both directories below — see the note there for why it is
+    # never left to the umask.
     mkdir -p "$INSTALL_DIR/deploy/siem"
-    chmod 755 "$INSTALL_DIR/deploy/siem" 2>/dev/null || true
     local sans="DNS:localhost,IP:127.0.0.1"
     local ip; ip=$(host_ip)
     [ -n "$ip" ] && sans="$sans,IP:$ip"
@@ -1141,6 +1199,53 @@ prepare_dirs() {
     chmod 2770 "$GUACD_DIR" 2>/dev/null || true
 }
 
+# enforce_modes states the mode of every host-side path outright.
+#
+# Nothing here is left to the ambient umask. These files are read from inside
+# containers running as several different users — the API as a non-root user,
+# Traefik and Postgres as root, guacd under gid 1000 — so "whatever umask the
+# installer happened to be carrying" is never the right answer, and when it is
+# wrong the symptom is a permission error at boot naming a file that is plainly
+# present and that root can read. That is a bad afternoon.
+#
+# Called on install AND update, and it sets rather than checks, so a server built
+# by an older installer is repaired by running this one again.
+enforce_modes() {
+    [ -d "$INSTALL_DIR" ] || return 0
+    chmod 755 "$INSTALL_DIR" 2>/dev/null || true
+    [ -f "$ENV_FILE" ] && chmod 600 "$ENV_FILE" 2>/dev/null
+
+    # Traefik's key and certificate. Traefik is root, so the directory stays
+    # closed and the key's own 0600 is the protection that actually matters.
+    if [ -d "$INSTALL_DIR/deploy/tls" ]; then
+        chmod 700 "$INSTALL_DIR/deploy/tls" 2>/dev/null || true
+        [ -f "$INSTALL_DIR/deploy/tls/key.pem" ]  && chmod 600 "$INSTALL_DIR/deploy/tls/key.pem"  2>/dev/null
+        [ -f "$INSTALL_DIR/deploy/tls/cert.pem" ] && chmod 644 "$INSTALL_DIR/deploy/tls/cert.pem" 2>/dev/null
+    fi
+
+    # The SIEM's pinned certificate, opened by the API as a non-root user. A
+    # public key with nothing to hide, and 0700 here is a refusal to start.
+    if [ -d "$INSTALL_DIR/deploy/siem" ]; then
+        chmod 755 "$INSTALL_DIR/deploy/siem" 2>/dev/null || true
+        [ -f "$INSTALL_DIR/deploy/siem/jwks-ca.pem" ] &&
+            chmod 644 "$INSTALL_DIR/deploy/siem/jwks-ca.pem" 2>/dev/null
+    fi
+
+    # Traefik's routing rules, Postgres's bootstrap SQL, the migrations and the
+    # seed: all read from inside a container, none of them secret. a+rX adds the
+    # search bit to directories without making files executable.
+    local d
+    for d in deploy/traefik deploy/postgres backend; do
+        [ -d "$INSTALL_DIR/$d" ] && chmod -R a+rX "$INSTALL_DIR/$d" 2>/dev/null
+    done
+
+    local s
+    for s in install.sh siem-sso.sh migrate-data.sh; do
+        [ -f "$INSTALL_DIR/$s" ] && chmod 755 "$INSTALL_DIR/$s" 2>/dev/null
+    done
+    return 0
+}
+
 profiles() {
     local p=()
     # `if`, not `[ ] && ...`: under set -e a failing test as the whole statement
@@ -1383,6 +1488,7 @@ do_install() {
     prepare_dirs
     write_env
     generate_cert
+    enforce_modes
     start_stack
     wait_healthy
     mint_api_token
@@ -1435,6 +1541,9 @@ do_update() {
     # The cert has to name the tunnel domain, which may have just changed.
     generate_cert
     prepare_dirs
+    # Repairs a server built by an older installer, which is most of the value:
+    # the modes that were wrong were wrong at install time and stayed that way.
+    enforce_modes
 
     # A DNS resolver that was on and is now off has to be removed, not just left
     # out of the next `up` — compose would otherwise leave it running forever.
