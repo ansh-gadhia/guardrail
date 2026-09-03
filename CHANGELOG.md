@@ -12,6 +12,14 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 ### Security
+- **`golang.org/x/crypto` to v0.56.0** for GO-2026-6354 and GO-2026-6355, two
+  denial-of-service defects in `x/crypto/ssh` channel handling. Both were
+  reachable rather than theoretical: govulncheck traced them to
+  `sshgw.dial -> ssh.NewClientConn`, which is the SSH gateway's own dial path, so
+  the exposure was every SSH device GuardRail brokers to. `x/net`, `x/sync`,
+  `x/sys` and `x/text` come along as transitive bumps, and the vendor tree is
+  re-synced with them.
+
 - **The audit hash chain is now verifiable, and was not before.** The chain
   shipped in the first release and nothing had ever walked it, which is how two
   defects survived in it. It **forked**: each event linked to the tail found by
