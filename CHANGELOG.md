@@ -107,7 +107,48 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   the timeline and the authorization behind the entry are one click away instead
   of a search on another page. `session_id` is exposed on audit rows.
 
+### Added
+- **The installer updates itself, and installs itself.** `install.sh` now copies
+  itself to `/opt/guardrail/install.sh` alongside the other operator scripts, and
+  refreshes itself from the repository before it does anything else — at most one
+  hop, guarded by `GUARDRAIL_INSTALLER_REEXEC`, skipped inside a checkout or
+  when piped from curl, and disabled outright by `GUARDRAIL_NO_SELF_UPDATE=1`.
+  Updating a server is `sudo /opt/guardrail/install.sh` with no checkout and
+  nothing fetched by hand.
+
+  It closes a gap that could not be closed from the other end: `fetch_release`
+  brings down the new compose file, migrations and seed SQL, but the installer
+  itself carries the knowledge of which `.env` keys a release introduces and
+  which superseded values it corrects. A server re-running the copy it was
+  installed with fetched the new host files and applied the previous release's
+  rules to them — an update that reported success and did half the job.
+
+  A replacement is taken only if it arrives whole: shebang, `bash -n`, and an
+  exact match on the final line. The last check is the one that matters — a
+  download severed at a clean boundary parses perfectly and is still half a file,
+  and this is the file that then runs as root. Helpers are installed by rename
+  rather than by `cp`, because bash reads a script as it runs and overwriting one
+  in place resumes a running shell mid-way through different code.
+
 ### Fixed
+- **SIEM SSO accepted the wrong issuer.** The default `iss` was
+  `cybersentineldlp-siem`, which is the DLP's own issuer. Every SIEM launcher
+  console — WAF, URL-Filtering, SentinelAI and GuardRail — rides the launcher
+  plane, which signs as `cybersentinel-siem`, so a deployment on the old default
+  refused every genuine sign-in for a mismatch nobody chose. The default is now
+  `cybersentinel-siem`, and an upgrade rewrites that one superseded literal in
+  `.env` — a value an operator set themselves is left alone. `siem-sso.sh status`
+  names the fault outright when it finds the old string.
+
+- **`read-only` was not in the SIEM role vocabulary.** It resolved to the
+  Read-only floor by falling through the table rather than by being found in it,
+  so `Resolve` reported the role as unrecognised — and sync-on-login skips
+  re-applying a role it did not understand. The first sign-in was right and the
+  account then stopped tracking the SIEM for good. It is now a first-class tier
+  (`read-only`, `viewer`, `view-only`, `no-access`) that maps to Read-only in
+  **either** access mode: the role claim is a ceiling, not a hint, so a
+  `read-write` access claim alongside it buys nothing.
+
 - **A session that timed out left no trace in the audit log.** Both reapers —
   the grant window and the idle timeout — flipped the row and returned a count,
   so the log held `session.start` and then nothing: every timed-out session read

@@ -12,6 +12,12 @@
 #
 # Design notes worth knowing before editing:
 #
+#   * It installs ITSELF to $INSTALL_DIR and refreshes itself from the repository
+#     before doing anything else, then restarts. The installer is the only thing
+#     that knows which .env keys a release introduces and which superseded values
+#     it corrects, so a server re-running the copy it was installed with would
+#     fetch the new host files and apply last release's rules to them — an update
+#     that reports success and did half the job.
 #   * Host-side files (compose file, Traefik config, migrations, seed SQL) are
 #     fetched from the repository at the PINNED TAG, not from main. An installer
 #     that pulls a v1.1.2 image next to a main-branch compose file is how a
@@ -513,10 +519,19 @@ install_docker() {
 # installed by `curl | bash` — with no checkout anywhere on it — still has them.
 # Absent from an older ref, which is not an error: the installer's own job does
 # not depend on them.
+#
+# Written to a temporary file in the destination directory and then renamed, not
+# copied over the top. One of the files this installs is THIS INSTALLER, and bash
+# reads a script incrementally as it runs: `cp` keeps the inode and rewrites the
+# bytes underneath a running shell, which resumes at its old offset in the middle
+# of different code. A rename gives the new content a new inode and leaves the
+# running process reading the one it opened.
 install_helper() {
     [ -f "$1" ] || return 0
-    cp "$1" "$INSTALL_DIR/$(basename "$1")"
-    chmod 755 "$INSTALL_DIR/$(basename "$1")"
+    local name dest tmp
+    name=$(basename "$1"); dest="$INSTALL_DIR/$name"
+    tmp=$(mktemp "$INSTALL_DIR/.${name}.XXXXXX") || return 0
+    cat "$1" >"$tmp" && chmod 755 "$tmp" && mv -f "$tmp" "$dest" || { rm -f "$tmp"; return 0; }
 }
 
 fetch_release() {
@@ -539,6 +554,7 @@ fetch_release() {
         cp "$src_root/backend/db/seed.sql" "$INSTALL_DIR/backend/db/seed.sql"
         install_helper "$src_root/scripts/migrate-data.sh"
         install_helper "$src_root/scripts/siem-sso.sh"
+        install_helper "$src_root/scripts/install.sh"
     else
         local tmp; tmp=$(mktemp -d)
         # Images are published from main, so the host-side files come from a
@@ -566,6 +582,9 @@ fetch_release() {
         cp "$tmp/backend/db/seed.sql" "$INSTALL_DIR/backend/db/seed.sql"
         install_helper "$tmp/scripts/migrate-data.sh"
         install_helper "$tmp/scripts/siem-sso.sh"
+        # The installer itself, so the next update is `sudo /opt/guardrail/install.sh`
+        # and not a hunt for where the last one was run from.
+        install_helper "$tmp/scripts/install.sh"
         rm -rf "$tmp"
     fi
     ok "host files in place"
@@ -776,6 +795,20 @@ ensure_env_key() {
     info "added ${B}${key}${R} to the configuration ${D}(default: ${value:-blank})${R}"
 }
 
+# retire_env_default rewrites a key that still holds a value this release has
+# superseded — and only that value. A key holding anything else is left exactly
+# as it is: the point is to correct a default nobody chose, never to overwrite a
+# decision somebody made.
+retire_env_default() {
+    local key=$1 old=$2 new=$3 why=${4:-} tmp
+    grep -qE "^${key}=${old}\$" "$ENV_FILE" || return 0
+    tmp=$(mktemp)
+    awk -v k="$key" -v v="$new" -F= '$1==k {print k "=" v; next} {print}' "$ENV_FILE" >"$tmp"
+    cat "$tmp" >"$ENV_FILE"
+    rm -f "$tmp"
+    info "updated ${B}${key}${R} to ${B}${new}${R}${why:+ ${D}(${why})${R}}"
+}
+
 # migrate_env brings an older .env up to what this release expects. Add a line
 # here for every setting a release introduces; it is a no-op on a file that
 # already has it, so it is safe to leave in place across releases.
@@ -799,7 +832,14 @@ migrate_env() {
     ensure_env_key GUARDRAIL_SIEM_JWKS_CA_BUNDLE ""
     ensure_env_key GUARDRAIL_SIEM_SSO_ORG "" \
         "Which organization SIEM users land in, as a slug. Blank = the only one on this deployment."
-    ensure_env_key GUARDRAIL_SIEM_SSO_ISSUER cybersentineldlp-siem
+    ensure_env_key GUARDRAIL_SIEM_SSO_ISSUER cybersentinel-siem
+    # Every SIEM launcher console — WAF, URL-Filtering, SentinelAI, GuardRail —
+    # rides the launcher plane, which signs as cybersentinel-siem.
+    # cybersentineldlp-siem is the DLP's own issuer and was never the string a
+    # launcher token carries, so a deployment still holding it would reject every
+    # real sign-in for a mismatch it did not choose.
+    retire_env_default GUARDRAIL_SIEM_SSO_ISSUER cybersentineldlp-siem cybersentinel-siem \
+        "the SIEM launcher plane signs as cybersentinel-siem"
     ensure_env_key GUARDRAIL_SIEM_SSO_AUDIENCE guardrail-pam \
         "The aud this GuardRail accepts. Its own: do not share it with another product the SIEM signs tokens for."
     ensure_env_key GUARDRAIL_SIEM_SSO_SECRET "" \
@@ -927,7 +967,7 @@ GUARDRAIL_SIEM_SSO_SECRET=
 GUARDRAIL_SIEM_SSO_ORG=
 # Exact strings the token must carry. The audience is GuardRail's OWN: do not
 # reuse the value another product the SIEM signs for.
-GUARDRAIL_SIEM_SSO_ISSUER=cybersentineldlp-siem
+GUARDRAIL_SIEM_SSO_ISSUER=cybersentinel-siem
 GUARDRAIL_SIEM_SSO_AUDIENCE=guardrail-pam
 # Create the account on first sign-in; keep its role tracking the SIEM after.
 GUARDRAIL_SIEM_SSO_JIT_PROVISION=true
@@ -1532,8 +1572,75 @@ menu() {
     done
 }
 
+# self_update replaces this installer with the published one before it does
+# anything else, then restarts itself.
+#
+# The installer carries logic no other file does: which .env keys a release
+# introduces, and which superseded values it corrects. A server that re-runs the
+# copy it was installed with fetches the new host files and then applies LAST
+# release's rules to them — an update that reports success and quietly did half
+# the job. Fetching the host files but not the thing that knows what to do with
+# them is the one gap that cannot be closed from the other end.
+#
+# At most one hop: the replacement runs with GUARDRAIL_INSTALLER_REEXEC=1, so a
+# file that keeps comparing unequal — a mangled download, a local edit — costs one
+# wasted fetch instead of an endless loop of them.
+#
+# Skipped where there is nothing to update from: piped from curl (already the
+# current one), run from inside a checkout (the tree is the source of truth), or
+# GUARDRAIL_NO_SELF_UPDATE=1. Every failure is a no-op, never fatal: being offline
+# is a reason to carry on with the installer in hand, not to refuse to run.
+self_update() {
+    [ "${GUARDRAIL_INSTALLER_REEXEC:-0}" = "1" ] && return 0
+    [ "${GUARDRAIL_NO_SELF_UPDATE:-0}" = "1" ] && return 0
+    # Piped from curl, BASH_SOURCE inside a function is the literal "bash" — bound,
+    # so `set -u` is satisfied, and named explicitly here because `[ -f bash ]` is
+    # true in any directory that happens to hold a file by that name, and the
+    # branch below would then replace it.
+    local self="${BASH_SOURCE[0]:-}"
+    case "$self" in ""|bash|sh|-*) return 0 ;; esac
+    [ -f "$self" ] || return 0
+    [ -f "$(dirname "$self")/../docker-compose.yml" ] && return 0
+    have curl || return 0
+
+    local tmp; tmp=$(mktemp) || return 0
+    if ! curl -fsSL --max-time 20 \
+        "https://raw.githubusercontent.com/${REPO}/${REF}/scripts/install.sh" -o "$tmp" 2>/dev/null
+    then
+        rm -f "$tmp"; return 0
+    fi
+    # A truncated or half-written download must never replace a working
+    # installer: this is the file that would then be run as root.
+    #
+    # Both halves are load-bearing. `bash -n` catches a cut that lands mid-syntax
+    # — but a download severed at a clean boundary, right after some function's
+    # closing brace, parses perfectly and is still half a file. The last line is
+    # what proves the whole thing arrived, so it is checked as an exact match
+    # rather than a search: it is also the line that makes the script DO
+    # something, and a copy missing it installs nothing and reports no error.
+    if ! head -1 "$tmp" | grep -q '^#!/usr/bin/env bash' ||
+        [ "$(tail -n 1 "$tmp")" != 'main "$@"' ] ||
+        ! bash -n "$tmp" 2>/dev/null
+    then
+        rm -f "$tmp"; return 0
+    fi
+    if cmp -s "$tmp" "$self"; then rm -f "$tmp"; return 0; fi
+
+    # Beside the original, so the rename is atomic and within one filesystem.
+    local new="${self}.new.$$"
+    if ! { cat "$tmp" >"$new" && chmod 755 "$new" && mv -f "$new" "$self"; }; then
+        rm -f "$tmp" "$new"
+        warn "could not replace this installer — carrying on with the one in hand"
+        return 0
+    fi
+    rm -f "$tmp"
+    info "installer updated from ${B}${REF}${R} — restarting it"
+    GUARDRAIL_INSTALLER_REEXEC=1 exec "$self" "$@"
+}
+
 main() {
     need_root
+    self_update "$@"
     setup_input
     banner
     detect

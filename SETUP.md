@@ -113,6 +113,19 @@ bundled DNS resolver for the session tunnel, and whether to enable desktop
 (RDP/VNC) access. Everything else — the JWT signing key, the vault master key
 and both database passwords — is generated.
 
+The installer copies itself to `/opt/guardrail/install.sh`, so every later
+update is one command on the server with no checkout and nothing to fetch by
+hand:
+
+```bash
+sudo /opt/guardrail/install.sh      # then pick Update
+```
+
+It refreshes itself from the repository before it does anything else, so it is
+always the current installer that runs — which matters, because the installer is
+what knows which `.env` keys a release introduces and which superseded values it
+corrects. Set `GUARDRAIL_NO_SELF_UPDATE=1` to pin it to the copy on disk.
+
 Run it again at any time to reach the same menu:
 
 | Option | What it does |
