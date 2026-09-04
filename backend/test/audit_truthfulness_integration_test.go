@@ -96,8 +96,33 @@ func TestIntegration_RefusingToDisableRecordingIsAuditedAsDenied(t *testing.T) {
 	svc := appassets.NewService(postgres.NewDeviceRepo(pg), postgres.NewAssetGroupRepo(pg), postgres.NewAuditRepo(pg))
 	// Somebody who is neither the owner nor a super admin. They may edit the
 	// device; they may not touch its recording policy.
+	//
+	// They have to be a REAL user with real reach, not an invented UUID. Device
+	// reads are filtered to what the reader reaches, so a principal with no
+	// standing at all is refused earlier and with a different answer — not found
+	// rather than forbidden — and the denial this test exists to prove would
+	// never be reached. A team granting manage over every device is the shortest
+	// honest way to say "this person can see and edit the device".
+	tScope := domiam.TenantScope{OrganizationID: domiam.ID(defaultOrgID)}
+	strangerUser := &domiam.User{
+		ID: domiam.ID(uuid.New()), OrganizationID: domiam.ID(defaultOrgID),
+		Email:    domiam.NewEmail("rec-stranger-" + suffix + "@test.local"),
+		Username: "rec-stranger-" + suffix, AuthProvider: domiam.ProviderLocal, Status: "active",
+	}
+	if err := postgres.NewUserRepo(pg).Create(ctx, tScope, strangerUser); err != nil {
+		t.Fatalf("seed stranger: %v", err)
+	}
+	teams := postgres.NewTeamRepo(pg)
+	team := &domiam.Team{Name: "rec-strangers-" + suffix, AllDevicesLevel: domiam.AccessManage}
+	if err := teams.Create(ctx, tScope, team); err != nil {
+		t.Fatalf("seed team: %v", err)
+	}
+	if err := teams.SetMembers(ctx, tScope, team.ID, []domiam.ID{strangerUser.ID}); err != nil {
+		t.Fatalf("seed team member: %v", err)
+	}
 	stranger := domiam.Claims{
-		UserID: uuid.New(), OrganizationID: defaultOrgID, Email: "stranger@guardrail.local",
+		UserID: uuid.UUID(strangerUser.ID), OrganizationID: defaultOrgID,
+		Email: string(strangerUser.Email),
 	}
 	off := false
 	if _, err := svc.UpdateDevice(ctx, stranger, dev.ID, appassets.DeviceInput{

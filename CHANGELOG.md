@@ -11,7 +11,70 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 `GET /api/v1/version`, `GET /healthz`, and in the web UI footer.
 
 ## [Unreleased]
+### Added
+- **Teams — the second axis of device authorization.** Device reach already
+  existed, but it lived on the *role*: a role was `all` or `scoped`, and a scoped
+  role carried device types and asset groups. That conflated two questions an
+  organization answers separately — what may this person DO (connect, terminate,
+  download a recording, approve) and WHICH devices may they do it to. Saying "IT
+  reaches IT kit and security reaches security kit" with roles alone needs a role
+  per department per job function: IT Operator, IT Auditor, Security Operator,
+  Security Auditor, and another pair every time either axis grows — with the
+  permission set of "Operator" kept identical across all of them by hand.
+
+  A team is a named group of users; grants attach asset groups and device types
+  to it. Neither list grows when the other does.
+
+  Grants carry a level — `view` < `connect` < `manage`. A level is a **ceiling on
+  reach and never a grant of capability**: granting an Auditor `manage` over a
+  group gives them nothing new, because the Auditor role holds no `device:write`.
+  The two are ANDed at every enforcement point, which is what keeps this from
+  becoming a second permission system competing with RBAC.
+
+  The flexible cases were the point of the design, not an afterthought. Reach is
+  the **union** across a person's teams, taking the highest level per device, so
+  adding somebody to a second team can never remove what the first gave them —
+  otherwise "add them to the DR team as well" becomes a change that quietly
+  removes access somewhere else, discovered during the incident the DR team was
+  added for. A team may hold `view` on another team's tree and `manage` on its
+  own. `all_devices_level` gives an admin or platform team everything *including
+  devices registered later*; enumerating such a team against every group instead
+  produces a grant that decays as the estate grows and gives no sign that it has.
+  A group grant covers nested groups, because a tree that does not inherit cannot
+  be reorganised — moving a group under another would silently revoke it.
+
+  `team:read` / `team:write`, a Teams page in the console, and `GET|PUT
+  /teams/{id}/members` and `/grants` which replace the whole set rather than
+  patching rows: "this team reaches these four groups" is one decision, and an
+  API that adds and removes rows individually turns it into a sequence that can
+  be interrupted half-applied.
+
+  A user in no team is unaffected — their reach is exactly what their roles
+  already gave them.
+
 ### Security
+- **A scoped role could enumerate the entire device inventory.** The scope added
+  in 0009 was enforced in exactly one place — the connect path — and `ListDevices`
+  applied the tenant scope and nothing else. So a role restricted to two asset
+  groups still listed every device in the organization, with names, addresses,
+  ports and liveness, in the inventory, the dashboard counts and the
+  `/status/devices` feed consumed by external monitors. It was refused only at
+  the Connect button, which is not what anyone configuring a scoped role took it
+  to mean.
+
+  Device reads are now filtered to the caller's reach. The rule itself moved into
+  one SQL function (`app_device_reach`) that both the connect check and the
+  listing select from, because the two disagreeing is precisely how this
+  happened, and a rule written down twice will differ again.
+
+  **This changes what existing scoped-role users see on upgrade** — they will see
+  fewer devices, which is what the scope always said. Roles with `device_scope =
+  'all'`, including the seeded Organization Admin and Operator, are unaffected.
+  The one read deliberately exempted is a gateway resolving the endpoint of a
+  session that was already authorized: re-filtering there would let an
+  administrator editing a team break a session mid-flight, and break it as a
+  confusing connection error rather than as a session deliberately ended.
+
 - **`golang.org/x/crypto` to v0.56.0** for GO-2026-6354 and GO-2026-6355, two
   denial-of-service defects in `x/crypto/ssh` channel handling. Both were
   reachable rather than theoretical: govulncheck traced them to

@@ -107,6 +107,7 @@ var AllowedTokenScopes = map[string]struct{}{
 	"report:read":    {},
 	"user:read":      {},
 	"role:read":      {},
+	"team:read":      {},
 	"org:read":       {},
 }
 

@@ -26,7 +26,14 @@ func NewDeviceLookup(devices assets.DeviceRepository) *DeviceLookupAdapter {
 
 // Endpoint resolves a device to a connectable endpoint.
 func (a *DeviceLookupAdapter) Endpoint(ctx context.Context, s access.Scope, deviceID uuid.UUID) (access.Endpoint, error) {
-	d, err := a.devices.GetByID(ctx, assets.Scope{OrganizationID: s.OrganizationID, IsSuperAdmin: s.IsSuperAdmin}, deviceID)
+	// PostAuthorized: the caller is a gateway resolving an endpoint for a session
+	// the connect path already authorized, so there is no acting user to filter
+	// by here and re-filtering would be wrong anyway. See assets.Scope.
+	d, err := a.devices.GetByID(ctx, assets.Scope{
+		OrganizationID: s.OrganizationID,
+		IsSuperAdmin:   s.IsSuperAdmin,
+		PostAuthorized: true,
+	}, deviceID)
 	if err != nil {
 		if errors.Is(err, assets.ErrNotFound) {
 			return access.Endpoint{}, access.ErrNotFound

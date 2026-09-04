@@ -396,6 +396,7 @@ func run() error {
 		Users:    postgres.NewUserRepo(pg),
 		Orgs:     postgres.NewOrgRepo(pg),
 		Roles:    postgres.NewRoleRepo(pg),
+		Teams:    postgres.NewTeamRepo(pg),
 		Sessions: postgres.NewAuthSessionRepo(pg),
 		Hasher:   hasher,
 		Tokens:   issuer,

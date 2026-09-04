@@ -65,6 +65,28 @@ GET    /roles            POST /roles           PATCH/DELETE /roles/{id}
 GET    /permissions                            (catalogue)
 ```
 
+### Teams — which devices a person reaches
+```
+GET    /teams             POST /teams
+GET    /teams/{id}        PUT /teams/{id}       DELETE /teams/{id}
+GET    /teams/{id}/members      PUT /teams/{id}/members     (replaces the set)
+GET    /teams/{id}/grants       PUT /teams/{id}/grants      (replaces the set)
+```
+`team:read` / `team:write`. A role says what a person may DO; a team says WHICH
+devices they may do it to. Grants carry a level — `view` < `connect` < `manage` —
+which is a ceiling on reach and never a grant of capability: it only narrows what
+the role already permits.
+
+Membership and grants are replaced as a whole rather than patched one row at a
+time, because "this team reaches these four groups" is one decision, and an API
+that adds and removes rows individually turns it into a sequence that can be
+interrupted half-applied.
+
+A group grant covers the groups nested inside it. `all_devices_level` on the team
+itself is a blanket grant over every device including ones registered later —
+what an admin or platform team needs, and what enumerating groups cannot express
+without decaying as the estate grows.
+
 ### Assets
 ```
 GET    /devices?filter[vendor]=&filter[tag]=&sort=name

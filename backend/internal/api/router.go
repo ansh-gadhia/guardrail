@@ -97,6 +97,9 @@ func New(d Deps) (*gin.Engine, error) {
 			d.IAM.Register(apiV1, authMW)
 			// Machine tokens: issued and revoked here, verified by authMW above.
 			d.IAM.RegisterAPITokens(apiV1, authMW)
+			// Teams: which devices a person reaches, as against what their role
+			// lets them do. Same context as roles and users.
+			d.IAM.RegisterTeams(apiV1, authMW)
 		}
 		if d.Assets != nil {
 			d.Assets.Register(apiV1, authMW)

@@ -61,6 +61,11 @@ type Service struct {
 	ldap     iam.PasswordAuthenticator
 	fedOrgID iam.ID
 
+	// teams is optional only in the sense that a deployment can be wired without
+	// it; every handler checks for nil and reports the feature as unavailable
+	// rather than panicking on a half-built service.
+	teams iam.TeamRepository
+
 	// apiTokens is optional: without it, machine tokens are simply unavailable
 	// and every caller authenticates as a person.
 	apiTokens iam.APITokenRepository
@@ -106,6 +111,10 @@ type Deps struct {
 	LDAP            iam.PasswordAuthenticator
 	FederationOrgID iam.ID
 
+	// Teams: the second axis of device authorization. Leave nil to disable team
+	// management; existing role-based device scope is unaffected either way.
+	Teams iam.TeamRepository
+
 	// Optional machine-token wiring. Leave nil to disable API tokens entirely.
 	APITokens iam.APITokenRepository
 
@@ -136,6 +145,7 @@ func NewService(d Deps) *Service {
 		throttle: d.Throttle, clock: clock, cfg: d.Config,
 		mfa: d.MFA, totp: d.TOTP, cipher: d.Cipher, mfaChal: d.MFAChal, mfaIssuer: issuer,
 		oidc: d.OIDC, ldap: d.LDAP, fedOrgID: d.FederationOrgID,
+		teams:     d.Teams,
 		apiTokens: d.APITokens,
 		ssoVerify: d.SSOVerifier, replay: d.Replay, ssoRoles: d.SSORoles, ssoCfg: d.SSO,
 	}

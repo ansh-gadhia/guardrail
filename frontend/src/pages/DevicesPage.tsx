@@ -549,6 +549,12 @@ function DeviceCard({
   onDelete: () => void;
 }) {
   const blocked = !d.has_credential && !d.allow_unmanaged;
+  // The server resolved how far this viewer reaches the device. A 'view'
+  // grant is exactly the case where the device is legitimately listed and the
+  // connect would be refused, so offer the button disabled with the reason
+  // rather than one that fails. Devices reached at no level are not returned
+  // at all, so there is nothing to render for them here.
+  const viewOnly = d.access_level === "view";
   const stop = (fn: () => void) => (e: MouseEvent) => {
     e.stopPropagation();
     fn();
@@ -613,8 +619,14 @@ function DeviceCard({
         {canConnect && (
           <button
             className="btn-primary"
-            disabled={connecting || d.status !== "active" || blocked}
-            title={blocked ? "Bind a credential before connecting (or enable break-glass on the device)" : undefined}
+            disabled={connecting || d.status !== "active" || blocked || viewOnly}
+            title={
+              viewOnly
+                ? "Your team reaches this device at view level — you can see it but not connect to it"
+                : blocked
+                  ? "Bind a credential before connecting (or enable break-glass on the device)"
+                  : undefined
+            }
             onClick={stop(onConnect)}
           >
             <IconPlug size={15} /> Connect

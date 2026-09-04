@@ -183,6 +183,27 @@ var ErrForbidden = errors.New("assets: forbidden")
 type Scope struct {
 	OrganizationID uuid.UUID
 	IsSuperAdmin   bool
+	// UserID is who is asking, and it is required for every non-super-admin
+	// caller: device reads are filtered to what this user reaches (see
+	// app_device_reach in migration 0034), so a zero value reaches NOTHING.
+	//
+	// Fail-closed on purpose. The alternative — treating an unset id as "no
+	// filter" — means a caller that forgets to populate it silently returns the
+	// whole inventory to whoever asked, which is the failure this filter exists
+	// to prevent and the one least likely to be noticed in review.
+	UserID uuid.UUID
+	// PostAuthorized marks a read that FOLLOWS an authorization decision already
+	// made, and must therefore not be filtered by reach a second time.
+	//
+	// There is exactly one such read: a gateway resolving the endpoint of a
+	// session that CanAccessDevice already approved. Filtering it would mean an
+	// administrator editing a team could break a session that is mid-flight, and
+	// break it badly — the gateway would fail to resolve a device that plainly
+	// exists, surfacing as a connection error rather than as a session being
+	// deliberately ended. Whether an entitlement change should terminate live
+	// sessions is a real question, but the answer to it is a session reaper that
+	// says so, not an endpoint lookup that quietly stops working.
+	PostAuthorized bool
 }
 
 // Device is a target HTTP/HTTPS administrative interface.
@@ -256,6 +277,12 @@ type Device struct {
 	// Health is the device's last observed liveness, maintained by the health
 	// poller. Nil when the device has never been probed.
 	Health *Health
+	// AccessLevel is the READING user's effective reach for this device —
+	// "view", "connect", "manage" or "none" — resolved per request rather than
+	// stored. It is what lets the console grey out a Connect button instead of
+	// offering one that will be refused, and it is a read model only: nothing
+	// writes it, and it means nothing on a device the caller is constructing.
+	AccessLevel string
 }
 
 // Credential modes. See Device.CredentialMode.

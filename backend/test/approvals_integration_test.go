@@ -47,8 +47,12 @@ func newApprovalFixture(t *testing.T, pg *postgres.DB) *approvalFixture {
 		devices:  postgres.NewDeviceRepo(pg),
 		users:    postgres.NewUserRepo(pg),
 		scope:    domaccess.Scope{OrganizationID: defaultOrgID},
-		aScope:   domassets.Scope{OrganizationID: defaultOrgID},
-		tScope:   domiam.TenantScope{OrganizationID: defaultOrgID},
+		// PostAuthorized: this fixture reads devices back to assert what was
+		// PERSISTED, which is not an authorization question. Without it the read
+		// is filtered by the fixture user's device reach — correct for a request
+		// arriving from a browser, and beside the point for a round-trip test.
+		aScope: domassets.Scope{OrganizationID: defaultOrgID, PostAuthorized: true},
+		tScope: domiam.TenantScope{OrganizationID: defaultOrgID},
 	}
 }
 

@@ -58,6 +58,22 @@ erDiagram
 - **recovery_codes**(`id`, `user_id` FK, `code_hash`, `used_at`)
 - **auth_sessions**(`id`, `user_id` FK, `refresh_token_hash`, `user_agent`,
   `ip`, `expires_at`, `revoked_at`, `created_at`) — refresh-token family for rotation
+- **teams**(`id`, `organization_id` FK, `name` UQ-per-org-ci, `description`,
+  `all_devices_level` (view/connect/manage, NULL = no blanket grant), timestamps)
+  — the second axis of device authorization: a role says what a person may do, a
+  team says which devices they may do it to
+- **team_members**(`team_id`, `user_id`, `added_at`) PK(team, user) — a user may
+  be in several teams and reach is their **union**, so a second team never
+  removes what the first gave
+- **team_asset_groups**(`team_id`, `asset_group_id`, `access_level`) PK both —
+  covers nested groups, so a tree can be reorganised without silently revoking
+- **team_device_types**(`team_id`, `device_type`, `access_level`) PK both
+
+`app_device_reach(user_id)` is the single definition of what a user reaches,
+returning one row per device with the highest rank any of their roles or teams
+confers. Both the connect check and the device listing select from it; they
+previously carried the rule separately and disagreed, which let a scoped role
+enumerate the whole inventory.
 
 ### Assets
 - **devices**(`id`, `organization_id` FK, `name`, `description`, `vendor`,

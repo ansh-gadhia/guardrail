@@ -8,6 +8,7 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { DevicesPage } from "./pages/DevicesPage";
 import { DeviceDetailPage } from "./pages/DeviceDetailPage";
 import { AccessPage } from "./pages/AccessPage";
+import { TeamsPage } from "./pages/TeamsPage";
 import { SessionsPage } from "./pages/SessionsPage";
 import { SessionViewPage } from "./pages/SessionViewPage";
 import { RecordingsPage } from "./pages/RecordingsPage";
@@ -94,6 +95,7 @@ export default function App() {
         <Route path="/devices" element={<DevicesPage />} />
         <Route path="/devices/:id" element={<DeviceDetailPage />} />
         <Route path="/access" element={<AccessPage />} />
+        <Route path="/teams" element={<TeamsPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
         <Route path="/sessions/:id/view" element={<SessionViewPage />} />
         <Route path="/recordings" element={<RecordingsPage />} />

@@ -31,6 +31,42 @@ const deviceCols = `d.id, d.organization_id, d.name, d.description, d.vendor, d.
 // tracked in a separate table so probing never churns devices.updated_at.
 const deviceFrom = ` FROM devices d LEFT JOIN device_health h ON h.device_id = d.id`
 
+// Device reads are filtered to the caller's reach, and carry the level they
+// reach each row at. Both come from app_device_reach() (migration 0034), which
+// is the single definition of the rule the connect check also uses.
+//
+// A super admin is exempt: that role exists to read across tenants and already
+// bypasses RLS, so filtering it here would be a restriction no other part of the
+// system applies to it. Everyone else is filtered, including on a zero UserID —
+// which reaches nothing. See the note on assets.Scope.UserID for why that
+// direction is the safe one.
+
+// reachLevelCol is the trailing select column carrying the caller's level.
+func reachLevelCol(s assets.Scope, argN int) string {
+	if s.IsSuperAdmin || s.PostAuthorized {
+		return `, 'manage'`
+	}
+	return `, COALESCE((SELECT app_access_level(r.access_rank) FROM app_device_reach($` +
+		strconv.Itoa(argN) + `) r WHERE r.device_id = d.id), 'none')`
+}
+
+// reachFilter is the predicate restricting rows to what the caller reaches.
+func reachFilter(s assets.Scope, argN int) string {
+	if s.IsSuperAdmin || s.PostAuthorized {
+		return ""
+	}
+	return ` AND EXISTS (SELECT 1 FROM app_device_reach($` + strconv.Itoa(argN) +
+		`) r WHERE r.device_id = d.id)`
+}
+
+// reachArgs is the argument list the two fragments above consume.
+func reachArgs(s assets.Scope) []any {
+	if s.IsSuperAdmin || s.PostAuthorized {
+		return nil
+	}
+	return []any{s.UserID}
+}
+
 func scanDevice(row pgx.Row) (*assets.Device, error) {
 	var d assets.Device
 	var headers []byte
@@ -42,7 +78,7 @@ func scanDevice(row pgx.Row) (*assets.Device, error) {
 		&d.Host, &d.Port, &d.Scheme, &d.VerifyTLS, &headers, &d.Tags, &d.Status,
 		&d.AllowUnmanaged, &d.RecordSessions, &d.RecordingKinds, &d.DeliveryMode, &d.IdleTimeoutMinutes,
 		&d.CredentialMode, &d.RequiresApproval, &d.MinApprovals, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
-		&hStatus, &hCheckedAt, &hLatency, &hFailures, &hLastError); err != nil {
+		&hStatus, &hCheckedAt, &hLatency, &hFailures, &hLastError, &d.AccessLevel); err != nil {
 		return nil, err
 	}
 	if len(headers) > 0 {
@@ -123,7 +159,9 @@ func (r *DeviceRepo) Update(ctx context.Context, s assets.Scope, d *assets.Devic
 func (r *DeviceRepo) GetByID(ctx context.Context, s assets.Scope, id uuid.UUID) (*assets.Device, error) {
 	var d *assets.Device
 	err := r.db.WithScopeIDs(ctx, s.OrganizationID, s.IsSuperAdmin, func(tx pgx.Tx) error {
-		row := tx.QueryRow(ctx, `SELECT `+deviceCols+deviceFrom+` WHERE d.id=$1 AND d.deleted_at IS NULL`, id)
+		args := append([]any{id}, reachArgs(s)...)
+		row := tx.QueryRow(ctx, `SELECT `+deviceCols+reachLevelCol(s, 2)+deviceFrom+
+			` WHERE d.id=$1 AND d.deleted_at IS NULL`+reachFilter(s, 2), args...)
 		var e error
 		d, e = scanDevice(row)
 		if errors.Is(e, pgx.ErrNoRows) {
@@ -139,9 +177,12 @@ func (r *DeviceRepo) List(ctx context.Context, s assets.Scope, f assets.Filter) 
 	limit := normalizeLimit(f.Limit)
 	var out []assets.Device
 	err := r.db.WithScopeIDs(ctx, s.OrganizationID, s.IsSuperAdmin, func(tx pgx.Tx) error {
-		q := `SELECT ` + deviceCols + deviceFrom + ` WHERE d.deleted_at IS NULL`
-		args := []any{}
-		i := 1
+		args := reachArgs(s)
+		i := len(args) + 1
+		// The reach argument is $1 whenever there is one, so the filter
+		// placeholders below start after it.
+		q := `SELECT ` + deviceCols + reachLevelCol(s, 1) + deviceFrom +
+			` WHERE d.deleted_at IS NULL` + reachFilter(s, 1)
 		if f.Vendor != "" {
 			q += ` AND d.vendor = $` + strconv.Itoa(i)
 			args = append(args, f.Vendor)
@@ -217,7 +258,8 @@ func nonNilTags(t []string) []string {
 func (r *DeviceRepo) Count(ctx context.Context, s assets.Scope) (int, error) {
 	var n int
 	err := r.db.WithScopeIDs(ctx, s.OrganizationID, s.IsSuperAdmin, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM devices WHERE deleted_at IS NULL`).Scan(&n)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM devices d WHERE d.deleted_at IS NULL`+
+			reachFilter(s, 1), reachArgs(s)...).Scan(&n)
 	})
 	return n, err
 }

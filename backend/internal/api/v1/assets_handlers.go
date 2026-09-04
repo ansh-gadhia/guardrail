@@ -218,7 +218,12 @@ func deviceDTO(d *domassets.Device, actor iam.Claims, hasCredential bool, cred *
 		// and says so, rather than leaving the console to re-derive the rule and
 		// risk disagreeing with what the API will actually allow.
 		"can_set_recording": d.CanSetRecording(actor.UserID, actor.IsSuperAdmin),
-		"created_at":        rfc3339UTC(d.CreatedAt),
+		// How far THIS viewer reaches this device: "view", "connect" or
+		// "manage". The console uses it to render a Connect button that is
+		// disabled rather than one that fails, and it is resolved server-side so
+		// the two cannot disagree about the answer.
+		"access_level": d.AccessLevel,
+		"created_at":   rfc3339UTC(d.CreatedAt),
 	}
 	if cred != nil {
 		out["credential"] = gin.H{

@@ -20,6 +20,7 @@ tags:
   - name: Vault
   - name: Access
   - name: Approvals
+  - name: Teams
   - name: Analytics
   - name: Notifications
   - name: Ops
@@ -455,6 +456,143 @@ paths:
       responses:
         "200": { description: Denied }
 
+  /teams:
+    get:
+      tags: [Teams]
+      summary: List teams
+      description: >
+        A team is the second axis of device authorization: a role says what a
+        person may do, a team says which devices they may do it to.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Team" } }
+    post:
+      tags: [Teams]
+      summary: Create a team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TeamInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Team" }
+
+  /teams/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Teams]
+      summary: Get a team
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Team" }
+    put:
+      tags: [Teams]
+      summary: Update a team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TeamInput" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Team" }
+    delete:
+      tags: [Teams]
+      summary: Delete a team, and with it the reach it granted
+      responses:
+        "204": { description: Deleted }
+
+  /teams/{id}/members:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Teams]
+      summary: List a team's members
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        user_id: { type: string, format: uuid }
+                        email: { type: string }
+                        status: { type: string }
+                        added_at: { type: string, format: date-time }
+    put:
+      tags: [Teams]
+      summary: Replace a team's membership
+      description: >
+        The complete membership after the call. An empty array empties the team;
+        omitting the key is rejected, because "no key" and "no members" would
+        otherwise be indistinguishable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids]
+              properties:
+                user_ids: { type: array, items: { type: string, format: uuid } }
+      responses:
+        "200": { description: OK }
+
+  /teams/{id}/grants:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Teams]
+      summary: Get a team's device grants
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamGrants" }
+    put:
+      tags: [Teams]
+      summary: Replace a team's device grants
+      description: >
+        Replaced as a whole, not patched: "this team reaches these four groups"
+        is one decision, and adding or removing rows individually turns it into a
+        sequence that can be interrupted half-applied. A group grant covers the
+        groups nested inside it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TeamGrants" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamGrants" }
+
   /credentials:
     post:
       tags: [Vault]
@@ -615,6 +753,62 @@ components:
             id: { type: string, format: uuid }
             status: { type: string }
             url: { type: string }
+            access_level:
+              type: string
+              enum: [view, connect, manage]
+              description: >
+                How far the CALLER reaches this device, resolved per request.
+                Devices the caller reaches at no level are not returned at all.
+    AccessLevel:
+      type: string
+      enum: [view, connect, manage]
+      description: >
+        How far a grant reaches, ordered view < connect < manage. A CEILING on
+        reach and never a grant of capability: what may actually be done to a
+        device still comes from the caller's role permissions, so a team granting
+        "manage" gives an Auditor nothing new.
+    TeamInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, example: IT }
+        description: { type: string }
+        all_devices_level:
+          type: string
+          enum: [none, view, connect, manage]
+          default: none
+          description: >
+            A blanket grant over every device in the organization, INCLUDING ones
+            registered later. What an admin or platform team needs; enumerating
+            such a team against every asset group instead produces a grant that
+            decays as the estate grows.
+    Team:
+      allOf:
+        - $ref: "#/components/schemas/TeamInput"
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            member_count: { type: integer }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    TeamGrants:
+      type: object
+      properties:
+        groups:
+          type: array
+          items:
+            type: object
+            properties:
+              asset_group_id: { type: string, format: uuid }
+              name: { type: string, readOnly: true }
+              level: { $ref: "#/components/schemas/AccessLevel" }
+        device_types:
+          type: array
+          items:
+            type: object
+            properties:
+              device_type: { type: string, example: firewall }
+              level: { $ref: "#/components/schemas/AccessLevel" }
     Session:
       type: object
       properties:

@@ -32,6 +32,66 @@ curl -s "${auth[@]}" -X POST $BASE/users -H 'Content-Type: application/json' \
 Roles come from a granular permission catalogue (`device:connect`, `session:read`,
 `approval:decide`, `log:read`, …). The UI hides actions the principal can't perform.
 
+### Teams — which devices each department reaches
+
+A role answers *what may this person do*. A team answers *which devices they may
+do it to*. They are separate on purpose: expressing "IT reaches IT kit, security
+reaches security kit" with roles alone means a role per department per job
+function — IT Operator, IT Auditor, Security Operator, Security Auditor — and
+another pair every time either list grows.
+
+Create a team, put people in it, and grant it asset groups:
+
+```bash
+# One team per department.
+curl -s "${auth[@]}" -X POST $BASE/teams -H 'Content-Type: application/json' \
+  -d '{"name":"IT","description":"Network and server estate"}'
+
+curl -s "${auth[@]}" -X PUT $BASE/teams/<team-id>/members \
+  -H 'Content-Type: application/json' -d '{"user_ids":["<user-id>", "..."]}'
+
+curl -s "${auth[@]}" -X PUT $BASE/teams/<team-id>/grants \
+  -H 'Content-Type: application/json' -d '{
+    "groups": [{"asset_group_id":"<it-group-id>", "level":"connect"}],
+    "device_types": [{"device_type":"switch", "level":"manage"}]
+  }'
+```
+
+**Levels.** `view` < `connect` < `manage`.
+
+| Level | The devices are | A session can be brokered | They can be edited |
+|---|:--:|:--:|:--:|
+| `view` | listed | — | — |
+| `connect` | listed | ✔ | — |
+| `manage` | listed | ✔ | ✔ |
+
+A level is a **ceiling on reach, never a grant of capability**. Granting an
+Auditor `manage` over a group gives them nothing new, because the Auditor role
+holds no `device:write`. Reach and permission are ANDed: "can I do X to device D"
+is always *does my role permit X* **and** *does my reach cover D at a level that
+covers X*.
+
+**Devices you do not reach are not listed at all** — not in the inventory, the
+dashboard counts, or `/status/devices`. This is what makes a `view` grant
+meaningful: it is the level that says "you may see this and not touch it", as
+distinct from not knowing it exists.
+
+**Flexibility.** Teams overlap freely and reach is the **union**, taking the
+highest level per device — so adding somebody to a second team can never remove
+what the first gave them. That is what covers the awkward cases:
+
+- The security team can be granted `view` over the IT tree and `manage` over its
+  own, so it can see the firewalls it audits without being able to log into them.
+- An admin or platform team gets `all_devices_level` — a blanket grant over
+  everything, *including devices registered later*. Enumerating such a team
+  against every group instead produces a grant that silently stops covering new
+  kit as the estate grows.
+- A group grant covers the groups **nested inside it**, so the tree can be
+  reorganised without silently revoking access.
+
+Somebody in no team is unaffected: their reach is whatever their roles already
+gave them, which is how every deployment behaved before teams existed.
+
 ## 3. Register a device (target admin UI)
 
 A "device" is any HTTP/HTTPS management interface — firewall, switch, WLC,

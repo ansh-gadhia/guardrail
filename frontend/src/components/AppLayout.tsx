@@ -15,7 +15,7 @@ import { Menu, MenuItem, Badge, cn } from "./ui";
 import {
   IconDashboard, IconDevices, IconSessions, IconSliders, IconAudit, IconShield,
   IconLogout, IconBell, IconSun, IconMoon, IconMenu, IconChevronsLeft, IconSearch, IconX, IconActivity, IconFilm, IconGlobe, IconCheck,
-  IconSettings,
+  IconSettings, IconUsers,
 } from "./icons";
 
 type IconType = ComponentType<{ size?: number; className?: string }>;
@@ -30,6 +30,8 @@ const NAV: NavItem[] = [
   // narrows itself to their own rows for anybody without approval:read.
   { to: "/approvals", label: "Approvals", icon: IconCheck, section: "Governance" },
   { to: "/access", label: "Access Control", icon: IconSliders, perm: "user:read", section: "Governance" },
+  // Which devices each team reaches, as against what a role lets a person do.
+  { to: "/teams", label: "Teams", icon: IconUsers, perm: "team:read", section: "Governance" },
   { to: "/access-log", label: "Access Log", icon: IconActivity, perm: "user:read", section: "Governance" },
   { to: "/audit", label: "Audit Log", icon: IconAudit, perm: "log:read", section: "Governance" },
   { to: "/security", label: "Account", icon: IconShield, section: "Governance" },

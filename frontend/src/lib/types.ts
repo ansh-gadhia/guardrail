@@ -78,6 +78,10 @@ export interface Device {
   tags: string[];
   status: string;
   url: string;
+  // How far THIS viewer reaches this device, resolved server-side. The console
+  // uses it to disable a Connect button rather than offer one that will be
+  // refused; devices the viewer does not reach at all are not returned.
+  access_level: AccessLevel;
   // Whether a credential is bound to this device (server-injected on connect).
   has_credential: boolean;
   // Break-glass: allow connecting with no bound credential (no injection).
@@ -286,6 +290,58 @@ export interface Role {
   // STRICTLY — which is also what makes self-approval impossible, since nobody
   // outranks themselves.
   approval_level: number;
+}
+
+// AccessLevel is how far a grant reaches into the devices it covers, ordered
+// view < connect < manage. It is a CEILING on reach and never a grant of
+// capability: what you may do to a device you reach still comes from your role's
+// permissions, so a team granting "manage" gives an Auditor nothing new.
+export type AccessLevel = "none" | "view" | "connect" | "manage";
+
+export const ACCESS_LEVELS: { value: Exclude<AccessLevel, "none">; label: string; hint: string }[] = [
+  { value: "view", label: "View", hint: "the devices are visible in the inventory — nothing more" },
+  { value: "connect", label: "Connect", hint: "visible, and a session may be brokered to them" },
+  { value: "manage", label: "Manage", hint: "visible, connectable, and editable" },
+];
+
+// A team is the second axis of device authorization: a role says what a person
+// may DO, a team says WHICH devices they may do it to. Membership of several
+// teams is a union — a second team never takes away what the first gave.
+export interface Team {
+  id: string;
+  name: string;
+  description: string;
+  // A blanket grant over every device in the organization, including ones
+  // registered later. "none" means no blanket grant, which is the usual case.
+  all_devices_level: AccessLevel;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TeamMember {
+  user_id: string;
+  email: string;
+  status: string;
+  added_at: string;
+}
+
+export interface TeamGroupGrant {
+  asset_group_id: string;
+  name: string;
+  level: Exclude<AccessLevel, "none">;
+}
+
+export interface TeamTypeGrant {
+  device_type: string;
+  level: Exclude<AccessLevel, "none">;
+}
+
+// A team's whole grant set, read and written as a unit — "the IT team reaches
+// these four groups" is one decision, not four.
+export interface TeamGrants {
+  groups: TeamGroupGrant[];
+  device_types: TeamTypeGrant[];
 }
 
 // AssetGroup is a folder of devices (GET /asset-groups) — the unit a role can be

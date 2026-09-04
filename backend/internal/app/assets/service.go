@@ -115,7 +115,14 @@ func minApprovalsOrDefault(n *int) int {
 type ReqMeta struct{ IP, UserAgent string }
 
 func scopeOf(a iam.Claims) assets.Scope {
-	return assets.Scope{OrganizationID: a.OrganizationID, IsSuperAdmin: a.IsSuperAdmin}
+	// UserID is not optional here: device reads are filtered to what this user
+	// reaches, so dropping it would return an empty inventory rather than an
+	// unfiltered one. See assets.Scope.UserID.
+	return assets.Scope{
+		OrganizationID: a.OrganizationID,
+		IsSuperAdmin:   a.IsSuperAdmin,
+		UserID:         a.UserID,
+	}
 }
 
 // CreateDevice registers a new device. The registering user becomes its owner
