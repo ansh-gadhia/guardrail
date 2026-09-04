@@ -11,7 +11,32 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 `GET /api/v1/version`, `GET /healthz`, and in the web UI footer.
 
 ## [Unreleased]
+
+## [1.3.0] - 2026-09-04
+
+> This section covers everything since **1.0.0**. Releases 1.1.x and 1.2.0 were
+> tagged without their own changelog entries — the version was bumped, the
+> entries were left under `[Unreleased]`, and nothing reconciled the two. Rather
+> than invent a split after the fact and guess which change shipped in which
+> tag, the accumulated entries are dated here as one release.
+> `scripts/release.sh` exists so this cannot happen again: it moves the version
+> in every file that carries one and dates the changelog in the same step, and
+> `--check` fails CI if the three ever disagree.
 ### Added
+- **`scripts/release.sh`, and a CI gate that fails when the version files
+  disagree.** The version lives in three places and always will: `VERSION` is the
+  source of truth, `scripts/install.sh` carries a default so `curl … | sudo bash`
+  works with no checkout, and the changelog has to name the version it describes.
+  Three files updated by hand is a guarantee they will drift, and they had: the
+  version reached 1.2.0 while every change since 1.0.0 sat under `[Unreleased]`,
+  so two releases shipped with no record of what was in them and nothing failed
+  at the time.
+
+  `make release BUMP=minor` moves all three in one step and dates the changelog;
+  `make version-check` (and the `version` job in CI) refuses a build where they
+  disagree. It writes files and stops — committing, tagging and pushing stay
+  manual, because those are the steps that reach other people.
+
 - **Teams — the second axis of device authorization.** Device reach already
   existed, but it lived on the *role*: a role was `all` or `scoped`, and a scoped
   role carried device types and asset groups. That conflated two questions an

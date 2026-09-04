@@ -90,5 +90,11 @@ seed: ## Load seed data (permissions, system roles, default org)
 	docker compose run --rm seed
 
 .PHONY: clean
+release: ## Cut a release: make release BUMP=minor (or major|patch|X.Y.Z)
+	@scripts/release.sh $(or $(BUMP),patch)
+
+version-check: ## Verify VERSION, the installer default and the CHANGELOG agree
+	@scripts/release.sh --check
+
 clean: ## Remove build artifacts
 	rm -rf bin $(BACKEND_DIR)/coverage.out

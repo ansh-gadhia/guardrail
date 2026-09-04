@@ -12,6 +12,19 @@ permissions:
   contents: read
 
 jobs:
+  # A cheap gate ahead of everything else: the version lives in VERSION, in the
+  # installer's no-checkout default and in the changelog's released sections,
+  # and those three drifted apart once already — VERSION reached 1.2.0 while
+  # every change since 1.0.0 was still sitting under [Unreleased], so two
+  # releases shipped with no record of what was in them. Nothing failed at the
+  # time, which is exactly why it needs a check rather than a convention.
+  version:
+    name: version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/release.sh --check
+
   backend:
     name: Backend (lint, test, build)
     runs-on: ubuntu-latest

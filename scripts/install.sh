@@ -34,7 +34,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 APP_NAME="GuardRail"
 REPO="${GUARDRAIL_REPO:-ansh-gadhia/guardrail}"
-VERSION="${GUARDRAIL_VERSION:-1.2.0}"
+VERSION="${GUARDRAIL_VERSION:-1.3.0}"
 # Which git ref the host-side files come from. Images are published from main, so
 # main is the default; set it to a tag or a commit to install a fixed point.
 REF="${GUARDRAIL_REF:-main}"
