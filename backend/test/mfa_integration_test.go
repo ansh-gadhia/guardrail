@@ -32,6 +32,7 @@ func TestIntegration_MFARepo(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
+	trackUser(t, userID)
 
 	// Not enrolled yet.
 	if _, err := repo.Get(ctx, userID); err == nil {

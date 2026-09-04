@@ -34,6 +34,7 @@ func TestIntegration_AnalyticsDashboardSearchAudit(t *testing.T) {
 	if err := postgres.NewDeviceRepo(pg).Create(ctx, domassets.Scope{OrganizationID: defaultOrgID}, dev); err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
+	trackDevice(t, dev.ID)
 
 	// Dashboard: device count must be >= 1 now.
 	sum, err := repo.Dashboard(ctx, scope)

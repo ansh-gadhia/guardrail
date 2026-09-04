@@ -67,7 +67,7 @@ func (f *approvalFixture) user(t *testing.T, ctx context.Context, name string) u
 	if err := f.users.Create(ctx, f.tScope, u); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	return u.ID
+	return trackUser(t, u.ID)
 }
 
 func (f *approvalFixture) device(t *testing.T, ctx context.Context, minApprovals int) *domassets.Device {
@@ -81,6 +81,7 @@ func (f *approvalFixture) device(t *testing.T, ctx context.Context, minApprovals
 	if err := f.devices.Create(ctx, f.aScope, d); err != nil {
 		t.Fatalf("create device: %v", err)
 	}
+	trackDevice(t, d.ID)
 	return d
 }
 
@@ -615,6 +616,7 @@ func TestIntegration_NonSuperAdminApproverCarriesRealRank(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create approver: %v", err)
 	}
+	trackUser(t, boss.UserID)
 	op, err := svc.CreateUser(ctx, actor, appiam.CreateUserInput{
 		Email: "op-" + uuid.NewString()[:8] + "@example.com", Username: "op",
 		Password: "IntegrationPass123!", RoleIDs: []domiam.ID{operatorRole},
@@ -622,6 +624,7 @@ func TestIntegration_NonSuperAdminApproverCarriesRealRank(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create requester: %v", err)
 	}
+	trackUser(t, op.UserID)
 
 	// The ranks a sign-in would actually put on the token.
 	if boss.ApprovalLevel != 50 {
@@ -653,6 +656,7 @@ func TestIntegration_NonSuperAdminApproverCarriesRealRank(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create peer: %v", err)
 	}
+	trackUser(t, peer.UserID)
 	req2 := f.request(t, ctx, op.UserID, d.ID, op.ApprovalLevel, 1)
 	if _, err := f.requests.AddDecision(ctx, f.scope, req2.ID, peer.UserID,
 		domaccess.Decision{Decision: domaccess.DecisionApprove}, peer.ApprovalLevel, false); !errors.Is(err, domaccess.ErrCannotDecide) {

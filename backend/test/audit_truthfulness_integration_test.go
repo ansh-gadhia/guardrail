@@ -82,6 +82,7 @@ func TestIntegration_RefusingToDisableRecordingIsAuditedAsDenied(t *testing.T) {
 		domiam.TenantScope{OrganizationID: domiam.ID(defaultOrgID)}, ownerUser); err != nil {
 		t.Fatalf("seed owner: %v", err)
 	}
+	trackUser(t, ownerUser.ID)
 	owner := uuid.UUID(ownerUser.ID)
 	dev := &domassets.Device{
 		ID: uuid.New(), OrganizationID: defaultOrgID, Name: "rec-" + suffix,
@@ -92,6 +93,7 @@ func TestIntegration_RefusingToDisableRecordingIsAuditedAsDenied(t *testing.T) {
 		domassets.Scope{OrganizationID: defaultOrgID}, dev); err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
+	trackDevice(t, dev.ID)
 
 	svc := appassets.NewService(postgres.NewDeviceRepo(pg), postgres.NewAssetGroupRepo(pg), postgres.NewAuditRepo(pg))
 	// Somebody who is neither the owner nor a super admin. They may edit the
@@ -112,11 +114,13 @@ func TestIntegration_RefusingToDisableRecordingIsAuditedAsDenied(t *testing.T) {
 	if err := postgres.NewUserRepo(pg).Create(ctx, tScope, strangerUser); err != nil {
 		t.Fatalf("seed stranger: %v", err)
 	}
+	trackUser(t, strangerUser.ID)
 	teams := postgres.NewTeamRepo(pg)
 	team := &domiam.Team{Name: "rec-strangers-" + suffix, AllDevicesLevel: domiam.AccessManage}
 	if err := teams.Create(ctx, tScope, team); err != nil {
 		t.Fatalf("seed team: %v", err)
 	}
+	trackTeam(t, team.ID)
 	if err := teams.SetMembers(ctx, tScope, team.ID, []domiam.ID{strangerUser.ID}); err != nil {
 		t.Fatalf("seed team member: %v", err)
 	}
@@ -177,6 +181,7 @@ func TestIntegration_SessionListingScansEveryColumnItSelects(t *testing.T) {
 		domiam.TenantScope{OrganizationID: domiam.ID(defaultOrgID)}, owner); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
+	trackUser(t, owner.ID)
 	dev := &domassets.Device{
 		ID: uuid.New(), OrganizationID: defaultOrgID, Name: "span-" + suffix,
 		Host: "span-" + suffix + ".test", Port: 443, Scheme: "https", Status: "active",
@@ -185,6 +190,7 @@ func TestIntegration_SessionListingScansEveryColumnItSelects(t *testing.T) {
 		domassets.Scope{OrganizationID: defaultOrgID}, dev); err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
+	trackDevice(t, dev.ID)
 
 	start := time.Now().Add(-48 * time.Hour)
 	until := start.Add(time.Hour)

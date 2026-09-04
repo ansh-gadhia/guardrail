@@ -63,6 +63,7 @@ func (f *credFixture) device(t *testing.T, ctx context.Context, mode string) *do
 	if err := f.devices.Create(ctx, f.aScope, d); err != nil {
 		t.Fatalf("create device: %v", err)
 	}
+	trackDevice(t, d.ID)
 	return d
 }
 
@@ -81,7 +82,7 @@ func (f *credFixture) credential(t *testing.T, ctx context.Context, username, se
 	if err := f.creds.Create(ctx, f.vScope, c); err != nil {
 		t.Fatalf("create credential: %v", err)
 	}
-	return c.ID
+	return trackCredential(t, c.ID)
 }
 
 // A shared device behaves exactly as it did before per-user accounts existed:
@@ -202,6 +203,7 @@ func TestIntegration_GroupBindingInheritsAndNearestWins(t *testing.T) {
 	if err := f.groups.Create(ctx, f.aScope, parent); err != nil {
 		t.Fatalf("create parent group: %v", err)
 	}
+	trackGroup(t, parent.ID)
 	child := &domassets.AssetGroup{
 		ID: uuid.New(), OrganizationID: defaultOrgID, Name: "core-" + uuid.NewString()[:6],
 		Type: "folder", ParentID: &parent.ID,
@@ -209,6 +211,7 @@ func TestIntegration_GroupBindingInheritsAndNearestWins(t *testing.T) {
 	if err := f.groups.Create(ctx, f.aScope, child); err != nil {
 		t.Fatalf("create child group: %v", err)
 	}
+	trackGroup(t, child.ID)
 
 	d := f.device(t, ctx, domassets.CredentialPerUser)
 	if err := f.groups.SetDeviceGroups(ctx, f.aScope, d.ID, []uuid.UUID{child.ID}); err != nil {
@@ -352,6 +355,7 @@ func TestIntegration_UserBindingsCoverDeviceAndGroup(t *testing.T) {
 	if err := f.groups.Create(ctx, f.aScope, g); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
+	trackGroup(t, g.ID)
 	gc := f.credential(t, ctx, "alice-grp", "p")
 	if err := f.creds.BindToGroup(ctx, f.vScope, g.ID, gc, alice); err != nil {
 		t.Fatalf("bind group: %v", err)
@@ -411,5 +415,5 @@ func makeUser(t *testing.T, ctx context.Context, f *credFixture, prefix string) 
 	if err := f.users.Create(ctx, domiam.TenantScope{OrganizationID: defaultOrgID}, u); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	return u.ID
+	return trackUser(t, u.ID)
 }

@@ -82,6 +82,7 @@ func (f *fixtures) newIdleDevice(devices *postgres.DeviceRepo, timeout int) uuid
 		Host: "idle-" + id + ".test", Port: 443, Scheme: "https", VerifyTLS: false,
 		DeviceType: "router", Status: "active", IdleTimeoutMinutes: timeout,
 	}
+	trackDevice(f.t, dev.ID)
 	if err := devices.Create(context.Background(), domassets.Scope{OrganizationID: defaultOrgID}, dev); err != nil {
 		f.t.Fatalf("create device (timeout=%d): %v", timeout, err)
 	}
@@ -99,6 +100,7 @@ func (f *fixtures) newIdleUser(users *postgres.UserRepo) uuid.UUID {
 		Email:    domiam.NewEmail("idle-" + id + "@test.local"),
 		Username: "idle-" + id, AuthProvider: domiam.ProviderLocal, Status: "active",
 	}
+	trackUser(f.t, u.ID)
 	if err := users.Create(context.Background(), domiam.TenantScope{OrganizationID: domiam.ID(defaultOrgID)}, u); err != nil {
 		f.t.Fatalf("create user: %v", err)
 	}

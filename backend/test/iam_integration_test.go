@@ -70,11 +70,13 @@ func TestIntegration_UserLifecycleAndAuth(t *testing.T) {
 	password := "IntegrationPass123!"
 
 	// Create a user via the real Postgres repositories.
-	if _, err := svc.CreateUser(ctx, superAdmin(), appiam.CreateUserInput{
+	created, err := svc.CreateUser(ctx, superAdmin(), appiam.CreateUserInput{
 		Email: email, Username: "ituser", Password: password,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
+	trackUser(t, created.UserID)
 
 	// Log in (exercises GetByEmailGlobal, Argon2 verify, token + session persist).
 	pair, err := svc.Login(ctx, appiam.LoginInput{Email: email, Password: password})
@@ -126,6 +128,7 @@ func TestIntegration_BootstrapAdminCannotBeDemotedButCanBeRemoved(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create bootstrap admin: %v", err)
 	}
+	trackUser(t, boot.UserID)
 
 	operatorRole := iam.ID(uuid.MustParse("10000000-0000-0000-0000-000000000004"))
 	if err := svc.AssignRoles(ctx, actor, boot.UserID, []iam.ID{operatorRole}, appiam.ReqMeta{}); !errors.Is(err, iam.ErrProtectedAccount) {
@@ -164,6 +167,7 @@ func TestIntegration_BootstrapAdminCannotBeDemotedButCanBeRemoved(t *testing.T) 
 	if err != nil {
 		t.Fatalf("re-seeding the same address after removal must work: %v", err)
 	}
+	trackUser(t, again.UserID)
 	if !again.IsBootstrapAdmin {
 		t.Fatal("the re-seeded account should be the installation account again")
 	}
@@ -188,6 +192,7 @@ func TestIntegration_DeletingAUserRevokesTheirSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
+	trackUser(t, u.UserID)
 	if _, err := svc.Login(ctx, appiam.LoginInput{Email: email, Password: password}); err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -238,6 +243,7 @@ func TestIntegration_OrdinaryUserRolesCanBeChangedBothWays(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
+	trackUser(t, u.UserID)
 	if u.IsBootstrapAdmin {
 		t.Fatal("a user created without the super-admin flag is not the installation account")
 	}

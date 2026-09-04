@@ -70,6 +70,7 @@ func TestIntegration_VaultEnvelopeAndDeviceBinding(t *testing.T) {
 	if err := devices.Create(ctx, scope, dev); err != nil {
 		t.Fatalf("create device: %v", err)
 	}
+	trackDevice(t, dev.ID)
 
 	// Store a sealed credential — plaintext must never hit the DB.
 	const password = "SuperSecretDevicePw!"
@@ -81,6 +82,7 @@ func TestIntegration_VaultEnvelopeAndDeviceBinding(t *testing.T) {
 		ID: uuid.New(), OrganizationID: defaultOrgID, Name: "fw-admin",
 		Type: domvault.TypePassword, Username: "admin", Injection: domvault.InjectForm, Sealed: sealed,
 	}
+	trackCredential(t, cred.ID)
 	if err := creds.Create(ctx, vScope, cred); err != nil {
 		t.Fatalf("create credential: %v", err)
 	}
@@ -148,6 +150,7 @@ func TestIntegration_RotatingAnAccountKeepsItsInjectionMethod(t *testing.T) {
 	if err := postgres.NewDeviceRepo(pg).Create(ctx, scope, dev); err != nil {
 		t.Fatalf("create device: %v", err)
 	}
+	trackDevice(t, dev.ID)
 	actor := domiam.Claims{OrganizationID: defaultOrgID, UserID: uuid.New()}
 	// A real row: device_credentials.user_id is a foreign key, so a made-up id
 	// fails the bind rather than the assertion.
@@ -156,6 +159,7 @@ func TestIntegration_RotatingAnAccountKeepsItsInjectionMethod(t *testing.T) {
 		Email:    domiam.NewEmail("rot-" + uuid.NewString()[:8] + "@example.com"),
 		Username: "rot", PasswordHash: "x", AuthProvider: domiam.ProviderLocal, Status: "active",
 	}
+	trackUser(t, owner.ID)
 	if err := postgres.NewUserRepo(pg).Create(ctx, domiam.TenantScope{OrganizationID: defaultOrgID}, owner); err != nil {
 		t.Fatalf("create user: %v", err)
 	}

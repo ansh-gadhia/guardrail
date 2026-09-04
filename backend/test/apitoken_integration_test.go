@@ -71,6 +71,7 @@ func tokenIssuer(ctx context.Context, t *testing.T, svc *appiam.Service) iam.Cla
 	if err != nil {
 		t.Fatalf("create issuing user: %v", err)
 	}
+	trackUser(t, u.UserID)
 	return iam.Claims{UserID: u.UserID, OrganizationID: defaultOrgID, Email: email, IsSuperAdmin: true}
 }
 
