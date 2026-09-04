@@ -406,6 +406,16 @@ services:
   # Taking just the LAN address sidesteps that entirely, so the host's own
   # resolver keeps working untouched and nothing has to be disabled.
   #
+  # WHICH address that is comes from GUARDRAIL_HOST_IP, and on a multi-homed host
+  # it has to: the fallback below follows the lowest-metric DEFAULT ROUTE, which
+  # on a server with a management NIC and a service NIC is regularly the wrong
+  # one. The failure is quiet and looks like nothing at all — the container is up
+  # and healthy, dnsmasq is serving the zone perfectly, and clients pointed at the
+  # address the operator has in mind get connection-refused because nothing is
+  # listening there. Worse, the wildcard would answer with that same wrong
+  # address, so a client that did reach the resolver is handed a route it does not
+  # have. Detection is a convenience for the single-homed case, not the answer.
+  #
   # Queries for the tunnel domain are answered locally; everything else is
   # forwarded upstream, so a client can safely use this as its primary resolver.
   dns:
@@ -417,7 +427,8 @@ services:
     command:
       - >
         DOMAIN="${GUARDRAIL_TUNNEL_DOMAIN-tunnel.guardrail.lan}";
-        IP=$$(ip -4 route get 1 2>/dev/null | awk '{print $$7; exit}');
+        IP="${GUARDRAIL_HOST_IP:-}";
+        [ -n "$$IP" ] || IP=$$(ip -4 route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($$i=="src"){print $$(i+1); exit}}');
         [ -n "$$IP" ] || IP=$$(hostname -i 2>/dev/null | awk '{print $$1}');
         echo "tunnel DNS: *.$$DOMAIN -> $$IP  (listening on $$IP:53)";
         exec dnsmasq --no-daemon --log-facility=-

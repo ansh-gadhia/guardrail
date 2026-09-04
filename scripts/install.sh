@@ -391,8 +391,48 @@ no_input() { die "no input available — run this from a terminal, or pipe answe
 
 # Primary LAN address. Used for the TLS SAN, the console URL we print, and the
 # address the bundled resolver hands out for the tunnel domain.
+# host_ip is the address this deployment is reached on: the IP in the TLS
+# certificate, in the console URL printed at the end, and — with the bundled
+# resolver enabled — the address it binds and the address the wildcard answers
+# with.
+#
+# An explicit GUARDRAIL_HOST_IP always wins, and on a multi-homed host it has to.
+# The detection below follows the lowest-metric DEFAULT ROUTE, which on a server
+# with a management NIC and a service NIC is regularly not the one operators
+# reach it on: a DHCP lab interface at metric 100 quietly outranks the static LAN
+# at metric 200. Nothing about the resulting failure points at the cause — every
+# container is up and healthy, the resolver serves its zone correctly, and
+# clients simply get connection-refused from an address nothing ever bound.
 host_ip() {
+    if [ -n "${HOST_IP:-}" ]; then printf '%s' "$HOST_IP"; return 0; fi
+    local __hi_env=""
+    if [ -f "$ENV_FILE" ]; then
+        __hi_env=$(grep -E '^GUARDRAIL_HOST_IP=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)
+    fi
+    if [ -n "$__hi_env" ]; then printf '%s' "$__hi_env"; return 0; fi
+    detect_host_ip
+}
+
+# detect_host_ip is the guess, kept separate from host_ip so the configured
+# answer and the guessed one never get confused for each other.
+detect_host_ip() {
     ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'
+}
+
+# host_ip_candidates lists every address that could plausibly be the service
+# address, as "<interface>\t<address>".
+#
+# Docker's own bridges are filtered out. They are scope-global and would
+# otherwise be offered alongside the real NICs, and picking one produces a
+# deployment reachable from nowhere — an address that exists only inside this
+# host, in a certificate handed to operators on the LAN.
+host_ip_candidates() {
+    # Filtered inside awk rather than with a following grep, because the pattern
+    # has to anchor on the TAB this prints and `\t` is not portably a tab to
+    # grep -E — it matched under an interactive shell and not under `bash -c`,
+    # which is the one that runs here. awk's \t is unambiguous.
+    ip -4 -o addr show scope global 2>/dev/null \
+        | awk '$2 !~ /^(docker[0-9]+|br-[0-9a-f]+)$/ {split($4,a,"/"); print $2 "\t" a[1]}'
 }
 
 # ---------------------------------------------------------------------------
@@ -778,6 +818,70 @@ note_port() {
 }
 
 # ---------------------------------------------------------------------------
+# Which address this server answers on, asked on install AND update
+# ---------------------------------------------------------------------------
+# Asked, not guessed, because on a host with more than one NIC there is no guess
+# worth making — and the consequences of guessing wrong are spread across three
+# places that each fail differently. The certificate names an address operators
+# never type, so every visit warns. The final summary prints a console URL that
+# does not answer. And the bundled resolver binds an interface nobody can reach
+# while reporting itself perfectly healthy.
+#
+# A single-homed host is not asked. There is nothing to choose, and a prompt with
+# one possible answer is a prompt that teaches operators to stop reading them.
+configure_host_ip() {
+    local current="${1:-}"
+    local -a cands=()
+    local detected
+    mapfile -t cands < <(host_ip_candidates)
+    detected=$(detect_host_ip)
+    HOST_IP="${current:-$detected}"
+
+    if [ "${#cands[@]}" -le 1 ]; then
+        HOST_IP="${HOST_IP:-127.0.0.1}"
+        return 0
+    fi
+
+    step "Server address"
+    printf '%s\n' "  ${D}This host has more than one address. Pick the one operators reach"
+    printf '%s\n' "  it on — it goes in the TLS certificate and the console URL, and it"
+    printf '%s\n' "  is what the bundled resolver binds and hands out.${R}"
+    echo
+    local line iface addr
+    for line in "${cands[@]}"; do
+        iface=${line%%$'\t'*}
+        addr=${line##*$'\t'}
+        # The default route is marked, not the current answer: the answer is
+        # already shown as the prompt's default, and labelling it "default route"
+        # when it is a configured value states something untrue about the host.
+        if [ "$addr" = "$detected" ]; then
+            printf '    %s  %s\n' "${B}${addr}${R}" "${D}${iface} — current default route${R}"
+        else
+            printf '    %s  %s\n' "${B}${addr}${R}" "${D}${iface}${R}"
+        fi
+    done
+    echo
+
+    while :; do
+        ask HOST_IP "Address to serve on" "$HOST_IP"
+        if ! [[ "$HOST_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            warn "that is not an IPv4 address"
+            continue
+        fi
+        # An address that is not on this host is allowed through with a warning
+        # rather than refused: a floating/VIP address managed by keepalived, or
+        # one that arrives with a later DHCP lease, is a legitimate answer this
+        # function has no way to verify.
+        local __ci_seen=0 __ci
+        for __ci in "${cands[@]}"; do
+            [ "${__ci##*$'\t'}" = "$HOST_IP" ] && { __ci_seen=1; break; }
+        done
+        [ "$__ci_seen" -eq 1 ] || warn "${HOST_IP} is not currently on this host — continuing, but check it"
+        break
+    done
+}
+
+# ---------------------------------------------------------------------------
 # The DNS question, asked on install AND update
 # ---------------------------------------------------------------------------
 # Whole-host session delivery serves each session at <session-id>.<domain>, which
@@ -795,9 +899,17 @@ configure_dns() {
     ask_yn DNS_ENABLED "Run the bundled DNS resolver for the tunnel domain?" "$([ "$current_enabled" = "yes" ] && echo y || echo n)"
     if [ "$DNS_ENABLED" = "yes" ]; then
         ask TUNNEL_DOMAIN "Tunnel domain" "$current_domain"
-        ask DNS_UPSTREAM "Upstream DNS for everything else" "${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8}"
+        # Both upstreams are asked for, and the second is not a formality. The
+        # resolver runs with --no-resolv, so these two are the ONLY places a
+        # non-tunnel lookup can go. Leaving a public default in place on a segment
+        # with no route to the internet does not degrade to the site's resolver —
+        # it makes every lookup that is not the tunnel domain wait for a timeout,
+        # which reads as "the DNS server is broken" and is really "it was told to
+        # ask somewhere it cannot reach".
+        ask DNS_UPSTREAM  "Upstream DNS for everything else" "${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8}"
+        ask DNS_UPSTREAM2 "Second upstream" "${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}"
         info "the resolver will answer ${B}*.${TUNNEL_DOMAIN}${R} with ${B}$(host_ip)${R}"
-        info "point your clients' primary DNS at ${B}$(host_ip)${R} to use it"
+        info "it listens on ${B}$(host_ip):53${R} — point clients' primary DNS there"
     else
         # Empty domain disables the tunnel entirely; sessions fall back to the
         # path-prefixed proxy, which is exactly how it worked before it existed.
@@ -810,6 +922,7 @@ configure_dns() {
             info "tunnel disabled — sessions serve under /proxy/<id>/"
         fi
         DNS_UPSTREAM="${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8}"
+        DNS_UPSTREAM2="${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}"
     fi
 }
 
@@ -918,6 +1031,15 @@ migrate_env() {
     ensure_env_key GUARDRAIL_SIEM_SSO_ROLE_MAP ""
     ensure_env_key GUARDRAIL_SIEM_SSO_TRUST_AMR false
     ensure_env_key GUARDRAIL_SIEM_SSO_ALLOWLIST_BYPASS false
+    # Seeded from whatever this run resolved, which on an update is the answer
+    # configure_host_ip just took. Writing the key at all is the point: until it
+    # exists, the address is re-guessed from the routing table on every container
+    # start, so a DHCP lease or a metric change can move the deployment's address
+    # with nothing in the configuration having been touched.
+    ensure_env_key GUARDRAIL_HOST_IP "$(host_ip)" \
+        "The address operators reach this server on: TLS certificate SAN, console URL, and the address the bundled resolver binds and hands out. On a host with more than one NIC this must be set explicitly — detection follows the lowest-metric default route, which is often the wrong interface."
+    ensure_env_key GUARDRAIL_DNS_UPSTREAM2 1.1.1.1 \
+        "Second upstream for the bundled resolver, which runs with --no-resolv: this and GUARDRAIL_DNS_UPSTREAM are the only places a non-tunnel lookup can go. On a segment with no internet, point both at a resolver that can be reached."
 }
 
 write_env() {
@@ -955,9 +1077,21 @@ GUARDRAIL_TRUST_PROXY_HEADERS=true
 GUARDRAIL_TRUSTED_PROXIES=0.0.0.0/0
 GUARDRAIL_CORS_ALLOW_ORIGINS=
 
+# ---- Server address ----
+# The address operators reach this server on. It is the IP in the TLS
+# certificate, the host in the console URL, and — with the bundled resolver
+# enabled — the address it binds and the address *.<tunnel domain> answers with.
+# Set explicitly: a multi-homed host cannot be guessed, and route detection
+# follows the lowest-metric default route, which is not always the served LAN.
+GUARDRAIL_HOST_IP=${HOST_IP}
+
 # ---- Session tunnel ----
 GUARDRAIL_TUNNEL_DOMAIN=${TUNNEL_DOMAIN}
+# The only two places a non-tunnel lookup can go — the resolver runs with
+# --no-resolv. On a segment without internet access, point both at a resolver
+# that is actually reachable.
 GUARDRAIL_DNS_UPSTREAM=${DNS_UPSTREAM}
+GUARDRAIL_DNS_UPSTREAM2=${DNS_UPSTREAM2}
 
 # ---- Secrets ----
 GUARDRAIL_JWT_SIGNING_KEY=${JWT_KEY}
@@ -1471,6 +1605,7 @@ do_install() {
     ask_data_dir
     resolve_data_paths
 
+    configure_host_ip ""
     configure_dns "tunnel.guardrail.lan" "yes"
 
     # Loopback-published for psql/backups; shifted if something already holds them.
@@ -1499,8 +1634,9 @@ do_update() {
     [ -f "$ENV_FILE" ] || die "nothing to update — no $ENV_FILE. Run install first."
 
     # Read what is already configured so the update keeps it.
-    local cur_domain cur_dns
+    local cur_domain cur_dns cur_host_ip
     cur_domain=$(grep -E '^GUARDRAIL_TUNNEL_DOMAIN=' "$ENV_FILE" | cut -d= -f2- || true)
+    cur_host_ip=$(grep -E '^GUARDRAIL_HOST_IP=' "$ENV_FILE" | cut -d= -f2- || true)
     HTTPS_PORT=$(grep -E '^GUARDRAIL_HTTPS_PORT=' "$ENV_FILE" | cut -d= -f2- || echo 443)
     DESKTOP_ENABLED=$(grep -E '^GUARDRAIL_DESKTOP_ENABLED=' "$ENV_FILE" | cut -d= -f2- || echo true)
     if docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}' 2>/dev/null | grep -q -- '-dns-'; then
@@ -1516,6 +1652,11 @@ do_update() {
     # Re-asked on every update, deliberately: this is the setting most likely to
     # change after the initial install, and burying it would mean editing .env by
     # hand — which is exactly what an installer exists to avoid.
+    # Re-asked for the same reason the DNS question is: on a multi-homed host
+    # this is the setting most likely to have been wrong since the first install,
+    # and an update that cannot correct it leaves the operator editing .env by
+    # hand to fix a certificate the installer generated.
+    configure_host_ip "$cur_host_ip"
     configure_dns "${cur_domain:-tunnel.guardrail.lan}" "$cur_dns"
 
     install_docker
@@ -1533,6 +1674,8 @@ do_update() {
         -e "s|^VERSION=.*|VERSION=${VERSION}|" \
         -e "s|^GUARDRAIL_TUNNEL_DOMAIN=.*|GUARDRAIL_TUNNEL_DOMAIN=${TUNNEL_DOMAIN}|" \
         -e "s|^GUARDRAIL_DNS_UPSTREAM=.*|GUARDRAIL_DNS_UPSTREAM=${DNS_UPSTREAM}|" \
+        -e "s|^GUARDRAIL_DNS_UPSTREAM2=.*|GUARDRAIL_DNS_UPSTREAM2=${DNS_UPSTREAM2}|" \
+        -e "s|^GUARDRAIL_HOST_IP=.*|GUARDRAIL_HOST_IP=${HOST_IP}|" \
         "$ENV_FILE"
     grep -q '^GUARDRAIL_DNS_UPSTREAM=' "$ENV_FILE" || echo "GUARDRAIL_DNS_UPSTREAM=${DNS_UPSTREAM}" >>"$ENV_FILE"
     migrate_env

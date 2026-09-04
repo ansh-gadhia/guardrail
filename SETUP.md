@@ -306,8 +306,10 @@ docker compose logs dns      # prints the address it detected and is listening o
 Then set client machines' **primary** DNS to this server, keeping their normal
 resolver as secondary.
 
-- It detects this host's current LAN IP itself, so a DHCP lease change needs no
-  edit — it re-detects on restart.
+- It serves on `GUARDRAIL_HOST_IP`. If that is unset it detects an address from
+  the routing table, which is right on a single-homed host and re-detects after a
+  DHCP lease change. **On a host with more than one NIC, set it explicitly** — see
+  below.
 - It binds **that address specifically**, not `0.0.0.0`, so it coexists with
   `systemd-resolved` (which holds `127.0.0.53`). You do **not** need to disable
   the stub listener, and the server's own DNS is unaffected.
@@ -321,6 +323,30 @@ resolver as secondary.
 
 > `/etc/hosts` **cannot** do this: it has no wildcards, and a session id is new
 > every time. You need a real resolver.
+
+**On a server with more than one network interface, set `GUARDRAIL_HOST_IP`.**
+Automatic detection follows the *lowest-metric default route*, which is often not
+the LAN operators reach the server on — a DHCP lab interface at metric 100 quietly
+outranks a static LAN at metric 200. `install.sh` asks which address to use when
+it finds more than one; on an existing deployment, set it by hand:
+
+```bash
+echo 'GUARDRAIL_HOST_IP=10.0.0.5' >> /opt/guardrail/.env      # your served LAN address
+cd /opt/guardrail && docker compose --profile dns up -d --force-recreate dns
+docker compose --profile dns logs --tail=2 dns                 # confirms what it bound
+ss -lunp | grep :53                                            # confirms it is there
+```
+
+Getting this wrong is worth recognising because nothing reports it as an error.
+Every container is up, the resolver is healthy and serves its zone correctly, and
+clients pointed at the intended address get `connection refused` from an address
+nothing ever bound. The wildcard also answers with that same wrong address, so a
+client that *does* reach the resolver is handed a route it has no way to take.
+The one command that settles it is `docker compose --profile dns logs dns`, whose
+first line names the address it chose.
+
+The same variable is what the TLS certificate names and what the installer prints
+as the console URL, so correcting it fixes all three together.
 
 **Certificate.** `make install` puts `*.tunnel.guardrail.lan` in the self-signed
 cert it generates, so the tunnel is trusted exactly as much as the console is (one

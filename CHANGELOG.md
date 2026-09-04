@@ -139,6 +139,38 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   in place resumes a running shell mid-way through different code.
 
 ### Fixed
+- **The bundled DNS resolver bound the wrong interface on a multi-homed host, and
+  said nothing about it.** The address came from `ip -4 route get 1`, which
+  follows the *lowest-metric default route* — on a server with a DHCP management
+  NIC at metric 100 and a static service LAN at metric 200, that is the interface
+  operators never touch. With `--bind-interfaces` the resolver then listened on
+  an address clients cannot reach, while `*.<tunnel domain>` answered with that
+  same unreachable address, so even a client that found the resolver was handed a
+  route it did not have. Nothing surfaced as an error: the container was up, the
+  logs were clean, dnsmasq served its zone correctly, and the only symptom was
+  `connection refused` from an address nothing had ever bound.
+
+  The address is now `GUARDRAIL_HOST_IP`, asked for by the installer whenever the
+  host has more than one candidate and written to `.env`, with route detection
+  kept only as the fallback for the single-homed case. The same value is what the
+  TLS certificate names and what the installer prints as the console URL — all
+  three were guessing separately and all three were wrong together, so one
+  setting corrects them at once. `install.sh` re-asks on update, and `migrate_env`
+  seeds the key on existing deployments, which stops the address being re-derived
+  from the routing table on every container start.
+
+  The detection fallback also no longer reads a fixed field position: a default
+  route with no `via` (on-link, or point-to-point) shifts the columns and made
+  `$7` pick up a stray token rather than the source address.
+
+- **`GUARDRAIL_DNS_UPSTREAM2` was documented and never written.** `docker-compose.yml`
+  read it, but no installer path put it in `.env`, so the second upstream stayed
+  `1.1.1.1` however the first was configured. The resolver runs with `--no-resolv`,
+  which makes those two entries the only places a non-tunnel lookup can go — on a
+  segment with no route to the internet the result is not a fallback to the site's
+  resolver but a timeout on every lookup that is not the tunnel domain. The
+  installer now asks for both and writes both.
+
 - **A fresh install could accept an admin password the server then refuses to
   start on.** `ask_password` checked length and nothing else, while the server
   runs `ValidatePassword` — length, a strength score, and a leet-tolerant common
