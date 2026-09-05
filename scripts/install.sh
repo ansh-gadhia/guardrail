@@ -435,6 +435,55 @@ host_ip_candidates() {
         | awk '$2 !~ /^(docker[0-9]+|br-[0-9a-f]+)$/ {split($4,a,"/"); print $2 "\t" a[1]}'
 }
 
+# host_has_addr reports whether an address is currently held by a real NIC on
+# this host. It is asked of a CONFIGURED value, not a guessed one: a stale
+# GUARDRAIL_HOST_IP is the single failure this deployment cannot recover from on
+# its own, because the bundled resolver binds that exact address and exits when
+# it is not there — quietly, in a restart loop, with the reason only in
+# `docker logs`.
+host_has_addr() {
+    local want="$1" line
+    [ -n "$want" ] || return 1
+    while IFS= read -r line; do
+        [ "${line##*$'\t'}" = "$want" ] && return 0
+    done < <(host_ip_candidates)
+    return 1
+}
+
+# port53_taken reports whether something on this host is already listening on
+# port 53 in a way that would collide with the bundled resolver. dnsmasq binds a
+# single address, so only a wildcard listener or one on that same address
+# conflicts — systemd-resolved's usual 127.0.0.53 stub does not, and reporting it
+# as a conflict would send every operator on a systemd box chasing nothing.
+port53_taken() {
+    local ip="$1"
+    have ss || return 1
+    # No -H: it is a recent iproute2 flag, and the header line cannot match an
+    # address test anyway.
+    ss -lnu 2>/dev/null | awk -v ip="$ip" '
+        { addr = $4 }
+        addr == "0.0.0.0:53" || addr == "*:53" || addr == "[::]:53" || addr == ip ":53" { hit = 1 }
+        END { exit !hit }'
+}
+
+# port53_holder names what is already serving DNS here, so the operator is told
+# which service to deal with rather than left to find it. Best-effort: without
+# the process column (ss needs privileges for it) this says nothing rather than
+# guessing.
+port53_holder() {
+    local ip="$1"
+    have ss || return 0
+    ss -lnup 2>/dev/null | awk -v ip="$ip" '
+        $4 == "0.0.0.0:53" || $4 == "*:53" || $4 == "[::]:53" || $4 == ip ":53" {
+            if (match($0, /users:\(\("[^"]+"/)) {
+                who = substr($0, RSTART + 9, RLENGTH - 9)
+                gsub(/"/, "", who)
+                print who
+                exit
+            }
+        }'
+}
+
 # ---------------------------------------------------------------------------
 # Detection: is GuardRail already on this box?
 # ---------------------------------------------------------------------------
@@ -837,12 +886,36 @@ configure_host_ip() {
     detected=$(detect_host_ip)
     HOST_IP="${current:-$detected}"
 
-    if [ "${#cands[@]}" -le 1 ]; then
+    # A configured address that no NIC here holds. Almost always an .env carried
+    # over from another machine or a box that was renumbered, and it is worth
+    # stopping for even on a single-homed host that would otherwise never be
+    # asked: everything downstream is built from this value, and the one piece
+    # that fails loudly — the bundled resolver — fails as a restart loop rather
+    # than as an error anybody sees.
+    local stale=0
+    if [ "${#cands[@]}" -gt 0 ] && [ -n "$HOST_IP" ] && ! host_has_addr "$HOST_IP"; then
+        stale=1
+    fi
+
+    if [ "${#cands[@]}" -le 1 ] && [ "$stale" -eq 0 ]; then
         HOST_IP="${HOST_IP:-127.0.0.1}"
         return 0
     fi
 
     step "Server address"
+    if [ "$stale" -eq 1 ]; then
+        warn "${HOST_IP} is configured as this server's address, but no interface here holds it"
+        printf '%s\n' "  ${D}The certificate, the console URL and the bundled resolver are all built"
+        printf '%s\n' "  from this. The resolver binds it and will not start without it. Pick an"
+        printf '%s\n' "  address below — unless this is a floating/VIP address that arrives later,"
+        printf '%s\n' "  in which case retype it and carry on.${R}"
+        echo
+        # The offered default moves to something real. Keeping the broken value as
+        # the default means pressing Enter — which is what people do — reinstalls
+        # the same fault.
+        [ "${#cands[@]}" -eq 1 ] && HOST_IP="${cands[0]##*$'\t'}"
+        [ "${#cands[@]}" -gt 1 ] && HOST_IP="${detected:-$HOST_IP}"
+    fi
     printf '%s\n' "  ${D}This host has more than one address. Pick the one operators reach"
     printf '%s\n' "  it on — it goes in the TLS certificate and the console URL, and it"
     printf '%s\n' "  is what the bundled resolver binds and hands out.${R}"
@@ -872,11 +945,7 @@ configure_host_ip() {
         # rather than refused: a floating/VIP address managed by keepalived, or
         # one that arrives with a later DHCP lease, is a legitimate answer this
         # function has no way to verify.
-        local __ci_seen=0 __ci
-        for __ci in "${cands[@]}"; do
-            [ "${__ci##*$'\t'}" = "$HOST_IP" ] && { __ci_seen=1; break; }
-        done
-        [ "$__ci_seen" -eq 1 ] || warn "${HOST_IP} is not currently on this host — continuing, but check it"
+        host_has_addr "$HOST_IP" || warn "${HOST_IP} is not currently on this host — continuing, but check it"
         break
     done
 }
@@ -896,7 +965,28 @@ configure_dns() {
     printf '%s\n' "  (<session-id>.<domain>) instead of under a /proxy/ path. Appliance"
     printf '%s\n' "  UIs that hard-navigate need this. It requires wildcard DNS.${R}"
     echo
-    ask_yn DNS_ENABLED "Run the bundled DNS resolver for the tunnel domain?" "$([ "$current_enabled" = "yes" ] && echo y || echo n)"
+
+    # Checked BEFORE the question, because the answer depends on it. The bundled
+    # resolver binds one address on port 53 and exits when it cannot; a host that
+    # is already a DNS server — a directory server, a Pi-hole, systemd-resolved
+    # serving the LAN — can never run it. Left undetected, "yes" is accepted
+    # cheerfully at install time and shows up later as a container in a restart
+    # loop, which names neither the port nor what holds it.
+    local dns_default; dns_default=$([ "$current_enabled" = "yes" ] && echo y || echo n)
+    if port53_taken "$(host_ip)"; then
+        local holder; holder=$(port53_holder "$(host_ip)")
+        warn "port 53 on $(host_ip) is already served${holder:+ by ${B}${holder}${R}} — the bundled resolver cannot bind it"
+        printf '%s\n' "  ${D}This host is already a DNS server. Add the wildcard record there"
+        printf '%s\n' "  instead — it is one line, and it keeps a single resolver authoritative"
+        printf '%s\n' "  for this network:"
+        printf '%s\n' "      *.${current_domain}  ->  $(host_ip)"
+        printf '%s\n' "  Answer no below and the tunnel still works; only the bundled resolver"
+        printf '%s\n' "  is left off.${R}"
+        echo
+        dns_default=n
+    fi
+
+    ask_yn DNS_ENABLED "Run the bundled DNS resolver for the tunnel domain?" "$dns_default"
     if [ "$DNS_ENABLED" = "yes" ]; then
         ask TUNNEL_DOMAIN "Tunnel domain" "$current_domain"
         # Both upstreams are asked for, and the second is not a formality. The
@@ -910,6 +1000,7 @@ configure_dns() {
         ask DNS_UPSTREAM2 "Second upstream" "${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}"
         info "the resolver will answer ${B}*.${TUNNEL_DOMAIN}${R} with ${B}$(host_ip)${R}"
         info "it listens on ${B}$(host_ip):53${R} — point clients' primary DNS there"
+        port53_taken "$(host_ip)" && warn "port 53 is already taken here — this resolver will not start until that is freed"
     else
         # Empty domain disables the tunnel entirely; sessions fall back to the
         # path-prefixed proxy, which is exactly how it worked before it existed.

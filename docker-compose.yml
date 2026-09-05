@@ -424,13 +424,54 @@ services:
     network_mode: host
     cap_add: [NET_ADMIN]
     entrypoint: ["/bin/sh", "-c"]
+    # dnsmasq binds ONE address, so it cannot start until that address is on the
+    # host. Two ways that goes wrong, and both used to end the same way — exit 2,
+    # `restart: unless-stopped`, and a container flapping forever with the reason
+    # buried in `docker logs`:
+    #
+    #   - The host has not finished coming up. Docker starts before DHCP has a
+    #     lease often enough that this is the normal case after a reboot, not an
+    #     edge one. So the address is waited for rather than demanded once.
+    #   - GUARDRAIL_HOST_IP names an address this host does not have — a value
+    #     carried over from another machine, or a NIC that was renumbered. That
+    #     one is never going to fix itself, so it says so in as many words and
+    #     names the addresses the host does have.
+    #
+    # The configured address is never quietly swapped for a detected one. Binding
+    # "some address that works" is what put the resolver on the wrong NIC in the
+    # first place: it answered, on an interface no client could reach, and looked
+    # healthy the whole time.
     command:
       - >
         DOMAIN="${GUARDRAIL_TUNNEL_DOMAIN-tunnel.guardrail.lan}";
-        IP="${GUARDRAIL_HOST_IP:-}";
-        [ -n "$$IP" ] || IP=$$(ip -4 route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($$i=="src"){print $$(i+1); exit}}');
-        [ -n "$$IP" ] || IP=$$(hostname -i 2>/dev/null | awk '{print $$1}');
-        echo "tunnel DNS: *.$$DOMAIN -> $$IP  (listening on $$IP:53)";
+        WANT="${GUARDRAIL_HOST_IP:-}";
+        addrs() { ip -4 -o addr show scope global 2>/dev/null | awk '$$2 !~ /^(docker[0-9]+|br-[0-9a-f]+)$$/ {split($$4,p,"/"); print $$2 "=" p[1]}' | tr '\n' ' '; };
+        on_host() { ip -4 -o addr show 2>/dev/null | awk -v w="$$1" '{split($$4,p,"/"); if (p[1]==w) f=1} END{exit !f}'; };
+        detect() { ip -4 route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($$i=="src"){print $$(i+1); exit}}'; };
+        IP=""; n=0;
+        while [ "$$n" -lt 30 ]; do
+        if [ -n "$$WANT" ]; then on_host "$$WANT" && IP="$$WANT";
+        else IP=$$(detect); fi;
+        [ -n "$$IP" ] && break;
+        [ "$$n" = 0 ] && echo "guardrail-dns: waiting up to 60s for $${WANT:-an IPv4 default route} on this host...";
+        n=$$((n+1)); sleep 2; done;
+        if [ -z "$$IP" ]; then
+        echo "guardrail-dns: refusing to start.";
+        if [ -n "$$WANT" ]; then echo "  GUARDRAIL_HOST_IP=$$WANT is not an address on this host.";
+        else echo "  GUARDRAIL_HOST_IP is unset and this host has no IPv4 default route."; fi;
+        echo "  addresses here: $$(addrs)";
+        echo "  fix: set GUARDRAIL_HOST_IP in the .env beside docker-compose.yml to one of those,";
+        echo "       then: docker compose --profile dns up -d --force-recreate dns";
+        sleep 30; exit 1; fi;
+        if netstat -lnu 2>/dev/null | awk '{print $$4}' | grep -qE "^(0\.0\.0\.0|\[::\]|$$IP):53$$"; then
+        echo "guardrail-dns: port 53 on $$IP is already served by something else on this host.";
+        echo "  this host is already a DNS server (a directory server, Pi-hole, or systemd-resolved";
+        echo "  configured to serve the LAN). dnsmasq cannot bind, so this container will keep failing.";
+        echo "  the fix is one record on the resolver that already runs here: *.$$DOMAIN -> $$IP,";
+        echo "  then re-run install.sh and answer no to the bundled resolver.";
+        echo "  retrying in 20s in case that listener is on its way out...";
+        sleep 20; fi;
+        echo "guardrail-dns: *.$$DOMAIN -> $$IP (listening on $$IP:53, upstreams ${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8} ${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1})";
         exec dnsmasq --no-daemon --log-facility=-
         --bind-interfaces --listen-address=$$IP
         --no-resolv --server=${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8} --server=${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}
