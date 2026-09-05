@@ -1,7 +1,30 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api } from "@/lib/api";
 import { Spinner, cn } from "@/components/ui";
-import { IconFilm, IconPlug } from "@/components/icons";
+import { IconFilm, IconPlug, IconDownload } from "@/components/icons";
+import {
+  FullscreenButton,
+  PauseGlyph,
+  PlayGlyph,
+  PlayerButton,
+  Scrubber,
+  SkipGlyph,
+  SpeedPicker,
+  StepGlyph,
+  fmtClock,
+  usePlayerKeys,
+  usePlayerShell,
+  type PlayerHandle,
+  type PlayerMarker,
+} from "@/components/player/PlayerChrome";
 
 /* The recording player.
 
@@ -10,7 +33,17 @@ import { IconFilm, IconPlug } from "@/components/icons";
    fetches both once, slices the blob per frame, and draws to a canvas. That
    keeps the server free of any video encoder, and makes seeking exact: any
    frame is one drawImage away, so scrubbing lands on the real pixels rather
-   than the nearest keyframe. */
+   than the nearest keyframe.
+
+   Playback is driven by a clock rather than by stepping frame to frame. The
+   difference shows on exactly the recordings people complain about: a screencast
+   only produces frames when something changes, so a session where somebody read
+   a page for twenty seconds has a twenty-second gap in the frame list. Stepping
+   frame to frame froze the position readout and the scrubber for that whole
+   gap — the player looked hung during the part of the session where nothing was
+   moving, which is precisely when a reviewer starts to doubt what they are
+   looking at. A clock runs through the gap; the frame under it simply does not
+   change, which is the truth. */
 
 interface ManifestFrame {
   t: number; // ms from the start of the recording
@@ -28,18 +61,45 @@ interface Manifest {
   truncated?: boolean;
 }
 
-const SPEEDS = [0.5, 1, 2, 4] as const;
+const SPEEDS = [0.25, 0.5, 1, 2, 4, 8] as const;
+// How far the skip buttons and the arrow keys move. Ten seconds is the web's
+// settled answer for a button; five is small enough for an arrow key to be a
+// nudge rather than a jump.
+const SKIP_MS = 10_000;
+const NUDGE_MS = 5_000;
 
-export function SessionPlayer({ sessionId, onTimeChange }: { sessionId: string; onTimeChange?: (ms: number) => void }) {
+export const SessionPlayer = forwardRef<PlayerHandle, {
+  sessionId: string;
+  /** Called as playback moves, so a timeline alongside can follow it. Throttled. */
+  onTimeChange?: (ms: number) => void;
+  /** Moments to flag on the scrubber. */
+  markers?: PlayerMarker[];
+  /** Reports the recording's wall-clock start, once the manifest is in. */
+  onManifest?: (m: { startedAt: string; durationMs: number }) => void;
+}>(function SessionPlayer({ sessionId, onTimeChange, markers, onManifest }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const drawGen = useRef(0);
+  const drawn = useRef(-1);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [blob, setBlob] = useState<Blob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const [index, setIndex] = useState(0);
+  // The playhead is held in a ref as well as in state. State is what renders;
+  // the ref is what the clock below reads. Keeping only state meant the clock
+  // effect closed over the position it started with — so a seek made while
+  // playing was overwritten on the very next frame, and the scrubber sprang
+  // back under the operator's finger.
+  const [pos, setPos] = useState(0); // ms from the start of the recording
+  const posRef = useRef(0);
+  const putPos = useCallback((ms: number) => {
+    posRef.current = ms;
+    setPos(ms);
+  }, []);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<number>(1);
+
+  const { shellRef, fullscreen, toggleFullscreen, controlsHidden, wake } = usePlayerShell();
 
   // Fetch the manifest and frames once. Both are immutable and cache hard, so a
   // reopened recording is instant.
@@ -47,6 +107,9 @@ export function SessionPlayer({ sessionId, onTimeChange }: { sessionId: string; 
     let cancelled = false;
     setLoading(true);
     setError(null);
+    putPos(0);
+    setPlaying(false);
+    drawn.current = -1; // a different recording; whatever is on the canvas is stale
     (async () => {
       try {
         const [m, f] = await Promise.all([
@@ -65,80 +128,199 @@ export function SessionPlayer({ sessionId, onTimeChange }: { sessionId: string; 
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, putPos]);
 
-  const frames = manifest?.frames ?? [];
+  const frames = useMemo(() => manifest?.frames ?? [], [manifest]);
   const total = frames.length;
-  const duration = manifest?.duration_ms ?? 0;
+  // A screencast's last frame stands until the session ends, so the recording is
+  // as long as the manifest says even when no frame was captured near the end.
+  // Falling back to the last frame's timestamp made every player report a
+  // duration shorter than the session it came from.
+  const duration = Math.max(manifest?.duration_ms ?? 0, frames[total - 1]?.t ?? 0);
 
-  // Draw one frame. Decoding is async, so a fast scrub can finish out of order;
-  // the generation guard keeps the last requested frame the one that lands.
-  const drawGen = useRef(0);
-  const draw = useCallback(
-    async (i: number) => {
-      const cv = canvasRef.current;
-      if (!cv || !blob || !manifest || !frames[i]) return;
-      const gen = ++drawGen.current;
-      const f = frames[i];
+  useEffect(() => {
+    if (manifest && onManifest) {
+      onManifest({ startedAt: manifest.started_at, durationMs: Math.max(manifest.duration_ms, duration) });
+    }
+  }, [manifest, duration, onManifest]);
+
+  // The frame standing at a given moment: the last one captured at or before it.
+  // Binary search, because scrubbing asks this on every pointer move and a long
+  // session has tens of thousands of frames.
+  const frameAt = useCallback(
+    (ms: number) => {
+      if (total === 0) return 0;
+      let lo = 0;
+      let hi = total - 1;
+      let best = 0;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (frames[mid].t <= ms) {
+          best = mid;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      return best;
+    },
+    [frames, total],
+  );
+
+  const index = frameAt(pos);
+
+  // Decoding is async, so a fast scrub can finish out of order; the generation
+  // guard keeps the last requested frame the one that lands. `drawn` skips the
+  // decode entirely when the frame on the canvas is already the right one, which
+  // is most ticks: a screencast frame stands for as long as nothing changes.
+  useEffect(() => {
+    const cv = canvasRef.current;
+    const f = frames[index];
+    if (!cv || !blob || !manifest || !f || drawn.current === index) return;
+    drawn.current = index;
+    const gen = ++drawGen.current;
+    void (async () => {
       const bmp = await createImageBitmap(blob.slice(f.o, f.o + f.l, "image/jpeg"));
       if (gen !== drawGen.current) {
         bmp.close?.();
         return; // a newer frame was requested while this one decoded
       }
       const cx = cv.getContext("2d");
-      if (!cx) return;
+      if (!cx) {
+        bmp.close?.();
+        return;
+      }
       cx.drawImage(bmp, 0, 0, cv.width, cv.height);
       bmp.close?.();
-    },
-    [blob, manifest, frames],
+    })();
+  }, [index, frames, blob, manifest]);
+
+  // Report position outward at a few times a second. The clock below runs at the
+  // display's refresh rate, and handing that straight to a parent would re-render
+  // the whole session view sixty times a second to move one highlight.
+  const lastReport = useRef(0);
+  useEffect(() => {
+    if (!onTimeChange) return;
+    const now = performance.now();
+    // Throttled only while playing. A seek is a deliberate move to one moment,
+    // and dropping it because it landed inside the throttle window would leave
+    // the timeline highlighting the wrong entry until playback resumed.
+    if (playing && now - lastReport.current < 200) return;
+    lastReport.current = now;
+    onTimeChange(pos);
+  }, [pos, playing, onTimeChange]);
+
+  // Playback clock. Advances on real elapsed time so the replay matches how the
+  // session actually unfolded — pauses included — and so speed is a real
+  // multiplier rather than a per-frame delay.
+  useEffect(() => {
+    if (!playing || duration <= 0) return;
+    let raf = 0;
+    let last = performance.now();
+    let painted = 0;
+    const tick = (now: number) => {
+      const next = Math.min(posRef.current + (now - last) * speed, duration);
+      last = now;
+      posRef.current = next;
+      if (next >= duration) {
+        putPos(duration);
+        setPlaying(false);
+        return;
+      }
+      // ~25 state writes a second is past the point where more is visible, and
+      // well under the point where React becomes the bottleneck.
+      if (now - painted >= 40) {
+        painted = now;
+        setPos(next);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, speed, duration, putPos]);
+
+  const seekTo = useCallback(
+    (ms: number) => putPos(Math.min(Math.max(ms, 0), duration)),
+    [duration, putPos],
   );
-
-  useEffect(() => {
-    void draw(index);
-    onTimeChange?.(frames[index]?.t ?? 0);
-  }, [index, draw, frames, onTimeChange]);
-
-  // Playback advances on real elapsed time rather than a fixed interval, so the
-  // replay matches how the session actually unfolded — pauses included.
-  useEffect(() => {
-    if (!playing || !total) return;
-    if (index >= total - 1) {
-      setPlaying(false);
-      return;
-    }
-    const gap = Math.max(frames[index + 1].t - frames[index].t, 16) / speed;
-    const id = window.setTimeout(() => setIndex((i) => Math.min(i + 1, total - 1)), gap);
-    return () => window.clearTimeout(id);
-  }, [playing, index, total, frames, speed]);
+  useImperativeHandle(ref, () => ({ seekTo }), [seekTo]);
 
   const togglePlay = useCallback(() => {
-    if (index >= total - 1) setIndex(0); // replay from the top rather than stalling
+    if (duration <= 0) return;
+    // Replaying from the end would look like a dead player: nothing moves and the
+    // button says pause. Rewind first.
+    if (posRef.current >= duration) putPos(0);
     setPlaying((p) => !p);
-  }, [index, total]);
+  }, [duration, putPos]);
 
-  // Keyboard controls: space to play, arrows to step. A recording is evidence —
-  // stepping frame by frame is the point.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === " ") {
-        e.preventDefault();
-        togglePlay();
-      } else if (e.key === "ArrowRight") {
-        setPlaying(false);
-        setIndex((i) => Math.min(i + 1, Math.max(total - 1, 0)));
-      } else if (e.key === "ArrowLeft") {
-        setPlaying(false);
-        setIndex((i) => Math.max(i - 1, 0));
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [togglePlay, total]);
+  const nudge = useCallback(
+    (ms: number) => seekTo(pos + ms),
+    [pos, seekTo],
+  );
+  const step = useCallback(
+    (by: number) => {
+      setPlaying(false);
+      const next = Math.min(Math.max(index + by, 0), Math.max(total - 1, 0));
+      seekTo(frames[next]?.t ?? 0);
+    },
+    [index, total, frames, seekTo],
+  );
+
+  usePlayerKeys(
+    shellRef,
+    useMemo(
+      () => ({
+        " ": togglePlay,
+        k: togglePlay,
+        ArrowLeft: () => nudge(-NUDGE_MS),
+        ArrowRight: () => nudge(NUDGE_MS),
+        j: () => nudge(-SKIP_MS),
+        l: () => nudge(SKIP_MS),
+        ",": () => step(-1),
+        ".": () => step(1),
+        Home: () => seekTo(0),
+        End: () => seekTo(duration),
+        f: toggleFullscreen,
+        ...Object.fromEntries(
+          Array.from({ length: 10 }, (_, n) => [String(n), () => seekTo((duration * n) / 10)]),
+        ),
+      }),
+      [togglePlay, nudge, step, seekTo, duration, toggleFullscreen],
+    ),
+    !loading && !error && total > 0,
+  );
+
+  // Saving the frame on screen is how a finding leaves a review: it goes into the
+  // ticket. Rendering it from the canvas costs nothing and means the reviewer
+  // does not screenshot their own monitor to quote the evidence.
+  const saveFrame = useCallback(() => {
+    const cv = canvasRef.current;
+    if (!cv) return;
+    cv.toBlob((b) => {
+      if (!b) return;
+      const url = URL.createObjectURL(b);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `guardrail-${sessionId.slice(0, 8)}-${fmtClock(pos).replace(/:/g, "")}.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }, "image/png");
+  }, [sessionId, pos]);
 
   const aspect = useMemo(
     () => (manifest ? `${manifest.width} / ${manifest.height}` : "16 / 10"),
     [manifest],
   );
+
+  // The wall-clock moment the playhead is sitting on. A reviewer correlating a
+  // recording with a firewall log or a ticket needs the actual time, not an
+  // offset from a start they would have to go and look up.
+  const wall = useMemo(() => {
+    if (!manifest?.started_at) return null;
+    const base = new Date(manifest.started_at).getTime();
+    if (!Number.isFinite(base)) return null;
+    return new Date(base + pos).toLocaleTimeString();
+  }, [manifest, pos]);
 
   if (loading) {
     return (
@@ -161,14 +343,29 @@ export function SessionPlayer({ sessionId, onTimeChange }: { sessionId: string; 
   }
 
   return (
-    <div className="space-y-3">
-      <div className="relative overflow-hidden rounded-xl bg-black ring-1 ring-line" style={{ aspectRatio: aspect }}>
+    <div
+      ref={shellRef}
+      tabIndex={0}
+      onMouseMove={fullscreen ? wake : undefined}
+      className={cn(
+        "space-y-3 outline-none",
+        fullscreen && "flex h-full w-full flex-col justify-center gap-0 bg-black p-0",
+      )}
+    >
+      <div
+        className={cn(
+          "relative overflow-hidden bg-black",
+          fullscreen ? "min-h-0 flex-1" : "rounded-xl ring-1 ring-line",
+        )}
+        style={fullscreen ? undefined : { aspectRatio: aspect }}
+      >
         <canvas
           ref={canvasRef}
           width={manifest.width}
           height={manifest.height}
-          className="h-full w-full"
+          className="h-full w-full object-contain"
           onClick={togglePlay}
+          onDoubleClick={toggleFullscreen}
         />
         {!playing && (
           <button
@@ -178,87 +375,67 @@ export function SessionPlayer({ sessionId, onTimeChange }: { sessionId: string; 
             className="absolute inset-0 grid place-items-center bg-black/30 transition hover:bg-black/20"
           >
             <span className="grid h-14 w-14 place-items-center rounded-full bg-white/95 shadow-lg">
-              <PlayIcon />
+              <span className="translate-x-0.5 text-black">
+                <PlayGlyph size={20} />
+              </span>
             </span>
           </button>
         )}
       </div>
 
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={togglePlay}
-          aria-label={playing ? "Pause" : "Play"}
-          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-surface-2 text-fg transition hover:bg-surface-3"
-        >
-          {playing ? <PauseIcon /> : <PlayIcon small />}
-        </button>
+      <div
+        className={cn(
+          "flex items-center gap-2 transition-opacity",
+          fullscreen && "bg-black/85 px-4 py-3",
+          controlsHidden && "pointer-events-none opacity-0",
+        )}
+      >
+        <PlayerButton label={playing ? "Pause (space)" : "Play (space)"} onClick={togglePlay}>
+          {playing ? <PauseGlyph /> : <PlayGlyph />}
+        </PlayerButton>
+        <PlayerButton label="Back 10 seconds (j)" onClick={() => nudge(-SKIP_MS)}>
+          <SkipGlyph back />
+        </PlayerButton>
+        <PlayerButton label="Forward 10 seconds (l)" onClick={() => nudge(SKIP_MS)}>
+          <SkipGlyph />
+        </PlayerButton>
+        <PlayerButton label="Previous frame (,)" onClick={() => step(-1)} disabled={index <= 0}>
+          <StepGlyph back />
+        </PlayerButton>
+        <PlayerButton label="Next frame (.)" onClick={() => step(1)} disabled={index >= total - 1}>
+          <StepGlyph />
+        </PlayerButton>
 
-        <input
-          type="range"
-          min={0}
-          max={total - 1}
-          value={index}
-          aria-label="Seek"
-          onChange={(e) => {
-            setPlaying(false);
-            setIndex(Number(e.target.value));
-          }}
-          className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-surface-3 accent-accent"
+        <Scrubber
+          position={pos}
+          duration={duration}
+          markers={markers}
+          onScrubStart={() => setPlaying(false)}
+          onSeek={seekTo}
         />
 
-        <span className="shrink-0 font-mono text-2xs tabular-nums text-muted">
-          {fmt(frames[index]?.t ?? 0)} / {fmt(duration)}
+        <span className={cn("shrink-0 font-mono text-2xs tabular-nums", fullscreen ? "text-white/80" : "text-muted")}>
+          {fmtClock(pos)} / {fmtClock(duration)}
         </span>
 
-        <div className="flex shrink-0 items-center gap-0.5 rounded-lg bg-surface-2 p-0.5">
-          {SPEEDS.map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setSpeed(s)}
-              className={cn(
-                "rounded px-1.5 py-0.5 text-2xs font-medium transition",
-                speed === s ? "bg-accent text-white" : "text-muted hover:text-fg",
-              )}
-            >
-              {s}×
-            </button>
-          ))}
+        <SpeedPicker speed={speed} speeds={SPEEDS} onChange={setSpeed} />
+        <PlayerButton label="Save this frame as PNG" onClick={saveFrame}>
+          <IconDownload size={14} />
+        </PlayerButton>
+        <FullscreenButton fullscreen={fullscreen} onToggle={toggleFullscreen} />
+      </div>
+
+      {!fullscreen && (
+        <div className="flex flex-wrap items-center justify-between gap-2 text-2xs text-faint">
+          <span className="inline-flex items-center gap-1.5">
+            <IconPlug size={11} /> frame {index + 1} of {total} · {manifest.width}×{manifest.height}
+            {wall && <> · {wall}</>}
+          </span>
+          {manifest.truncated && (
+            <span className="text-warn">Recording hit its size cap — the later part of this session isn't captured.</span>
+          )}
         </div>
-      </div>
-
-      <div className="flex items-center justify-between text-2xs text-faint">
-        <span className="inline-flex items-center gap-1.5">
-          <IconPlug size={11} /> {total} frames · {manifest.width}×{manifest.height}
-        </span>
-        {manifest.truncated && (
-          <span className="text-warn">Recording hit its size cap — the later part of this session isn't captured.</span>
-        )}
-      </div>
+      )}
     </div>
   );
-}
-
-// fmt renders an elapsed-milliseconds value as m:ss.
-function fmt(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
-function PlayIcon({ small }: { small?: boolean }) {
-  const n = small ? 12 : 20;
-  return (
-    <svg width={n} height={n} viewBox="0 0 24 24" fill="currentColor" className={small ? "" : "translate-x-0.5 text-black"}>
-      <path d="M8 5v14l11-7z" />
-    </svg>
-  );
-}
-
-function PauseIcon() {
-  return (
-    <svg width={12} height={12} viewBox="0 0 24 24" fill="currentColor">
-      <path d="M6 5h4v14H6zM14 5h4v14h-4z" />
-    </svg>
-  );
-}
+});

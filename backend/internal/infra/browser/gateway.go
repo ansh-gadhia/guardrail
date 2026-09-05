@@ -15,9 +15,12 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
+	cdpbrowser "github.com/chromedp/cdproto/browser"
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
@@ -127,6 +130,14 @@ type bSession struct {
 	// goroutine (chromedp delivers a target's events serially), so it needs no
 	// lock; the recorder path above it is unaffected by the cap.
 	lastLive time.Time
+	// tl writes the activity timeline. Nil when there is no event recorder.
+	tl *timeline
+	// mainFrame is the tab's top-level frame, learned from the first top-level
+	// navigation. In-document (History API) navigations carry only a frame id, so
+	// this is what separates the operator moving between screens from a widget in
+	// an iframe rewriting its own URL. Touched only from the serial event
+	// callback, like lastLive, so it needs no lock.
+	mainFrame cdp.FrameID
 }
 
 // pushFrame enqueues a frame for the live viewer without ever blocking the
@@ -269,15 +280,9 @@ func (g *Gateway) admit() error {
 func (g *Gateway) onDialog(bs *bSession, sessionID uuid.UUID, e *page.EventJavascriptDialogOpening) {
 	// The device is telling the operator something ("password is wrong"). That is
 	// session history, so it belongs on the timeline next to the navigations.
-	if g.events != nil {
-		go func() {
-			ectx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = g.events.RecordEvent(ectx, sessionID, "dialog", map[string]any{
-				"kind": string(e.Type), "message": e.Message,
-			})
-		}()
-	}
+	bs.tl.record("dialog", map[string]any{
+		"kind": string(e.Type), "message": e.Message,
+	})
 
 	msg, err := json.Marshal(map[string]any{
 		"t": "dialog", "kind": string(e.Type), "message": e.Message, "default": e.DefaultPrompt,
@@ -382,6 +387,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		notes: make(chan []byte, 4), replies: make(chan dlgReply, 1),
 		w: g.cfg.Width, h: g.cfg.Height, expires: until,
 		orgID: s.OrganizationID,
+		tl:    newTimeline(g.events, s.ID, g.log),
 	}
 
 	// Attach the recorder here, not when a viewer connects: a session must be
@@ -438,24 +444,49 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		case *page.EventFrameNavigated:
 			// Main frame only: sub-frame loads are page furniture, not somewhere
 			// the operator chose to go.
-			if g.events == nil || e.Frame == nil || e.Frame.ParentID != "" {
+			if e.Frame == nil || e.Frame.ParentID != "" {
 				return
 			}
-			path := e.Frame.URL
-			if u, uerr := url.Parse(e.Frame.URL); uerr == nil && u.Path != "" {
-				path = u.Path
-				if u.RawQuery != "" {
-					path += "?" + u.RawQuery
-				}
+			bs.mainFrame = e.Frame.ID
+			bs.tl.record("url_change", map[string]any{
+				"path": pathOf(e.Frame.URL), "url": e.Frame.URL, "method": "GET",
+			})
+
+		case *page.EventNavigatedWithinDocument:
+			// A History API route change — which is how every appliance admin SPA
+			// moves between screens. No document is fetched, so FrameNavigated does
+			// not fire, and without this a whole session spent inside one such UI
+			// recorded exactly one entry: the initial load.
+			if bs.mainFrame != "" && e.FrameID != bs.mainFrame {
+				return
 			}
-			// Best-effort, and off the event goroutine: a slow audit write must not
-			// stall the frame pump.
-			go func() {
-				ectx, ecancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer ecancel()
-				_ = g.events.RecordEvent(ectx, sessionID, "url_change",
-					map[string]any{"path": path, "method": "GET"})
-			}()
+			bs.tl.record("url_change", map[string]any{
+				"path": pathOf(e.URL), "url": e.URL, "method": "GET", "in_page": true,
+			})
+
+		case *cdpbrowser.EventDownloadWillBegin:
+			// Something left the device. In an isolated session the file lands on
+			// this server rather than on the operator's machine, so this is not a
+			// transfer to police — but it is the single most important line on the
+			// timeline when a review asks what was taken.
+			bs.tl.record("download", map[string]any{
+				"path": pathOf(e.URL), "url": e.URL, "filename": e.SuggestedFilename,
+			})
+
+		case *network.EventRequestWillBeSent:
+			// The actions. On a single-page admin UI the navigations above are the
+			// table of contents and these are the content: a POST to
+			// /api/v2/cmdb/firewall/policy is somebody changing the firewall, and it
+			// is invisible in the URL bar. Reads are left out on purpose — every
+			// screen issues dozens, and burying the four writes among four hundred
+			// GETs is how the timeline stops being read.
+			if e.Request == nil || !stateChanging(e.Request.Method) || pageFurniture(e.Type) {
+				return
+			}
+			bs.tl.record("request", map[string]any{
+				"path": pathOf(e.Request.URL), "url": e.Request.URL,
+				"method": strings.ToUpper(e.Request.Method),
+			})
 		}
 	})
 
@@ -484,6 +515,16 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 	if h := injectionHeaders(cred); len(h) > 0 {
 		actions = append(actions, network.SetExtraHTTPHeaders(h))
 	}
+	// Turn on download announcements. "default" is Chrome's existing behaviour, so
+	// this changes nothing about what the tab does with a download — it only asks
+	// to be told, which is what puts it on the timeline. Best-effort on purpose: a
+	// build that refuses the call costs the timeline one row kind, and must not
+	// cost the operator their session.
+	actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
+		_ = cdpbrowser.SetDownloadBehavior(cdpbrowser.SetDownloadBehaviorBehaviorDefault).
+			WithEventsEnabled(true).Do(ctx)
+		return nil
+	}))
 	actions = append(actions,
 		emulation.SetDeviceMetricsOverride(g.cfg.Width, g.cfg.Height, 1, false),
 		chromedp.Navigate(ep.BaseURL),
@@ -545,6 +586,10 @@ func (g *Gateway) End(_ context.Context, sessionID uuid.UUID) error {
 				zap.String("session_id", sessionID.String()), zap.Int("frames", n))
 		}
 	}
+	// Drained before the tab is cancelled, so the last few actions of a session —
+	// which are usually the ones a review is about — are written rather than lost
+	// to the teardown that follows them.
+	bs.tl.close()
 	bs.cancel()
 	return nil
 }

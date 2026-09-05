@@ -269,8 +269,7 @@ func (g *HTTPGateway) Serve(w http.ResponseWriter, req *http.Request, sessionID 
 
 	// Record the visited path + method for the playback timeline (best-effort).
 	if g.events != nil {
-		_ = g.events.RecordEvent(req.Context(), sessionID, "url_change",
-			map[string]any{"path": upstreamPath, "method": req.Method})
+		_ = g.events.RecordEvent(req.Context(), sessionID, "url_change", timelineData(req.Method, upstreamPath))
 	}
 
 	// Rewrite to the upstream-relative path and proxy.
@@ -324,8 +323,7 @@ func (g *HTTPGateway) ServeTunnel(w http.ResponseWriter, req *http.Request, sess
 		g.activity.Touch(sessionID)
 	}
 	if g.events != nil {
-		_ = g.events.RecordEvent(req.Context(), sessionID, "url_change",
-			map[string]any{"path": req.URL.Path, "method": req.Method})
+		_ = g.events.RecordEvent(req.Context(), sessionID, "url_change", timelineData(req.Method, req.URL.RequestURI()))
 	}
 	sc.tunnelProxy.ServeHTTP(w, req)
 	return true
@@ -365,4 +363,49 @@ func randomToken() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+/*
+Telling a session's actions apart from its page loads.
+
+	Every request through the proxy is recorded, because dropping one would be
+	dropping evidence. But a single page view is one action and forty asset
+	fetches, and a timeline that lists all forty is one nobody reads — the four
+	rows that matter are somewhere in the middle of four hundred. So nothing is
+	dropped; the asset fetches are labelled, and the reviewer's timeline hides
+	them until asked.
+
+	Extension, not Content-Type, because this runs before the response exists.
+*/
+func timelineData(method, path string) map[string]any {
+	d := map[string]any{"path": path, "method": method}
+	if isAssetPath(path) {
+		d["asset"] = true
+	}
+	return d
+}
+
+// assetExt are the suffixes a browser fetches for itself. A device that serves
+// its config export as .json is the reason .json is absent: that one IS an
+// action.
+var assetExt = []string{
+	".css", ".js", ".mjs", ".map",
+	".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif", ".ico", ".bmp",
+	".woff", ".woff2", ".ttf", ".otf", ".eot",
+	".mp3", ".mp4", ".webm", ".ogg", ".wav",
+}
+
+// isAssetPath reports whether a path looks like page furniture rather than
+// something the operator did.
+func isAssetPath(p string) bool {
+	if q := strings.IndexByte(p, '?'); q >= 0 {
+		p = p[:q]
+	}
+	p = strings.ToLower(p)
+	for _, ext := range assetExt {
+		if strings.HasSuffix(p, ext) {
+			return true
+		}
+	}
+	return false
 }

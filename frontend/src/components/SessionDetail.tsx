@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
 import { absLocal, plausibleDate, relTime, sessionSpan, startedOf } from "@/lib/dates";
@@ -9,6 +9,7 @@ import { IconFilm, IconTrash, IconAlert, IconDownload, IconClipboard, IconCheck 
 import { SessionPlayer } from "@/components/SessionPlayer";
 import { TranscriptPlayer } from "@/components/TranscriptPlayer";
 import { DesktopReplay } from "@/components/DesktopReplay";
+import { fmtClock, type PlayerHandle, type PlayerMarker } from "@/components/player/PlayerChrome";
 
 /** The replays a recording can offer. One recording may hold more than one. */
 type ReplayView = "transcript" | "video" | "desktop";
@@ -69,6 +70,43 @@ export function SessionDetail({
   // video only once it ends.
   const view = picked && available.includes(picked) ? picked : available[0];
   const setView = setPicked;
+
+  // The replay and the timeline are two views of one session, so they are wired
+  // to each other: the playhead drives which entry is highlighted, and clicking
+  // an entry drives the playhead. Without that, a reviewer reads "POST
+  // /api/firewall/policy at 11:27:14" and then hunts for 11:27:14 by dragging a
+  // slider, which is the part of reviewing a recording that people give up on.
+  const playerRef = useRef<PlayerHandle>(null);
+  const [posMs, setPosMs] = useState(0);
+  const [timebase, setTimebase] = useState<{ startedAt: string; durationMs: number } | null>(null);
+  const onManifest = useCallback((m: { startedAt: string; durationMs: number }) => {
+    setTimebase((prev) => (prev?.startedAt === m.startedAt && prev.durationMs === m.durationMs ? prev : m));
+  }, []);
+
+  // Offsets are measured from when the RECORDER started, because that is what
+  // the player's clock counts from. Falling back to the session's own start is
+  // only for sessions with no recording, where there is nothing to seek anyway.
+  const baseMs = useMemo(() => {
+    const iso = timebase?.startedAt ?? recording.data?.started_at ?? startedOf(session);
+    const d = plausibleDate(iso);
+    return d ? d.getTime() : null;
+  }, [timebase, recording.data, session]);
+
+  const entries = useMemo(
+    () => buildTimeline(events.data ?? [], session, baseMs),
+    [events.data, session, baseMs],
+  );
+  const [showAssets, setShowAssets] = useState(false);
+  const assetCount = useMemo(() => entries.filter((e) => e.asset).length, [entries]);
+  const shown = useMemo(() => (showAssets ? entries : entries.filter((e) => !e.asset)), [entries, showAssets]);
+  const markers = useMemo<PlayerMarker[]>(
+    () =>
+      shown
+        .filter((e): e is TimelineEntry & { ms: number } => e.ms !== null && e.kind !== "session")
+        .map((e) => ({ ms: e.ms, label: e.label, tone: e.tone })),
+    [shown],
+  );
+  const seekable = available.length > 0 && view !== "transcript";
 
   const has = useAuth((s) => s.has);
   const qc = useQueryClient();
@@ -175,9 +213,24 @@ export function SessionDetail({
                   ))}
                 </div>
               )}
-              {view === "video" && <SessionPlayer sessionId={session.id} />}
+              {view === "video" && (
+                <SessionPlayer
+                  ref={playerRef}
+                  sessionId={session.id}
+                  onTimeChange={setPosMs}
+                  onManifest={onManifest}
+                  markers={markers}
+                />
+              )}
               {view === "transcript" && <TranscriptPlayer sessionId={session.id} />}
-              {view === "desktop" && <DesktopReplay sessionId={session.id} />}
+              {view === "desktop" && (
+                <DesktopReplay
+                  ref={playerRef}
+                  sessionId={session.id}
+                  onTimeChange={setPosMs}
+                  markers={markers}
+                />
+              )}
             </div>
           ) : (
             <div className="flex h-72 flex-col items-center justify-center gap-2 rounded-xl border border-line bg-surface-2/40 px-6 text-center">
@@ -225,18 +278,40 @@ export function SessionDetail({
           </div>
 
           <div>
-            <div className="mb-2 flex items-center justify-between">
+            <div className="mb-2 flex items-center justify-between gap-2">
               <span className="text-2xs font-semibold uppercase tracking-wider text-faint">Activity timeline</span>
-              {events.data && <span className="text-2xs text-faint">{events.data.length} events</span>}
+              <div className="flex items-center gap-2">
+                {assetCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAssets((v) => !v)}
+                    className="text-2xs text-muted underline-offset-2 hover:text-fg hover:underline"
+                  >
+                    {showAssets ? "hide" : "show"} {assetCount} asset {assetCount === 1 ? "request" : "requests"}
+                  </button>
+                )}
+                {events.data && (
+                  <span className="text-2xs text-faint">
+                    {shown.length} {shown.length === 1 ? "entry" : "entries"}
+                  </span>
+                )}
+              </div>
             </div>
             {events.isLoading ? (
               <Skeleton className="h-32" />
-            ) : !events.data || events.data.length === 0 ? (
-              <EmptyState message="No page activity was recorded for this session." />
+            ) : shown.length === 0 ? (
+              <EmptyState message="Nothing was recorded on this session's timeline." />
             ) : (
-              <div className="max-h-64 overflow-auto pr-1">
-                <ActivityTimeline events={events.data} />
+              <div className="max-h-72 overflow-auto pr-1">
+                <ActivityTimeline
+                  entries={shown}
+                  currentMs={posMs}
+                  onSeek={seekable ? (ms) => playerRef.current?.seekTo(ms) : undefined}
+                />
               </div>
+            )}
+            {shown.length > 0 && seekable && (
+              <p className="mt-1.5 text-2xs text-faint">Select an entry to jump the replay to that moment.</p>
             )}
           </div>
 
@@ -249,25 +324,201 @@ export function SessionDetail({
   );
 }
 
-function ActivityTimeline({ events }: { events: SessionEvent[] }) {
+/* ---- The activity timeline -------------------------------------------------
+   What a reviewer is doing with this panel is indexing the video. So every row
+   carries the offset into the recording, not only the wall-clock time, and
+   clicking one moves the playhead there. The old panel showed a bare local time
+   against a replay that counts from zero, which meant the two halves of this
+   window could not be used together at all.
+
+   The session's own start and end are rendered as rows rather than left implied.
+   A timeline whose first entry is 40 seconds in reads as "we started recording
+   late"; with the bookends in place it reads as "nothing happened for the first
+   40 seconds", which is the truth and is itself worth knowing. */
+
+/** One row: a recorded event, or one of the two synthetic session bookends. */
+interface TimelineEntry {
+  key: string;
+  kind: "session" | "url_change" | "request" | "download" | "dialog" | "other";
+  /** Offset into the recording, or null when it cannot be placed against one. */
+  ms: number | null;
+  ts?: string;
+  method?: string;
+  label: string;
+  detail?: string;
+  asset?: boolean;
+  tone?: PlayerMarker["tone"];
+}
+
+const str = (v: unknown): string => (typeof v === "string" ? v : "");
+
+/** Turns recorded events into rows, bookended by the session's own start and end. */
+function buildTimeline(events: SessionEvent[], session: Session, baseMs: number | null): TimelineEntry[] {
+  const at = (iso?: string): number | null => {
+    if (baseMs === null) return null;
+    const d = plausibleDate(iso);
+    // Clamped at zero: an event written a moment before the recorder started
+    // would otherwise place at a negative offset and sit off the front of the
+    // scrubber.
+    return d ? Math.max(0, d.getTime() - baseMs) : null;
+  };
+
+  const rows: TimelineEntry[] = [];
+  const startedIso = startedOf(session);
+  if (plausibleDate(startedIso)) {
+    rows.push({ key: "start", kind: "session", ms: 0, ts: startedIso, label: "Session started" });
+  }
+
+  events.forEach((e, i) => {
+    const path = str(e.data?.path);
+    const method = str(e.data?.method).toUpperCase();
+    const asset = e.data?.asset === true;
+    const ms = at(e.ts);
+    const common = { key: `e${i}`, ms, ts: e.ts, asset };
+
+    switch (e.kind) {
+      case "url_change":
+        rows.push({
+          ...common,
+          kind: "url_change",
+          method: method || "GET",
+          label: path || "(page)",
+          detail: e.data?.in_page === true ? "in-page navigation" : undefined,
+          tone: "accent",
+        });
+        break;
+      case "request":
+        rows.push({ ...common, kind: "request", method: method || "POST", label: path || "(request)", tone: "warn" });
+        break;
+      case "download":
+        rows.push({
+          ...common,
+          kind: "download",
+          label: str(e.data?.filename) || path || "(download)",
+          detail: path || undefined,
+          tone: "danger",
+        });
+        break;
+      case "dialog":
+        rows.push({
+          ...common,
+          kind: "dialog",
+          label: str(e.data?.message) || "Device dialog",
+          detail: str(e.data?.kind) || undefined,
+          tone: "warn",
+        });
+        break;
+      default:
+        // Gateway-specific openings (ssh_open, telnet_open, desktop_open) and
+        // anything a later version adds. Rendering the kind verbatim beats
+        // dropping a row nobody thought to teach this switch about.
+        rows.push({ ...common, kind: "other", label: path || e.kind.replace(/_/g, " "), tone: "accent" });
+    }
+  });
+
+  const endedMs = at(session.ended_at);
+  if (session.ended_at && plausibleDate(session.ended_at)) {
+    rows.push({
+      key: "end",
+      kind: "session",
+      ms: endedMs,
+      ts: session.ended_at,
+      label: session.end_reason ? `Session ended — ${session.end_reason}` : "Session ended",
+    });
+  }
+  return rows;
+}
+
+const DOT_TONE: Record<TimelineEntry["kind"], string> = {
+  session: "bg-faint",
+  url_change: "bg-accent/70",
+  request: "bg-warn",
+  download: "bg-danger",
+  dialog: "bg-warn",
+  other: "bg-accent/70",
+};
+
+function ActivityTimeline({
+  entries,
+  currentMs,
+  onSeek,
+}: {
+  entries: TimelineEntry[];
+  currentMs: number;
+  onSeek?: (ms: number) => void;
+}) {
+  // Which row the playhead is standing on: the last one at or before it. Derived
+  // rather than tracked, so it stays correct through scrubbing and speed changes.
+  const activeKey = useMemo(() => {
+    let key: string | null = null;
+    for (const e of entries) {
+      if (e.ms === null || e.ms > currentMs + 250) break;
+      key = e.key;
+    }
+    return key;
+  }, [entries, currentMs]);
+
   return (
-    <ol className="relative space-y-1">
+    <ol className="relative space-y-0.5">
       <span className="absolute bottom-2 left-[6px] top-2 w-px bg-line" aria-hidden />
-      {events.map((e, i) => {
-        const path = typeof e.data?.path === "string" ? (e.data.path as string) : "";
-        const method = typeof e.data?.method === "string" ? (e.data.method as string) : "";
+      {entries.map((e) => {
+        const seekable = onSeek && e.ms !== null;
+        const active = e.key === activeKey;
         return (
-          <li key={i} className="relative flex items-start gap-3 rounded-lg py-1.5 pl-5 pr-1 transition hover:bg-surface-2/50">
-            <span className="absolute left-0 top-2.5 h-[11px] w-[11px] -translate-x-px rounded-full border-2 border-surface bg-accent/70" />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-baseline gap-1.5">
-                {method && <span className="font-mono text-2xs font-semibold text-accent">{method}</span>}
-                <span className="truncate font-mono text-xs text-fg">{path || e.kind}</span>
-              </div>
-            </div>
-            <time className="shrink-0 font-mono text-2xs tabular-nums text-faint">
-              {plausibleDate(e.ts)?.toLocaleTimeString() ?? "—"}
-            </time>
+          <li key={e.key} className="relative">
+            <button
+              type="button"
+              disabled={!seekable}
+              onClick={() => seekable && onSeek(e.ms as number)}
+              title={e.detail ? `${e.label} — ${e.detail}` : e.label}
+              className={cn(
+                "flex w-full items-start gap-2 rounded-lg py-1.5 pl-5 pr-1 text-left transition",
+                seekable ? "cursor-pointer hover:bg-surface-2/60" : "cursor-default",
+                active && "bg-accent-soft",
+              )}
+            >
+              <span
+                className={cn(
+                  "absolute left-0 top-2.5 h-[11px] w-[11px] -translate-x-px rounded-full border-2 border-surface",
+                  DOT_TONE[e.kind],
+                  active && "ring-2 ring-accent/40",
+                )}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="flex items-baseline gap-1.5">
+                  {e.method && (
+                    <span
+                      className={cn(
+                        "shrink-0 font-mono text-2xs font-semibold",
+                        e.kind === "request" ? "text-warn" : "text-accent",
+                      )}
+                    >
+                      {e.method}
+                    </span>
+                  )}
+                  {e.kind === "download" && (
+                    <span className="shrink-0 font-mono text-2xs font-semibold text-danger">GOT</span>
+                  )}
+                  <span
+                    className={cn(
+                      "truncate text-xs",
+                      e.kind === "session" || e.kind === "dialog" ? "text-muted" : "font-mono text-fg",
+                    )}
+                  >
+                    {e.label}
+                  </span>
+                </span>
+                {e.detail && <span className="block truncate text-2xs text-faint">{e.detail}</span>}
+              </span>
+              <span className="shrink-0 text-right">
+                <span className="block font-mono text-2xs tabular-nums text-muted">
+                  {e.ms === null ? "—" : `+${fmtClock(e.ms)}`}
+                </span>
+                <span className="block font-mono text-2xs tabular-nums text-faint">
+                  {plausibleDate(e.ts)?.toLocaleTimeString() ?? ""}
+                </span>
+              </span>
+            </button>
           </li>
         );
       })}

@@ -1,10 +1,31 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { AxiosError } from "axios";
 import Guacamole from "guacamole-common-js";
 import { api } from "@/lib/api";
 import { blobReplayTunnel } from "@/lib/guacRecordingTunnel";
 import { Spinner, cn } from "@/components/ui";
 import { IconAlert } from "@/components/icons";
+import {
+  FullscreenButton,
+  PauseGlyph,
+  PlayGlyph,
+  PlayerButton,
+  Scrubber,
+  SkipGlyph,
+  fmtClock,
+  usePlayerKeys,
+  usePlayerShell,
+  type PlayerHandle,
+  type PlayerMarker,
+} from "@/components/player/PlayerChrome";
 
 /* Playback for an RDP/VNC session.
 
@@ -21,7 +42,18 @@ import { IconAlert } from "@/components/icons";
 
 type Phase = "loading" | "ready" | "error";
 
-export function DesktopReplay({ sessionId }: { sessionId: string }) {
+// How far the skip buttons and keys move. Matched to the frame player so the two
+// replay surfaces behave identically under the same hands.
+const SKIP_MS = 10_000;
+const NUDGE_MS = 5_000;
+
+export const DesktopReplay = forwardRef<PlayerHandle, {
+  sessionId: string;
+  /** Called as playback moves, so a timeline alongside can follow it. Throttled. */
+  onTimeChange?: (ms: number) => void;
+  /** Moments to flag on the scrubber. */
+  markers?: PlayerMarker[];
+}>(function DesktopReplay({ sessionId, onTimeChange, markers }, ref) {
   const mountRef = useRef<HTMLDivElement>(null);
   const recRef = useRef<Guacamole.SessionRecording | null>(null);
   const roRef = useRef<ResizeObserver | null>(null);
@@ -170,7 +202,37 @@ export function DesktopReplay({ sessionId }: { sessionId: string }) {
     };
   }, [sessionId]);
 
-  const toggle = () => {
+  const { shellRef, fullscreen, toggleFullscreen, controlsHidden, wake } = usePlayerShell();
+  const ready = phase === "ready";
+
+  // Report position outward a few times a second, so a timeline alongside can
+  // follow the playhead without re-rendering the page on every parsed frame.
+  const lastReport = useRef(0);
+  useEffect(() => {
+    if (!onTimeChange) return;
+    const now = performance.now();
+    // Throttled only while playing, so a deliberate seek always reaches the
+    // timeline rather than being dropped for landing inside the window.
+    if (playing && now - lastReport.current < 200) return;
+    lastReport.current = now;
+    onTimeChange(position);
+  }, [position, playing, onTimeChange]);
+
+  // Seeking replays every instruction between here and there, so it is
+  // asynchronous: the slider follows the thumb until the seek lands, or it snaps
+  // back under the operator's finger.
+  const seekTo = useCallback((ms: number) => {
+    const rec = recRef.current;
+    if (!rec) return;
+    const to = Math.min(Math.max(Math.round(ms), 0), rec.getDuration());
+    setScrubbing(true);
+    setPosition(to);
+    rec.pause();
+    rec.seek(to, () => setScrubbing(false));
+  }, []);
+  useImperativeHandle(ref, () => ({ seekTo }), [seekTo]);
+
+  const toggle = useCallback(() => {
     const rec = recRef.current;
     if (!rec || phase !== "ready") return;
     if (rec.isPlaying()) rec.pause();
@@ -180,12 +242,53 @@ export function DesktopReplay({ sessionId }: { sessionId: string }) {
       if (rec.getPosition() >= rec.getDuration()) rec.seek(0);
       rec.play();
     }
-  };
+  }, [phase]);
+
+  const nudge = useCallback((ms: number) => seekTo(position + ms), [position, seekTo]);
+
+  usePlayerKeys(
+    shellRef,
+    useMemo(
+      () => ({
+        " ": toggle,
+        k: toggle,
+        ArrowLeft: () => nudge(-NUDGE_MS),
+        ArrowRight: () => nudge(NUDGE_MS),
+        j: () => nudge(-SKIP_MS),
+        l: () => nudge(SKIP_MS),
+        Home: () => seekTo(0),
+        End: () => seekTo(duration),
+        f: toggleFullscreen,
+        ...Object.fromEntries(
+          Array.from({ length: 10 }, (_, n) => [String(n), () => seekTo((duration * n) / 10)]),
+        ),
+      }),
+      [toggle, nudge, seekTo, duration, toggleFullscreen],
+    ),
+    ready,
+  );
 
   return (
-    <div className="space-y-3">
-      <div className="relative aspect-video w-full overflow-hidden rounded-xl border border-line bg-[#0b0e14]">
-        <div ref={mountRef} className="flex h-full w-full items-center justify-center" />
+    <div
+      ref={shellRef}
+      tabIndex={0}
+      onMouseMove={fullscreen ? wake : undefined}
+      className={cn(
+        "space-y-3 outline-none",
+        fullscreen && "flex h-full w-full flex-col justify-center gap-0 bg-black p-0",
+      )}
+    >
+      <div
+        className={cn(
+          "relative w-full overflow-hidden bg-[#0b0e14]",
+          fullscreen ? "min-h-0 flex-1" : "aspect-video rounded-xl border border-line",
+        )}
+      >
+        <div
+          ref={mountRef}
+          onDoubleClick={toggleFullscreen}
+          className="flex h-full w-full items-center justify-center"
+        />
         {phase === "loading" && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
             <Spinner />
@@ -201,62 +304,39 @@ export function DesktopReplay({ sessionId }: { sessionId: string }) {
         )}
       </div>
 
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={toggle}
-          disabled={phase !== "ready"}
-          aria-label={playing ? "Pause" : "Play"}
-          className={cn(
-            "grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-surface-2 text-fg transition",
-            phase === "ready" ? "hover:bg-surface-3" : "cursor-not-allowed opacity-40",
-          )}
-        >
-          {playing ? (
-            <svg width={12} height={12} viewBox="0 0 24 24" fill="currentColor">
-              <path d="M6 5h4v14H6zM14 5h4v14h-4z" />
-            </svg>
-          ) : (
-            <svg width={12} height={12} viewBox="0 0 24 24" fill="currentColor">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-          )}
-        </button>
+      <div
+        className={cn(
+          "flex items-center gap-2 transition-opacity",
+          fullscreen && "bg-black/85 px-4 py-3",
+          controlsHidden && "pointer-events-none opacity-0",
+        )}
+      >
+        <PlayerButton label={playing ? "Pause (space)" : "Play (space)"} onClick={toggle} disabled={!ready}>
+          {playing ? <PauseGlyph /> : <PlayGlyph />}
+        </PlayerButton>
+        <PlayerButton label="Back 10 seconds (j)" onClick={() => nudge(-SKIP_MS)} disabled={!ready}>
+          <SkipGlyph back />
+        </PlayerButton>
+        <PlayerButton label="Forward 10 seconds (l)" onClick={() => nudge(SKIP_MS)} disabled={!ready}>
+          <SkipGlyph />
+        </PlayerButton>
 
-        <input
-          type="range"
-          min={0}
-          max={Math.max(duration - 1, 0)}
-          value={position}
-          aria-label="Seek"
-          disabled={phase !== "ready"}
-          onChange={(e) => {
-            const to = Number(e.target.value);
-            setScrubbing(true);
-            setPosition(to);
-            const rec = recRef.current;
-            if (!rec) return;
-            rec.pause();
-            rec.seek(to, () => setScrubbing(false));
-          }}
-          className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-surface-3 accent-accent disabled:cursor-not-allowed"
+        <Scrubber
+          position={position}
+          duration={duration}
+          markers={markers}
+          disabled={!ready}
+          onSeek={seekTo}
         />
 
-        <span className="shrink-0 font-mono text-2xs tabular-nums text-muted">
-          {fmt(position)} / {fmt(duration)}
+        <span className={cn("shrink-0 font-mono text-2xs tabular-nums", fullscreen ? "text-white/80" : "text-muted")}>
+          {fmtClock(position)} / {fmtClock(duration)}
         </span>
+
+        <FullscreenButton fullscreen={fullscreen} onToggle={toggleFullscreen} />
       </div>
 
-      {scrubbing && <p className="text-2xs text-faint">Seeking…</p>}
+      {scrubbing && !fullscreen && <p className="text-2xs text-faint">Seeking…</p>}
     </div>
   );
-}
-
-// Milliseconds to m:ss. The dump's timing is in ms and a desktop session runs for
-// minutes, not hours.
-function fmt(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
+});
