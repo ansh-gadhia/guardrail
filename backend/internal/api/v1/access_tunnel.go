@@ -177,7 +177,8 @@ func (h *AccessHandler) tunnelURL(c *gin.Context) {
 // tunnelURLFor builds the one-time grant URL for a session.
 func (h *AccessHandler) tunnelURLFor(sid uuid.UUID) string {
 	grant := h.mintGrant(sid, time.Now().Add(tunnelGrantTTL))
-	return "https://" + sid.String() + "." + h.tunnelDomain + "/__grant__?t=" + url.QueryEscape(grant)
+	return "https://" + sid.String() + "." + h.tunnelDomain + h.tunnelPortSuffix +
+		"/__grant__?t=" + url.QueryEscape(grant)
 }
 
 // mintGrant issues a stateless one-time grant: the session id and an expiry,

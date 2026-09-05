@@ -205,6 +205,14 @@ services:
       # naming it (bootstrap.sh generates one). Empty disables it and puts every
       # session back on /proxy/<sid>/.
       GUARDRAIL_TUNNEL_DOMAIN: ${GUARDRAIL_TUNNEL_DOMAIN-tunnel.guardrail.lan}
+      # The port operators actually reach this deployment on, which is Traefik's
+      # published port and NOT GUARDRAIL_HTTP_ADDR above (that one is internal to
+      # the container network). The API needs it for exactly one thing: a tunnel
+      # session moves the operator to a different hostname, so the server has to
+      # write that URL out in full — and a URL written without the port sends the
+      # browser to 443. On a deployment published anywhere else that is a refused
+      # connection on every tunnel session, while the console itself works fine.
+      GUARDRAIL_HTTPS_PORT: ${GUARDRAIL_HTTPS_PORT:-443}
       # Session recording needs the isolation gateway: the reverse proxy never
       # sees pixels. Chromium and the recordings directory ship in the image.
       GUARDRAIL_BROWSER_ISOLATION: ${GUARDRAIL_BROWSER_ISOLATION:-true}

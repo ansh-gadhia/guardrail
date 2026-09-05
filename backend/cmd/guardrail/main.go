@@ -496,7 +496,7 @@ func run() error {
 	// reaper sees a busy session as busy whichever way it is being delivered.
 	activity := appaccess.NewActivityTracker(sessionRepo, nil, 30*time.Second)
 
-	proxyGateway := proxy.NewHTTPGateway(deviceLookup, eventRepo, activity, cfg.Telemetry.ServiceName, cfg.HTTP.TunnelDomain)
+	proxyGateway := proxy.NewHTTPGateway(deviceLookup, eventRepo, activity, cfg.Telemetry.ServiceName, cfg.HTTP.TunnelAuthority())
 	sessionServers := []v1.SessionServer{proxyGateway}
 	var isolatedGateways []domaccess.Gateway
 
@@ -682,9 +682,10 @@ func run() error {
 	// vault KEK (GUARDRAIL_MASTER_KEY) is never involved in transport concerns.
 	grantSum := sha256.Sum256(append([]byte(cfg.Auth.JWTSigningKey), []byte("guardrail-tunnel-grant-v1")...))
 	accessHandler := v1.NewAccessHandler(brokerSvc, sessionServer, cfg.IsProduction(), v1.TunnelConfig{
-		Domain:   cfg.HTTP.TunnelDomain,
-		Gateway:  proxyGateway,
-		GrantKey: grantSum[:],
+		Domain:     cfg.HTTP.TunnelDomain,
+		PortSuffix: cfg.HTTP.PublicPortSuffix(),
+		Gateway:    proxyGateway,
+		GrantKey:   grantSum[:],
 	})
 	if cfg.HTTP.TunnelDomain != "" {
 		// Say once, at startup, exactly what DNS has to answer. The address is
@@ -696,7 +697,10 @@ func run() error {
 		// from the LAN and is emphatically not what the wildcard should point at,
 		// so we say what we actually know rather than printing a plausible,
 		// unreachable address an operator would copy into their router.
-		fields := []zap.Field{zap.String("domain", cfg.HTTP.TunnelDomain)}
+		fields := []zap.Field{
+			zap.String("domain", cfg.HTTP.TunnelDomain),
+			zap.Int("public_https_port", cfg.HTTP.PublicHTTPSPort),
+		}
 		if ip := detectPrimaryIP(); ip != "" && !inContainer() {
 			fields = append(fields,
 				zap.String("detected_ip", ip),

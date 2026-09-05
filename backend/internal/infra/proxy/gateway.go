@@ -50,20 +50,22 @@ type HTTPGateway struct {
 	events   access.EventRecorder
 	activity access.ActivitySink
 	node     string
-	// tunnelDomain is the base domain for per-session hostnames, e.g.
-	// "tunnel.guardrail.lan". Empty disables whole-host delivery entirely and
-	// leaves every session on the path-prefix transport.
-	tunnelDomain string
+	// tunnelAuthority is what a per-session hostname must end with for a browser
+	// to reach it: the tunnel domain, plus the public port when that is not 443.
+	// The port belongs here because everything this field feeds is an absolute
+	// URL or an Origin/Referer comparison, and both are wrong without it —
+	// silently, on any deployment not published on 443.
+	tunnelAuthority string
 }
 
 // NewHTTPGateway constructs the gateway. activity may be nil, in which case
 // sessions are never marked as used and idle expiry does not apply to them.
-// tunnelDomain may be empty, which disables whole-host tunnel delivery.
-func NewHTTPGateway(devices access.DeviceLookup, events access.EventRecorder, activity access.ActivitySink, node, tunnelDomain string) *HTTPGateway {
+// tunnelAuthority may be empty, which disables whole-host tunnel delivery.
+func NewHTTPGateway(devices access.DeviceLookup, events access.EventRecorder, activity access.ActivitySink, node, tunnelAuthority string) *HTTPGateway {
 	return &HTTPGateway{
 		sessions: map[uuid.UUID]*sessionCtx{}, devices: devices,
 		events: events, activity: activity, node: node,
-		tunnelDomain: tunnelDomain,
+		tunnelAuthority: tunnelAuthority,
 	}
 }
 
@@ -145,8 +147,8 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 	// connection pools and two chances to get the TLS policy wrong).
 	var tunnelHost string
 	var tp *httputil.ReverseProxy
-	if g.tunnelDomain != "" {
-		tunnelHost = s.ID.String() + "." + g.tunnelDomain
+	if g.tunnelAuthority != "" {
+		tunnelHost = s.ID.String() + "." + g.tunnelAuthority
 		tp = &httputil.ReverseProxy{
 			Director:  g.tunnelDirector(target, ep.CustomHeaders, cred, tunnelHost),
 			Transport: rp.Transport,

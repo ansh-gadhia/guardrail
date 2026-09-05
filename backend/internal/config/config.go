@@ -255,12 +255,47 @@ type HTTPConfig struct {
 	// its own origin so a device UI needs no HTML rewriting. Empty disables it and
 	// leaves every session on the /proxy/<sid>/ path transport.
 	TunnelDomain string
+	// PublicHTTPSPort is the port operators actually reach this deployment on —
+	// the one the reverse proxy publishes, not Addr, which is an internal listener
+	// behind it.
+	//
+	// It exists because a tunnel URL is the one address the server has to write
+	// out in full. Everything else the console produces is relative, or built by
+	// the browser from window.location, and therefore carries the port for free.
+	// A tunnel session moves the operator to a DIFFERENT hostname, so the server
+	// composes that URL itself — and composing it without the port sends the
+	// browser to 443, where a deployment on any other port has nothing listening.
+	// The result is "connection refused" on every tunnel session, on a deployment
+	// whose console works perfectly.
+	PublicHTTPSPort int
 
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	IdleTimeout     time.Duration
 	ShutdownTimeout time.Duration
 	TrustedProxies  []string // CIDRs Gin trusts for X-Forwarded-For
+}
+
+// PublicPortSuffix is what has to be appended to a hostname to reach this
+// deployment: empty on 443, ":<port>" otherwise. Written as a suffix rather than
+// as a port number because every caller is building a URL, and a caller that
+// formats the port itself is a caller that can forget the 443 case.
+func (c HTTPConfig) PublicPortSuffix() string {
+	if c.PublicHTTPSPort == 0 || c.PublicHTTPSPort == 443 {
+		return ""
+	}
+	return ":" + strconv.Itoa(c.PublicHTTPSPort)
+}
+
+// TunnelAuthority is TunnelDomain with the public port attached, i.e. what a
+// session hostname must end with for a browser to reach it. Empty when the
+// tunnel is disabled — never a bare ":port", which would compose into a
+// nonsense hostname.
+func (c HTTPConfig) TunnelAuthority() string {
+	if c.TunnelDomain == "" {
+		return ""
+	}
+	return c.TunnelDomain + c.PublicPortSuffix()
 }
 
 type PostgresConfig struct {
@@ -329,6 +364,7 @@ func Load() (*Config, error) {
 			MetricsAddr:     getEnv("GUARDRAIL_METRICS_ADDR", ":9090"),
 			WebDir:          getEnv("GUARDRAIL_WEB_DIR", ""),
 			TunnelDomain:    strings.ToLower(strings.Trim(getEnv("GUARDRAIL_TUNNEL_DOMAIN", "tunnel.guardrail.lan"), ". ")),
+			PublicHTTPSPort: getInt("GUARDRAIL_HTTPS_PORT", 443),
 			TLSCert:         getEnv("GUARDRAIL_TLS_CERT", ""),
 			TLSKey:          getEnv("GUARDRAIL_TLS_KEY", ""),
 			ReadTimeout:     getDuration("GUARDRAIL_HTTP_READ_TIMEOUT", 15*time.Second),

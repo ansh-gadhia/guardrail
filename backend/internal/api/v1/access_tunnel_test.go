@@ -260,3 +260,62 @@ func TestTunnel_DisabledLeavesTheConsoleAlone(t *testing.T) {
 		t.Errorf("body = %q, want the console to answer normally", rec.Body.String())
 	}
 }
+
+// The tunnel URL is the only address this server writes out in full — every
+// other link the console produces is relative, or built by the browser from
+// window.location, and so carries the port for free. Written without the port it
+// sends the browser to 443, and a deployment published anywhere else answers a
+// refused connection on every tunnel session while its console works perfectly.
+func TestTunnelURLCarriesANonDefaultPort(t *testing.T) {
+	sid := uuid.New()
+
+	onDefault := NewAccessHandler(nil, nil, true, TunnelConfig{
+		Domain:   "tunnel.guardrail.lan",
+		Gateway:  &fakeTunnel{},
+		GrantKey: []byte("test-grant-key-at-least-32-bytes-long!!"),
+	})
+	got := onDefault.tunnelURLFor(sid)
+	want := "https://" + sid.String() + ".tunnel.guardrail.lan/__grant__?t="
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("on 443 the port must stay implicit\n got: %s\nwant prefix: %s", got, want)
+	}
+
+	onOther := NewAccessHandler(nil, nil, true, TunnelConfig{
+		Domain:     "tunnel.guardrail.lan",
+		PortSuffix: ":4444",
+		Gateway:    &fakeTunnel{},
+		GrantKey:   []byte("test-grant-key-at-least-32-bytes-long!!"),
+	})
+	got = onOther.tunnelURLFor(sid)
+	want = "https://" + sid.String() + ".tunnel.guardrail.lan:4444/__grant__?t="
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("a non-443 port must appear in the URL\n got: %s\nwant prefix: %s", got, want)
+	}
+}
+
+// A port in the URL must not change how hostnames are MATCHED: the Host header
+// carries the port, dispatch strips it, and the session id has to survive both.
+func TestTunnelDispatchIgnoresThePort(t *testing.T) {
+	f := &fakeTunnel{token: "tok", live: true}
+	h := NewAccessHandler(nil, nil, true, TunnelConfig{
+		Domain:     "tunnel.guardrail.lan",
+		PortSuffix: ":4444",
+		Gateway:    f,
+		GrantKey:   []byte("test-grant-key-at-least-32-bytes-long!!"),
+	})
+	e := engineWith(h)
+
+	sid := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = sid.String() + ".tunnel.guardrail.lan:4444"
+	req.AddCookie(&http.Cookie{Name: tunnelCookieName(sid.String()), Value: "tok"})
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a tunnel host with a port was not dispatched to the tunnel: HTTP %d", rec.Code)
+	}
+	if f.servedT != "tok" {
+		t.Errorf("the tunnel gateway saw token %q, want the cookie's", f.servedT)
+	}
+}

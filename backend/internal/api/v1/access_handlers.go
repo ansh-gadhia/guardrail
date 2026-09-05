@@ -81,6 +81,12 @@ type TunnelConfig struct {
 	// Domain is the base domain for per-session hostnames, e.g.
 	// "tunnel.guardrail.lan". Empty disables whole-host delivery.
 	Domain string
+	// PortSuffix is ":<port>" when the deployment is published on a port other
+	// than 443, empty otherwise. It is appended to the hostname in the tunnel URL
+	// the console hands the operator — without it that URL points at 443, and on
+	// a deployment published anywhere else the browser is refused a connection to
+	// a port nothing is listening on.
+	PortSuffix string
 	// Gateway is the HTTP proxy gateway that owns the tunnelled sessions.
 	Gateway TunnelServer
 	// GrantKey signs the short-lived one-time grant tokens that bootstrap a
@@ -97,7 +103,12 @@ type AccessHandler struct {
 
 	tunnel       TunnelServer
 	tunnelDomain string
-	grantKey     []byte
+	// tunnelPortSuffix is ":<port>" when this deployment is not published on 443,
+	// and empty otherwise. Kept separate from tunnelDomain because the domain is
+	// what hostnames are MATCHED against (where a port must never appear) and the
+	// suffix is what URLs are BUILT with (where it must).
+	tunnelPortSuffix string
+	grantKey         []byte
 }
 
 // NewAccessHandler constructs an AccessHandler. tun may be a zero TunnelConfig,
@@ -110,6 +121,7 @@ func NewAccessHandler(svc *appaccess.Service, gw SessionServer, secure bool, tun
 	if tun.Domain != "" && tun.Gateway != nil {
 		h.tunnel = tun.Gateway
 		h.tunnelDomain = strings.ToLower(strings.Trim(tun.Domain, "."))
+		h.tunnelPortSuffix = tun.PortSuffix
 		h.grantKey = tun.GrantKey
 	}
 	return h
