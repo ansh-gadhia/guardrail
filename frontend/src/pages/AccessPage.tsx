@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
 import type { UserRow, Role, Permission, RoleDeviceAccess, AssetGroup } from "@/lib/types";
+import { authProviderLabel, federatedAccount } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, ErrorNote, EmptyState, Modal, Field, StatCluster, Badge, Skeleton, Spinner, Tabs, Input, Button, cn } from "@/components/ui";
 import { IconUsers, IconPlus, IconTrash, IconShield, IconLock, IconCheck, IconMinus, IconSliders, IconAudit, IconDevices, IconFolder, IconGlobe, IconKey, IconAlert, IconClipboard } from "@/components/icons";
@@ -105,6 +106,10 @@ export function AccessPage() {
                 // Named once: it gates the delete button and the sentence that
                 // explains why the button is off.
                 const isSelf = u.user_id === me?.user_id;
+                // Named here for the same reason isSelf is: it decides a badge
+                // AND which controls below are truthful.
+                const provider = authProviderLabel(u.auth_provider);
+                const federated = federatedAccount(u.auth_provider);
                 return (
                   <div key={u.user_id} className="group relative flex flex-col overflow-hidden rounded-xl card-grad p-4 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-line-strong hover:shadow-md">
                     <div className="flex items-start gap-3">
@@ -117,6 +122,18 @@ export function AccessPage() {
                       </div>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-1.5">
+                      {/* Where the account comes from, before what it can do.
+                          Its own tone: this is not a role and must not read as
+                          one, and it changes what the controls below mean. Only
+                          federated accounts carry it — see authProviderLabel. */}
+                      {provider && (
+                        <Badge
+                          tone="info"
+                          title={`This account signs in through ${provider}. GuardRail holds no password for it, and its roles may be reapplied on each sign-in.`}
+                        >
+                          {provider} account
+                        </Badge>
+                      )}
                       {u.is_super_admin ? (
                         <>
                           <Badge tone="accent">Super Admin</Badge>
@@ -151,9 +168,24 @@ export function AccessPage() {
                             <button className="btn-subtle" onClick={() => setEditRolesFor(u)}>
                               Edit roles
                             </button>
-                            <button className="btn-subtle" onClick={() => setResetFor(u)}>
-                              Reset password
-                            </button>
+                            {/* A federated account has no GuardRail password to
+                                reset — the provider holds the credential. Saying
+                                so beats a button that would return an error, and
+                                beats hiding it, which reads as a permission the
+                                administrator is missing. Same reasoning as the
+                                installation-account note above. */}
+                            {federated ? (
+                              <span
+                                className="flex items-center gap-1.5 text-xs text-faint"
+                                title={`${provider} holds this person's credential. GuardRail never had a password for this account, so there is nothing here to reset — change it where they sign in.`}
+                              >
+                                <IconKey size={13} /> Password held by {provider}
+                              </span>
+                            ) : (
+                              <button className="btn-subtle" onClick={() => setResetFor(u)}>
+                                Reset password
+                              </button>
+                            )}
                           </>
                         )}
                         {/* Outside the branch above: removal IS allowed for the

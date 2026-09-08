@@ -265,6 +265,10 @@ export interface UserRow {
   email: string;
   username: string;
   is_super_admin: boolean;
+  // How this account signs in. Carried on the list because it decides which
+  // controls are honest: an account the SIEM vouches for has no GuardRail
+  // password, so offering to reset one is offering something that cannot work.
+  auth_provider: string;
   // The account this GuardRail was installed with. Its roles cannot be changed
   // and its password cannot be reset — by anyone, including other super admins —
   // because it is the way back in if every other administrator is lost. It CAN
@@ -769,4 +773,32 @@ export interface ChainReport {
   broken_at?: string;
   broken_at_ts?: string;
   reason?: string;
+}
+
+// ---- how an account signs in ----------------------------------------------
+
+// AUTH_PROVIDER_LABEL names each federated provider the way a person says it.
+//
+// "local" is deliberately absent. It is the absence of a provider rather than
+// one of them: an account with a GuardRail password is just an account, and
+// badging every one of them "LOCAL" would spend the reader's attention on the
+// common case to mark the rare one.
+export const AUTH_PROVIDER_LABEL: Record<string, string> = {
+  siem: "SIEM",
+  oidc: "OIDC",
+  saml: "SAML",
+  ldap: "LDAP",
+};
+
+// authProviderLabel returns the short label for a provider, or null when the
+// account signs in with a GuardRail password and there is nothing to say.
+export function authProviderLabel(provider: string | undefined | null): string | null {
+  if (!provider || provider === "local") return null;
+  return AUTH_PROVIDER_LABEL[provider] ?? provider.toUpperCase();
+}
+
+// federatedAccount reports whether an identity provider owns this sign-in, and
+// therefore whether anything password-shaped applies to it at all.
+export function federatedAccount(provider: string | undefined | null): boolean {
+  return !!provider && provider !== "local";
 }

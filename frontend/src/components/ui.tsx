@@ -84,14 +84,19 @@ export function Badge({
   tone = "neutral",
   dot,
   className,
+  title,
 }: {
   children: ReactNode;
   tone?: Tone;
   dot?: boolean;
   className?: string;
+  // Hover text for a badge whose consequence is not obvious from its word. A
+  // badge that changes what the controls beside it mean has to be able to say
+  // so somewhere.
+  title?: string;
 }) {
   return (
-    <span className={cn("badge", TONE[tone], className)}>
+    <span className={cn("badge", TONE[tone], className)} title={title}>
       {dot && <span className="h-1.5 w-1.5 rounded-full bg-current" />}
       {children}
     </span>

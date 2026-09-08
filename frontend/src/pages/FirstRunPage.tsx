@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
 import type { Enrollment, MFAStatus } from "@/lib/types";
+import { federatedAccount } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { ErrorNote, Field, Spinner, cn } from "@/components/ui";
 import { BrandMark } from "@/components/brand";
@@ -25,7 +26,7 @@ import { QRCode } from "@/components/QRCode";
    would misrepresent that. */
 export function FirstRunPage() {
   const principal = useAuth((s) => s.principal);
-  const federated = principal?.auth_provider !== undefined && principal.auth_provider !== "local";
+  const federated = federatedAccount(principal?.auth_provider);
   const needsPassword = principal?.must_change_password ?? false;
   const [step, setStep] = useState<"password" | "mfa">(needsPassword ? "password" : "mfa");
 
@@ -40,7 +41,18 @@ export function FirstRunPage() {
           </div>
         </header>
 
-        {needsPassword && <Stepper step={step} />}
+        {/* Three shapes, one per way of arriving, so nobody gets a progress
+            indicator that misdescribes their situation:
+
+            temporary password -> the two-step stepper it always had;
+            identity provider  -> the handoff below, whose first step is already
+                                  done, because it is;
+            neither            -> nothing, and the card stands on its own. */}
+        {needsPassword ? (
+          <Stepper step={step} />
+        ) : federated ? (
+          <Handoff provider={principal?.auth_provider} email={principal?.email} />
+        ) : null}
 
         {step === "password" ? (
           <SetPasswordStep onDone={() => setStep("mfa")} />
@@ -49,6 +61,46 @@ export function FirstRunPage() {
         )}
       </div>
     </div>
+  );
+}
+
+// Handoff states the sequence this person is actually in the middle of.
+//
+// Being asked for anything after a successful single sign-on reads as a
+// failure — the natural conclusion is that the sign-on did not take. It did.
+// Naming the first half and marking it done is the whole job here: it turns an
+// apparent error into the second half of something already going well, and it
+// says which account arrived, which is worth confirming when the matching was
+// done by another system.
+//
+// Numbered rather than decorative, because this genuinely is a sequence: the
+// SIEM established who they are, and GuardRail is about to establish what that
+// reaches. A stepper over a single step would have been the invented kind.
+function Handoff({ provider, email }: { provider?: string; email?: string }) {
+  const who = provider === "ldap" ? "Your directory" : provider === "siem" ? "Your SIEM" : "Your identity provider";
+  return (
+    <ol className="mb-5 overflow-hidden rounded-xl border border-line bg-surface shadow-sm">
+      <li className="flex gap-3 border-b border-line px-4 py-3">
+        <span className="mt-px grid h-6 w-6 shrink-0 place-items-center rounded-full bg-success/15 text-success ring-1 ring-inset ring-success/30">
+          <IconCheck size={12} />
+        </span>
+        <div className="min-w-0">
+          <div className="text-xs font-medium text-fg">Identity verified</div>
+          <div className="truncate text-2xs text-faint">
+            {who} signed in {email ?? "this account"}.
+          </div>
+        </div>
+      </li>
+      <li className="flex gap-3 px-4 py-3">
+        <span className="mt-px grid h-6 w-6 shrink-0 place-items-center rounded-full bg-accent-soft text-2xs font-semibold text-accent ring-1 ring-inset ring-accent/30">
+          2
+        </span>
+        <div className="min-w-0">
+          <div className="text-xs font-medium text-fg">Second factor</div>
+          <div className="text-2xs text-faint">GuardRail asks for this one itself.</div>
+        </div>
+      </li>
+    </ol>
   );
 }
 
@@ -255,11 +307,11 @@ function AddMfaStep({ federated = false }: { federated?: boolean }) {
       title="Add two-factor authentication"
       subtitle={
         federated
-          ? // Said this way because being asked for anything after signing in at
-            // the SIEM reads as something having gone wrong. It has not: the SIEM
-            // said who you are, and this is the factor GuardRail can still ask for
-            // if that assertion is ever forged.
-            "Your identity provider signed you in. A second factor here is what still protects the devices this console reaches if that sign-in is ever forged."
+          ? // The argument for asking at all is made by the Handoff above this
+            // card, so repeating it here would be the second paragraph nobody
+            // reads. What is left is the thing somebody actually wants to know
+            // before deciding: how long this takes and what it needs.
+            "About a minute, with any authenticator app."
           : "A password alone protects every device this console reaches. A second factor is the difference between a stolen password and a breach."
       }
       icon={IconKey}
