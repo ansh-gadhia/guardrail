@@ -12,6 +12,66 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-08
+
+### Added
+
+- **A first-run page that fits the way you arrived.** Somebody sent over by the
+  SIEM used to land on a single card carrying two sentences of justification and
+  no sense of place, because the two-step progress indicator belongs to the
+  temporary-password flow and was simply omitted for them. The page now has three
+  shapes: the stepper for an account replacing a password it did not choose, a
+  two-part handoff for an account an identity provider vouched for, and the bare
+  card for the rare account that is neither.
+
+  The handoff is the point. Being asked for anything after a successful single
+  sign-on reads as a failure — the natural conclusion is that the sign-on did not
+  take. Naming the first half, marking it done, and saying which address arrived
+  turns an apparent error into the second half of something already going well.
+  It is numbered because it genuinely is a sequence: the provider established who
+  this person is, and GuardRail is about to establish what that reaches. The
+  argument for asking having moved above the card, the card's own subtitle is now
+  the thing somebody actually wants at that moment — how long it takes and what
+  it needs.
+
+- **Federated accounts say so on the access control page.** A SIEM-provisioned
+  account was indistinguishable from a local one in the members list, which made
+  two controls beside it lie. It now carries a provider badge in its own tone —
+  not a role, and it must not read as one — and "Reset password" is replaced by a
+  line naming who does hold the credential. GuardRail never had a password for
+  that account, so the button could only ever have returned an error; hiding it
+  instead would have read as a permission the administrator was missing, which is
+  the same reasoning the installation-account note already uses.
+
+### Fixed
+
+- **The tunnel URL omitted the deployment's port.** A deployment on any port but
+  443 handed the operator a session link that could not connect: the console's
+  other links are relative or built from `window.location` and carry the port for
+  free, and the tunnel grant URL is the one address the server writes in full.
+  `GUARDRAIL_HTTPS_PORT` now reaches the API and the port is composed into that
+  URL. Matching and building are kept apart — dispatch still strips the port from
+  `Host` before comparing, because a router that compares authorities is not the
+  thing that has to produce one.
+
+- **A recorded session's timeline held one entry.** Only `frameNavigated` was
+  ever written, which a single-page admin console emits once, on load — so a
+  53-second recording of real work reported one event and the replay had nothing
+  to seek against. In-page navigations, state-changing requests, downloads and
+  dialogs are now recorded, coalesced per action so a polling dashboard collapses
+  while distinct actions all survive, and bounded so a redirect loop cannot spend
+  the recorder's memory. The player it feeds became a real one: clock-driven
+  playback that keeps time across idle gaps, a linear scrubber, click-to-seek
+  from the timeline, and keyboard shortcuts scoped so they no longer take Space
+  from a text field.
+
+- **The bundled resolver restarted forever instead of saying why.** dnsmasq binds
+  one address and exits when it cannot; with `restart: unless-stopped` that is an
+  invisible hot loop. It now refuses out loud, naming the host's real addresses
+  and the command that fixes it, and the installer runs a port-53 preflight
+  before offering to enable the resolver at all rather than defaulting it on into
+  a conflict.
+
 ### Security
 
 - **`siem-sso.sh` told operators to clear the SIEM shared secret in a way that
