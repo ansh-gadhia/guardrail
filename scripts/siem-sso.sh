@@ -129,6 +129,10 @@ Options
                     A migration aid only: it hands this server a key that can
                     FORGE the SIEM's assertions rather than merely check them.
                     Clear it the day the SIEM signs from its JWKS.
+  --no-secret       stop accepting HS256: clears any shared secret already set.
+                    Omitting --secret does NOT do this — a re-run leaves an
+                    existing secret alone, so that re-pinning a rotated
+                    certificate cannot end a migration by accident.
   --org ${D}<slug>${R}       which organization SIEM users land in. Defaults to the
                     only one on this deployment, which is almost always right.
   --audience ${D}<s>${R}     the aud this GuardRail accepts   ${D}(default: guardrail-pam)${R}
@@ -302,7 +306,8 @@ show_status() {
     printf '  %-22s %s\n' "role ceiling" "$(env_or GUARDRAIL_SIEM_SSO_MAX_ROLE '(none — Super Admin is barred regardless)')"
     if [ -n "$secret" ]; then
         warn "a shared secret is set: this server holds a key that can FORGE the SIEM's"
-        warn "assertions. Clear GUARDRAIL_SIEM_SSO_SECRET once the SIEM signs from its JWKS."
+        warn "assertions. Once the SIEM signs from its JWKS, clear it with:"
+        warn "  ${B}sudo $0 ${url} --no-secret${R}"
     fi
     if [ -f "$CERT_HOST_PATH" ]; then
         local expiry; expiry=$(openssl x509 -in "$CERT_HOST_PATH" -noout -enddate 2>/dev/null | cut -d= -f2 || true)
@@ -403,12 +408,14 @@ turn_off() {
 # setup
 # ---------------------------------------------------------------------------
 JWKS_URL=""; SECRET=""; ORG=""; AUDIENCE=""; ISSUER=""; MAX_ROLE=""; VERIFY=1; CERT_IN=""
+CLEAR_SECRET=0
 
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --cert)      CERT_IN="${2:-}"; shift 2 ;;
             --secret)    SECRET="${2:-}"; shift 2 ;;
+            --no-secret) CLEAR_SECRET=1; shift ;;
             --org)       ORG="${2:-}"; shift 2 ;;
             --audience)  AUDIENCE="${2:-}"; shift 2 ;;
             --issuer)    ISSUER="${2:-}"; shift 2 ;;
@@ -559,14 +566,32 @@ do_setup() {
     fi
     [ -n "$ORG" ]      && env_set GUARDRAIL_SIEM_SSO_ORG "$ORG"
     [ -n "$MAX_ROLE" ] && env_set GUARDRAIL_SIEM_SSO_MAX_ROLE "$MAX_ROLE"
+    # Three states, and the silent one is the reason this is not a single `if`.
+    # An absent --secret means "I did not mention the secret", not "remove it":
+    # re-pinning a rotated certificate mid-migration must not quietly stop
+    # accepting the tokens the SIEM is still signing. But silence must not be
+    # mistaken for removal either, so the third branch says out loud that a
+    # secret survived and names the flag that clears it.
     if [ -n "$SECRET" ]; then
         if [ "${#SECRET}" -lt 32 ]; then
             die "that shared secret is ${#SECRET} characters — too short to be worth having. Use at least 32."
         fi
+        [ "$CLEAR_SECRET" = "1" ] && die "--secret and --no-secret contradict each other"
         env_set GUARDRAIL_SIEM_SSO_SECRET "$SECRET"
         warn "HS256 enabled. This server now holds a key that can FORGE the SIEM's"
         warn "assertions, not merely verify them. Clear it once the SIEM signs from its JWKS:"
-        warn "  ${B}sudo $0 <jwks-url>${R}   ${D}(without --secret)${R}"
+        warn "  ${B}sudo $0 <jwks-url> --no-secret${R}"
+    elif [ "$CLEAR_SECRET" = "1" ]; then
+        if [ -n "$(env_get GUARDRAIL_SIEM_SSO_SECRET)" ]; then
+            env_set GUARDRAIL_SIEM_SSO_SECRET ""
+            ok "shared secret cleared — HS256 tokens are now refused outright"
+        else
+            info "no shared secret was set; nothing to clear"
+        fi
+    elif [ -n "$(env_get GUARDRAIL_SIEM_SSO_SECRET)" ]; then
+        warn "a shared secret is still set and was left alone by this run — this server"
+        warn "can still FORGE the SIEM's assertions. Clear it with:"
+        warn "  ${B}sudo $0 <jwks-url> --no-secret${R}"
     fi
     ok "written to ${D}${ENV_FILE}${R}"
     printf '  %-32s %s\n' "GUARDRAIL_SIEM_JWKS_URL" "$JWKS_URL"

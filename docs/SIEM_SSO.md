@@ -33,6 +33,11 @@ Drop `--cert` and it fetches the certificate itself and shows you the fingerprin
 before trusting it. Drop `--secret` and it uses the JWKS alone, which is the
 better place to end up (§12).
 
+On a **re-run**, omitting `--secret` leaves a secret that is already set alone —
+so that re-pinning a rotated certificate mid-migration cannot stop the tokens the
+SIEM is still signing. Use `--no-secret` to actually remove one; the run says so
+out loud either way.
+
 GuardRail also answers to the **unprefixed** env names, so a working block from
 another consumer can be pasted straight into `/opt/guardrail/.env`:
 
@@ -681,8 +686,19 @@ every token names its own.
 
 **Cutover with no outage:** set `JWKS_URL` while the secret is still set — both
 work, and the token's own signed `alg` routes verification. When every issuer has
-moved, clear the secret; HS256 tokens are then rejected outright rather than
-quietly still working. That is a config action, not a release.
+moved, clear the secret:
+
+```bash
+sudo /opt/guardrail/siem-sso.sh <jwks-url> --no-secret
+```
+
+HS256 tokens are then rejected outright rather than quietly still working. That is
+a config action, not a release.
+
+`--no-secret` is required, and omitting `--secret` is not the same thing: a bare
+re-run leaves an existing secret in place on purpose, so that re-pinning a
+certificate does not end a migration by accident. A run that leaves one in place
+says so, and `siem-sso.sh status` keeps warning for as long as one is set.
 
 **Why routing on `alg` is safe here.** Routing on an attacker-visible header is
 normally how an algorithm-confusion downgrade starts: take the published RSA
@@ -711,7 +727,8 @@ a person.
 
 | Status | Detail | Cause / fix |
 |---|---|---|
-| 503 | SSO is not configured | no JWKS URL, or no `FEDERATION_ORG_ID` |
+| 503 | SSO is not configured | neither a JWKS URL nor a shared secret is set |
+| 503 | this deployment has N organizations… | several tenants and no `SIEM_SSO_ORG` to say which one SIEM users belong to |
 | 503 | SSO temporarily unavailable | JWKS unreachable with nothing cached, or Redis down |
 | 401 | the token header could not be read | malformed token |
 | 401 | unsupported signing algorithm `X` | outside the accepted families (`none` lands here) |

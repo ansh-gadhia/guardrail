@@ -12,6 +12,25 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+### Security
+
+- **`siem-sso.sh` told operators to clear the SIEM shared secret in a way that
+  did not clear it.** The HS256 secret is a migration aid: while it is set,
+  GuardRail holds a key that can *forge* the SIEM's assertions rather than merely
+  check them, so removing it is the one step of the cutover that matters. Both
+  the script's own closing warning and `docs/SIEM_SSO.md` said to re-run without
+  `--secret` — but the write was guarded by `if [ -n "$SECRET" ]`, so an absent
+  flag left the existing value in `.env` untouched. An operator who followed the
+  instruction ended a migration in their notes and nowhere else.
+
+  Omitting `--secret` still leaves an existing secret alone, deliberately:
+  re-pinning a rotated certificate mid-migration must not stop the tokens the
+  SIEM is still signing. What changed is that silence is no longer mistaken for
+  removal — there is now an explicit `--no-secret` that clears it, a run that
+  leaves one in place says so and names the flag, `--secret` together with
+  `--no-secret` is refused rather than resolved, and `status` prints the exact
+  command instead of naming the `.env` key.
+
 ## [1.3.0] - 2026-09-04
 
 > This section covers everything since **1.0.0**. Releases 1.1.x and 1.2.0 were
