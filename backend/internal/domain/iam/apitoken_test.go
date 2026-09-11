@@ -1,6 +1,7 @@
 package iam
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -151,5 +152,21 @@ func TestAPITokenClaims(t *testing.T) {
 	c.Permissions[0] = "tampered"
 	if tok.Scopes[0] != "device:read" {
 		t.Error("Claims aliased the token's scope slice")
+	}
+}
+
+// A recording is the session itself — an unredacted transcript of everything the
+// device printed. A machine credential that never expires and lives in a config
+// file must not be able to pull the estate's evidence archive.
+func TestRecordingReadIsNotATokenScope(t *testing.T) {
+	if _, ok := AllowedTokenScopes["recording:read"]; ok {
+		t.Fatal("recording:read is back in AllowedTokenScopes — see SECURITY_AUDIT/01-findings.md H2")
+	}
+	if _, err := ValidateScopes([]string{"recording:read"}); !errors.Is(err, ErrTokenScope) {
+		t.Fatalf("minting a token with recording:read returned %v, want ErrTokenScope", err)
+	}
+	// Reads that are genuinely metadata still work, so a dashboard is unaffected.
+	if _, err := ValidateScopes([]string{"device:read", "session:read"}); err != nil {
+		t.Errorf("a metadata-only token was refused: %v", err)
 	}
 }

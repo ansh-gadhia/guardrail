@@ -1,0 +1,19 @@
+# Build context hygiene for backend/Dockerfile, which does `COPY . .`.
+#
+# .env lives at the repo root, outside this context, so it was never shipped —
+# but that was position, not policy. These rules make it policy, and keep the
+# 16MB committed binary and any stray key material out of the image layers.
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+
+# Local build output and caches.
+bin/
+*.test
+*.out
+coverage.*

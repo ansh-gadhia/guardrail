@@ -440,17 +440,18 @@ Reconciliation is never fatal.
 ## 7. The browser handoff
 
 ```
-https://<console-host>/auth/sso#token=<exchange-token>      ← preferred
-https://<console-host>/auth/sso?token=<exchange-token>      ← accepted fallback
+https://<console-host>/auth/sso#token=<exchange-token>      ← the only accepted form
 ```
 
 > **Fragment, not query string.** A URL fragment is never transmitted to a
 > server. A query string is — so `?token=…` is written verbatim into Traefik's
 > access log, which is rotated, shipped somewhere and kept far longer than the
 > thirty seconds the credential is alive. It also lands in browser history and in
-> the `Referer` of whatever the page loads next. The query string is accepted so
-> an issuer already redirecting that way keeps working, and has a strictly better
-> option to move to.
+> the `Referer` of whatever the page loads next. The query string used to be
+> accepted as a fallback and no longer is: a live bearer credential somewhere it
+> will certainly be logged is the vulnerability, not a compatibility shim. A
+> launcher pointed at `?token=` now fails closed instead of succeeding and
+> writing the token to disk on the way past.
 
 The callback page reads the fragment, **scrubs it from the address bar via
 `history.replaceState` before attempting the exchange**, POSTs it, and replaces

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,20 +15,66 @@ import (
 
 // CredentialRepo implements vault.CredentialRepository. It persists only sealed
 // (envelope-encrypted) secret material; no plaintext ever passes through here.
-type CredentialRepo struct{ db *DB }
+type CredentialRepo struct {
+	db *DB
+	// signer proves a binding row was written by GuardRail. Optional; see
+	// WithBindingSigner.
+	signer vault.BindingSigner
+}
 
 // NewCredentialRepo constructs a CredentialRepo.
 func NewCredentialRepo(db *DB) *CredentialRepo { return &CredentialRepo{db: db} }
 
+// WithBindingSigner attaches the signer that proves a binding row was written by
+// GuardRail, and returns the repo so wiring stays a one-liner.
+//
+// Optional, and nil means every binding is accepted. That is not a policy
+// choice, it is what keeps this repo constructible in tests that care about
+// credential storage and nothing else; main always sets it.
+func (r *CredentialRepo) WithBindingSigner(s vault.BindingSigner) *CredentialRepo {
+	r.signer = s
+	return r
+}
+
+// checkBinding verifies a binding's signature.
+//
+// An UNSIGNED row is accepted and reported, rather than refused. Every binding
+// that existed before 0035 has no signature, and refusing them would break every
+// device session on the release that adds this column — a security upgrade that
+// takes the estate offline is one that gets rolled back. SignUnsignedBindings
+// runs at startup and closes that window; what this must never do is accept a
+// signature that is present and WRONG, which is the actual attack.
+func (r *CredentialRepo) checkBinding(mac []byte, scope string, parent, credID, userID uuid.UUID) error {
+	if r.signer == nil || len(mac) == 0 {
+		return nil
+	}
+	if !r.signer.Verify(mac, scope, parent, credID, userID) {
+		return vault.ErrBindingUnsigned
+	}
+	return nil
+}
+
+// macFor computes a binding signature, or nil when no signer is configured.
+func (r *CredentialRepo) macFor(scope string, parent, credID uuid.UUID, userID *uuid.UUID) []byte {
+	if r.signer == nil {
+		return nil
+	}
+	u := uuid.Nil
+	if userID != nil {
+		u = *userID
+	}
+	return r.signer.Sign(scope, parent, credID, u)
+}
+
 const credCols = `id, organization_id, name, type, username, injection,
-	secret_ciphertext, secret_nonce, dek_wrapped, dek_nonce, kek_id, metadata,
+	secret_ciphertext, secret_nonce, dek_wrapped, dek_nonce, kek_id, aad_version, metadata,
 	rotated_at, created_at, updated_at`
 
 // credColsC is credCols qualified with the "c." alias for joined queries.
 // #nosec G101 -- a SELECT column list. The names describe where ciphertext is
 // stored; no secret is present in this string.
 const credColsC = `c.id, c.organization_id, c.name, c.type, c.username, c.injection,
-	c.secret_ciphertext, c.secret_nonce, c.dek_wrapped, c.dek_nonce, c.kek_id, c.metadata,
+	c.secret_ciphertext, c.secret_nonce, c.dek_wrapped, c.dek_nonce, c.kek_id, c.aad_version, c.metadata,
 	c.rotated_at, c.created_at, c.updated_at`
 
 func scanCredential(row pgx.Row) (*vault.Credential, error) {
@@ -36,7 +83,7 @@ func scanCredential(row pgx.Row) (*vault.Credential, error) {
 	var meta []byte
 	if err := row.Scan(&c.ID, &c.OrganizationID, &c.Name, &typ, &c.Username, &inj,
 		&c.Sealed.Ciphertext, &c.Sealed.SecretNonce, &c.Sealed.DEKWrapped, &c.Sealed.DEKNonce,
-		&c.Sealed.KEKID, &meta, &c.RotatedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		&c.Sealed.KEKID, &c.Sealed.AADVersion, &meta, &c.RotatedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, err
 	}
 	c.Type = vault.CredentialType(typ)
@@ -55,7 +102,7 @@ func scanCredentialWith(row pgx.Row, extra ...any) (*vault.Credential, error) {
 	var meta []byte
 	dest := []any{&c.ID, &c.OrganizationID, &c.Name, &typ, &c.Username, &inj,
 		&c.Sealed.Ciphertext, &c.Sealed.SecretNonce, &c.Sealed.DEKWrapped, &c.Sealed.DEKNonce,
-		&c.Sealed.KEKID, &meta, &c.RotatedAt, &c.CreatedAt, &c.UpdatedAt}
+		&c.Sealed.KEKID, &c.Sealed.AADVersion, &meta, &c.RotatedAt, &c.CreatedAt, &c.UpdatedAt}
 	dest = append(dest, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return nil, err
@@ -74,11 +121,11 @@ func (r *CredentialRepo) Create(ctx context.Context, s vault.Scope, c *vault.Cre
 	return r.db.WithScopeIDs(ctx, s.OrganizationID, s.IsSuperAdmin, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO credentials (id, organization_id, name, type, username, injection,
-				secret_ciphertext, secret_nonce, dek_wrapped, dek_nonce, kek_id, metadata)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+				secret_ciphertext, secret_nonce, dek_wrapped, dek_nonce, kek_id, aad_version, metadata)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 			c.ID, c.OrganizationID, c.Name, string(c.Type), c.Username, string(c.Injection),
 			c.Sealed.Ciphertext, c.Sealed.SecretNonce, c.Sealed.DEKWrapped, c.Sealed.DEKNonce,
-			c.Sealed.KEKID, meta)
+			c.Sealed.KEKID, c.Sealed.AADVersion, meta)
 		return mapWriteErr(err)
 	})
 }
@@ -90,11 +137,11 @@ func (r *CredentialRepo) Update(ctx context.Context, s vault.Scope, c *vault.Cre
 		ct, err := tx.Exec(ctx, `
 			UPDATE credentials SET name=$2, username=$3, injection=$4,
 				secret_ciphertext=$5, secret_nonce=$6, dek_wrapped=$7, dek_nonce=$8,
-				kek_id=$9, metadata=$10, rotated_at=now()
+				kek_id=$9, aad_version=$10, metadata=$11, rotated_at=now()
 			WHERE id=$1 AND deleted_at IS NULL`,
 			c.ID, c.Name, c.Username, string(c.Injection),
 			c.Sealed.Ciphertext, c.Sealed.SecretNonce, c.Sealed.DEKWrapped, c.Sealed.DEKNonce,
-			c.Sealed.KEKID, meta)
+			c.Sealed.KEKID, c.Sealed.AADVersion, meta)
 		if err != nil {
 			return mapWriteErr(err)
 		}
@@ -194,10 +241,12 @@ func (r *CredentialRepo) BindToDevice(ctx context.Context, s vault.Scope, device
 			return vault.ErrNotFound
 		}
 		_, err := tx.Exec(ctx, `
-			INSERT INTO device_credentials (device_id, credential_id, user_id)
-			VALUES ($1,$2,$3)
-			ON CONFLICT (device_id, credential_id) DO UPDATE SET user_id=EXCLUDED.user_id`,
-			deviceID, credentialID, userID)
+			INSERT INTO device_credentials (device_id, credential_id, user_id, binding_mac)
+			VALUES ($1,$2,$3,$4)
+			ON CONFLICT (device_id, credential_id) DO UPDATE
+				SET user_id=EXCLUDED.user_id, binding_mac=EXCLUDED.binding_mac`,
+			deviceID, credentialID, userID,
+			r.macFor(vault.BindingScopeDevice, deviceID, credentialID, userID))
 		return mapWriteErr(err)
 	})
 }
@@ -225,10 +274,12 @@ func (r *CredentialRepo) BindToGroup(ctx context.Context, s vault.Scope, groupID
 			return vault.ErrNotFound
 		}
 		_, err := tx.Exec(ctx, `
-			INSERT INTO group_credentials (asset_group_id, credential_id, user_id)
-			VALUES ($1,$2,$3)
-			ON CONFLICT (asset_group_id, credential_id) DO UPDATE SET user_id=EXCLUDED.user_id`,
-			groupID, credentialID, userID)
+			INSERT INTO group_credentials (asset_group_id, credential_id, user_id, binding_mac)
+			VALUES ($1,$2,$3,$4)
+			ON CONFLICT (asset_group_id, credential_id) DO UPDATE
+				SET user_id=EXCLUDED.user_id, binding_mac=EXCLUDED.binding_mac`,
+			groupID, credentialID, userID,
+			r.macFor(vault.BindingScopeGroup, groupID, credentialID, &userID))
 		return mapWriteErr(err)
 	})
 }
@@ -263,16 +314,22 @@ func (r *CredentialRepo) ResolveForDevice(ctx context.Context, s vault.Scope, de
 		}
 
 		if !perUser {
-			row := tx.QueryRow(ctx, `SELECT `+credColsC+`
+			var mac []byte
+			row := tx.QueryRow(ctx, `SELECT `+credColsC+`, dc.binding_mac
 				FROM credentials c
 				JOIN device_credentials dc ON dc.credential_id = c.id
 				WHERE dc.device_id=$1 AND dc.user_id IS NULL AND c.deleted_at IS NULL
 				LIMIT 1`, deviceID)
-			c, e := scanCredential(row)
+			c, e := scanCredentialWith(row, &mac)
 			if errors.Is(e, pgx.ErrNoRows) {
 				return vault.ErrNotFound
 			}
 			if e != nil {
+				return e
+			}
+			// A shared binding signs uuid.Nil for the user, so it cannot be
+			// re-labelled as one person's and keep its signature.
+			if e := r.checkBinding(mac, vault.BindingScopeDevice, deviceID, c.ID, uuid.Nil); e != nil {
 				return e
 			}
 			res.Credential = c
@@ -280,13 +337,17 @@ func (r *CredentialRepo) ResolveForDevice(ctx context.Context, s vault.Scope, de
 		}
 
 		// Bound directly to this device for this person.
-		row := tx.QueryRow(ctx, `SELECT `+credColsC+`
+		var devMAC []byte
+		row := tx.QueryRow(ctx, `SELECT `+credColsC+`, dc.binding_mac
 			FROM credentials c
 			JOIN device_credentials dc ON dc.credential_id = c.id
 			WHERE dc.device_id=$1 AND dc.user_id=$2 AND c.deleted_at IS NULL
 			LIMIT 1`, deviceID, userID)
-		c, e := scanCredential(row)
+		c, e := scanCredentialWith(row, &devMAC)
 		if e == nil {
+			if ve := r.checkBinding(devMAC, vault.BindingScopeDevice, deviceID, c.ID, userID); ve != nil {
+				return ve
+			}
 			res.Credential, res.PerUser = c, true
 			return nil
 		}
@@ -296,20 +357,27 @@ func (r *CredentialRepo) ResolveForDevice(ctx context.Context, s vault.Scope, de
 
 		// Inherited from the nearest ancestor group that names this person.
 		var groupID uuid.UUID
+		var grpMAC []byte
 		row = tx.QueryRow(ctx, ancestorsCTE+`
-			SELECT `+credColsC+`, gc.asset_group_id
+			SELECT `+credColsC+`, gc.asset_group_id, gc.binding_mac
 			FROM group_credentials gc
 			JOIN up ON up.id = gc.asset_group_id
 			JOIN credentials c ON c.id = gc.credential_id
 			WHERE gc.user_id = $2 AND c.deleted_at IS NULL
 			ORDER BY up.depth
 			LIMIT 1`, deviceID, userID)
-		c, e = scanCredentialWith(row, &groupID)
+		c, e = scanCredentialWith(row, &groupID, &grpMAC)
 		if errors.Is(e, pgx.ErrNoRows) {
 			return vault.ErrNotFound
 		}
 		if e != nil {
 			return e
+		}
+		// Signed against the GROUP, not the device: one group binding legitimately
+		// serves every device in the subtree, which is why the device id cannot be
+		// part of what is signed here.
+		if ve := r.checkBinding(grpMAC, vault.BindingScopeGroup, groupID, c.ID, userID); ve != nil {
+			return ve
 		}
 		res.Credential, res.PerUser, res.Inherited, res.GroupID = c, true, true, &groupID
 		return nil
@@ -631,4 +699,250 @@ func (r *CredentialRepo) ListByKEK(ctx context.Context, kekID string, limit int)
 		return rows.Err()
 	})
 	return out, err
+}
+
+// SignUnsignedBindings signs every binding that has no signature yet, and
+// returns how many it wrote.
+//
+// This is what lets 0035 ship without an outage. The column arrives NULL on
+// every row that already existed, ResolveForDevice accepts an absent signature,
+// and this closes that window on the next boot without anybody being asked to
+// run anything.
+//
+// Cross-tenant by necessity — it runs before any request has an organization —
+// so it uses the unscoped connection deliberately, and touches only the MAC
+// column. Idempotent: a second run finds nothing.
+//
+// It signs whatever is there, which means a malicious binding inserted before
+// this first ran would be blessed. That is inherent to backfilling trust onto
+// existing data and is why the migration says so out loud.
+func (r *CredentialRepo) SignUnsignedBindings(ctx context.Context) (int, error) {
+	if r.signer == nil {
+		return 0, nil
+	}
+	var signed int
+
+	type devRow struct {
+		device, cred uuid.UUID
+		user         *uuid.UUID
+	}
+	type grpRow struct {
+		group, cred uuid.UUID
+		user        uuid.UUID
+	}
+
+	err := r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT device_id, credential_id, user_id FROM device_credentials WHERE binding_mac IS NULL`)
+		if err != nil {
+			return err
+		}
+		var devs []devRow
+		for rows.Next() {
+			var d devRow
+			if err := rows.Scan(&d.device, &d.cred, &d.user); err != nil {
+				rows.Close()
+				return err
+			}
+			devs = append(devs, d)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		grows, err := tx.Query(ctx,
+			`SELECT asset_group_id, credential_id, user_id FROM group_credentials WHERE binding_mac IS NULL`)
+		if err != nil {
+			return err
+		}
+		var grps []grpRow
+		for grows.Next() {
+			var g grpRow
+			if err := grows.Scan(&g.group, &g.cred, &g.user); err != nil {
+				grows.Close()
+				return err
+			}
+			grps = append(grps, g)
+		}
+		grows.Close()
+		if err := grows.Err(); err != nil {
+			return err
+		}
+
+		for _, d := range devs {
+			mac := r.macFor(vault.BindingScopeDevice, d.device, d.cred, d.user)
+			if _, err := tx.Exec(ctx,
+				`UPDATE device_credentials SET binding_mac=$3 WHERE device_id=$1 AND credential_id=$2`,
+				d.device, d.cred, mac); err != nil {
+				return err
+			}
+			signed++
+		}
+		for _, g := range grps {
+			mac := r.macFor(vault.BindingScopeGroup, g.group, g.cred, &g.user)
+			if _, err := tx.Exec(ctx,
+				`UPDATE group_credentials SET binding_mac=$3 WHERE asset_group_id=$1 AND credential_id=$2`,
+				g.group, g.cred, mac); err != nil {
+				return err
+			}
+			signed++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return signed, nil
+}
+
+// ListByAADVersion returns credentials sealed under a given associated-data
+// rule. Cross-tenant: the re-seal job runs at startup, before any request has an
+// organization.
+func (r *CredentialRepo) ListByAADVersion(ctx context.Context, version, limit int) ([]vault.Credential, error) {
+	limit = normalizeLimit(limit)
+	var out []vault.Credential
+	err := r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT `+credCols+`
+			FROM credentials WHERE aad_version=$1 AND deleted_at IS NULL LIMIT $2`, version, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			c, e := scanCredential(rows)
+			if e != nil {
+				return e
+			}
+			out = append(out, *c)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ReplaceSealed swaps the sealed material and nothing else.
+//
+// Deliberately does NOT touch rotated_at: re-sealing changes how a secret is
+// protected, not what it is, and an operator reading "rotated 2 minutes ago"
+// off an upgrade would go looking for a password change that never happened.
+func (r *CredentialRepo) ReplaceSealed(ctx context.Context, id uuid.UUID, sealed vault.SealedSecret) error {
+	return r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		ct, err := tx.Exec(ctx, `
+			UPDATE credentials
+			SET secret_ciphertext=$2, secret_nonce=$3, dek_wrapped=$4, dek_nonce=$5,
+				kek_id=$6, aad_version=$7
+			WHERE id=$1 AND deleted_at IS NULL`,
+			id, sealed.Ciphertext, sealed.SecretNonce, sealed.DEKWrapped, sealed.DEKNonce,
+			sealed.KEKID, sealed.AADVersion)
+		if err != nil {
+			return err
+		}
+		if ct.RowsAffected() == 0 {
+			return vault.ErrNotFound
+		}
+		return nil
+	})
+}
+
+// RegisterKEK records a key id in the encryption_keys registry.
+//
+// credentials.kek_id is a foreign key to this table, so a key that is not
+// registered cannot seal anything: the first credential written under it fails
+// on the constraint. The id used to be the fixed 'env:1' seeded by migration
+// 0003, which made this unnecessary; now that ids are derived from the key,
+// a changed master key means a new id that nothing has ever heard of.
+//
+// Idempotent, and deliberately does not touch `active`: which key is current is
+// the provider's answer, not a column's, and two sources for it is how they
+// disagree.
+func (r *CredentialRepo) RegisterKEK(ctx context.Context, id, provider string) error {
+	if id == "" {
+		return fmt.Errorf("%w: a KEK id is required", vault.ErrInvalid)
+	}
+	return r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO encryption_keys (id, provider, alias)
+			VALUES ($1, $2, '')
+			ON CONFLICT (id) DO NOTHING`, id, provider)
+		return err
+	})
+}
+
+// CountByKEK returns how many live credentials are sealed under a key id.
+func (r *CredentialRepo) CountByKEK(ctx context.Context, kekID string) (int, error) {
+	var n int
+	err := r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM credentials WHERE kek_id=$1 AND deleted_at IS NULL`,
+			kekID).Scan(&n)
+	})
+	return n, err
+}
+
+// DueForPurge returns credentials soft-deleted before the cutoff, oldest first.
+//
+// Cross-tenant: retention is a property of the deployment's sweep, and the
+// sweep has no organization of its own.
+func (r *CredentialRepo) DueForPurge(ctx context.Context, before time.Time, limit int) ([]vault.Credential, error) {
+	limit = normalizeLimit(limit)
+	var out []vault.Credential
+	err := r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT `+credCols+`
+			FROM credentials
+			WHERE deleted_at IS NOT NULL AND deleted_at < $1
+			ORDER BY deleted_at
+			LIMIT $2`, before, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			c, e := scanCredential(rows)
+			if e != nil {
+				return e
+			}
+			out = append(out, *c)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// HardDelete removes a credential and its bindings for good.
+//
+// Bindings first, and in the same transaction: device_credentials and
+// group_credentials reference credentials with ON DELETE RESTRICT, so the
+// credential cannot go while a binding names it. Doing both in one transaction
+// means there is never a moment where a binding points at nothing.
+//
+// This is the only place in the product that destroys credential material. It
+// is called for rows already soft-deleted past their retention, never on the
+// live path.
+func (r *CredentialRepo) HardDelete(ctx context.Context, id uuid.UUID) error {
+	return r.db.WithSystemScope(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM device_credentials WHERE credential_id=$1`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM group_credentials WHERE credential_id=$1`, id); err != nil {
+			return err
+		}
+		// The deleted_at guard is not redundant. It is the last thing standing
+		// between this function and a live credential if a caller ever passes the
+		// wrong id: a row that was never soft-deleted is not eligible, full stop.
+		ct, err := tx.Exec(ctx, `DELETE FROM credentials WHERE id=$1 AND deleted_at IS NOT NULL`, id)
+		if err != nil {
+			return err
+		}
+		if ct.RowsAffected() == 0 {
+			return vault.ErrNotFound
+		}
+		return nil
+	})
 }

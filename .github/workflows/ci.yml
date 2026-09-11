@@ -116,6 +116,15 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U guardrail"
           --health-interval 5s --health-timeout 3s --health-retries 10
+      # The job has been called "live Postgres + Redis" all along without one,
+      # which is why the smoke test that checks both datastores are reachable
+      # skipped on every run.
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -151,7 +160,33 @@ jobs:
           # point — so simulating an attacker with database access needs the role
           # that owns the table.
           GUARDRAIL_TEST_OWNER_DSN: postgres://guardrail:guardrail@localhost:5432/guardrail?sslmode=disable
-        run: go test -tags=integration ./test/...
+          # The envelope, AAD and binding-MAC tests SKIP without this rather than
+          # fail, so leaving it unset is how the suite goes green having never
+          # exercised credential sealing at all. A throwaway value: this database
+          # is created and destroyed by the job.
+          GUARDRAIL_TEST_MASTER_KEY: ci-integration-master-key-not-a-real-secret
+          # The smoke test reads this one, and skips without it.
+          GUARDRAIL_POSTGRES_DSN: postgres://guardrail_app:apppass@localhost:5432/guardrail?sslmode=disable
+        run: |
+          # pipefail, because `go test | tee` otherwise reports tee's exit status
+          # and a failing suite would pass this step.
+          set -o pipefail
+          go test -tags=integration -count=1 -v ./test/... 2>&1 | tee /tmp/it.log
+
+      # A skip here is not a test that does not apply to this platform — every
+      # one of them is an unset variable or an empty table, and the tests that
+      # skip that way are the ones covering credential sealing and its
+      # tamper-evidence. Skipping all five and reporting ok is exactly what this
+      # suite used to do.
+      - name: Assert no integration test silently skipped
+        run: |
+          skipped=$(grep -c '^--- SKIP' /tmp/it.log || true)
+          if [ "${skipped}" -ne 0 ]; then
+            echo "::error::${skipped} integration test(s) skipped rather than ran."
+            grep '^--- SKIP' /tmp/it.log
+            exit 1
+          fi
+          echo "all $(grep -c '^--- PASS' /tmp/it.log) integration tests ran; none skipped"
 
   security:
     name: Security scans
@@ -266,6 +301,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # A version tag must name one build, for ever.
+      #
+      # It did not. Publishing overwrote :<VERSION> on every push to main, so
+      # the tag a deployment pins to moved underneath it and "we were running
+      # 1.4.0" was unfalsifiable — the running image could be any of the builds
+      # published while VERSION happened to read 1.4.0. That is a poor property
+      # for any product and an unacceptable one for a privileged-access broker,
+      # where the first question after an incident is what code held the
+      # credentials.
+      #
+      # From here, publishing a version that already exists FAILS. Cutting a
+      # release means bumping VERSION — which scripts/release.sh already does,
+      # and which the version job already checks for consistency.
+      #
+      # :latest and :sha-<commit> are unaffected: one is explicitly a moving
+      # pointer, the other is immutable by construction.
+      - name: Refuse to overwrite a published version
+        if: github.event_name != 'pull_request'
+        run: |
+          image='${{ steps.meta.outputs.image }}'
+          version='${{ steps.meta.outputs.version }}'
+          if docker manifest inspect "${image}:${version}" >/dev/null 2>&1; then
+            echo "::error::${image}:${version} is already published."
+            echo "A version tag names one build and must not be overwritten."
+            echo "Bump VERSION (scripts/release.sh patch|minor|major) and push again."
+            exit 1
+          fi
+          echo "${image}:${version} is unpublished — proceeding."
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -287,7 +351,15 @@ jobs:
           # redo the Go module graph and the Chromium install from scratch.
           cache-from: type=registry,ref=${{ steps.meta.outputs.image }}:buildcache
           cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}:buildcache,mode=max', steps.meta.outputs.image) || '' }}
-          provenance: false
+          # Provenance and SBOM attestations. These were off, which left the
+          # published image with nothing to check it against: a version tag that
+          # moves (see the guard above) AND no attestation means "we were running
+          # 1.4.0" cannot be corroborated by anything.
+          provenance: true
+          sbom: true
+          # The digest of what was actually pushed, so the summary can print
+          # something an operator can pin to.
+          outputs: type=image,push=${{ github.event_name != 'pull_request' }}
 
       - name: Summary
         if: github.event_name != 'pull_request'
@@ -297,7 +369,7 @@ jobs:
             echo ""
             echo "| Tag | Meaning |"
             echo "|---|---|"
-            echo "| \`${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}\` | current VERSION — moves with every push to main |"
+            echo "| \`${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}\` | this release — immutable, republishing it fails |"
             echo "| \`${{ steps.meta.outputs.image }}:latest\` | newest main build |"
             echo "| \`${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.sha }}\` | immutable, this commit |"
           } >> "$GITHUB_STEP_SUMMARY"

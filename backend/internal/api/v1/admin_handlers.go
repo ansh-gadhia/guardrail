@@ -377,7 +377,7 @@ func (h *Handler) resetPassword(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	secretJSON(c, http.StatusOK, gin.H{
 		"email":    res.Email,
 		"password": res.Password,
 		"warning": "Shown once. Give it to them over a channel you trust — they must change it at " +

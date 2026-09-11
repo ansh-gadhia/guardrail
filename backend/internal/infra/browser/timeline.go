@@ -207,14 +207,21 @@ func dedupeKey(kind string, data map[string]any) string {
 // host are the same for every row in a session — they push the part that differs
 // off the end of the line. The full URL is kept alongside for the ones that need
 // it (a download, an off-device request).
+//
+// The query is kept but its VALUES are redacted. A device that authenticates
+// over the query string — which the legacy appliances GuardRail fronts still
+// do — would otherwise write the target credential into a durable timeline row.
+// See access.RedactQuery for why the keys survive.
 func pathOf(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Path == "" {
-		return raw
+		// Unparseable, so the structure is unknown; redact anything after a "?"
+		// rather than pass it through on the chance that it is harmless.
+		return access.RedactURL(raw)
 	}
 	p := u.Path
 	if u.RawQuery != "" {
-		p += "?" + u.RawQuery
+		p += "?" + access.RedactQuery(u.RawQuery)
 	}
 	return p
 }

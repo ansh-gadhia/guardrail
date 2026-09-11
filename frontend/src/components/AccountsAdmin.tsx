@@ -484,9 +484,20 @@ function BulkImport() {
 
               {pasting ? (
                 <div className="mt-2">
+                  {/* Every line in this box holds a device password in the
+                      clear. Browser spellcheck ships the contents of a field to
+                      a remote service in some browsers and extensions, and
+                      autocorrect would silently rewrite a secret — so all three
+                      are off here. They stay ON for the Textarea component
+                      generally, which is used for approval notes and team
+                      descriptions where the help is worth having. */}
                   <Textarea
                     rows={5}
                     autoFocus
+                    spellCheck={false}
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    data-1p-ignore
                     className="font-mono text-xs"
                     value={paste}
                     onChange={(e) => setPaste(e.target.value)}

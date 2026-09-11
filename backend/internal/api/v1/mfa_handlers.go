@@ -31,7 +31,7 @@ func (h *Handler) mfaEnroll(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	secretJSON(c, http.StatusOK, gin.H{
 		"secret":           enr.Secret,
 		"provisioning_uri": enr.ProvisioningURI,
 	})
@@ -57,7 +57,7 @@ func (h *Handler) mfaConfirm(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"recovery_codes": codes})
+	secretJSON(c, http.StatusOK, gin.H{"recovery_codes": codes})
 }
 
 type mfaDisableRequest struct {
@@ -88,5 +88,5 @@ func (h *Handler) mfaRegenerateRecovery(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"recovery_codes": codes})
+	secretJSON(c, http.StatusOK, gin.H{"recovery_codes": codes})
 }

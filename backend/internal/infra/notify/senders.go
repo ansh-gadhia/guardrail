@@ -10,15 +10,29 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
+	"sort"
 	"time"
 
 	"github.com/guardrail/guardrail/internal/domain/notify"
+
+	"go.uber.org/zap"
 )
 
 // Router dispatches to a concrete sender based on channel type. It implements
 // notify.Sender.
 type Router struct {
 	senders map[notify.ChannelType]notify.Sender
+	// log is optional. Set it with WithLogger; nil is a working Router that
+	// simply says nothing when it withholds a field.
+	log *zap.Logger
+}
+
+// WithLogger attaches a logger and returns the Router, so wiring stays a
+// one-liner. Additive on purpose: NewRouter's signature is used from main and
+// from tests, and a field nobody has to pass is cheaper than changing both.
+func (r *Router) WithLogger(l *zap.Logger) *Router {
+	r.log = l
+	return r
 }
 
 // NewRouter builds a Router with the default senders (webhook, Slack, and, when
@@ -37,13 +51,60 @@ func NewRouter(httpClient *http.Client, email *EmailSender) *Router {
 	return &Router{senders: m}
 }
 
+// payloadAllowlist is every field a notification may carry off this platform.
+//
+// A notification leaves the trust boundary: to a Slack workspace, an arbitrary
+// webhook URL an operator typed in, or an SMTP relay that STARTTLS-upgrades only
+// if it feels like it. Until now the payload map was marshalled whole and
+// shipped, which meant the set of things that could leave was whatever the
+// newest caller happened to put in a map — decided at the call site, reviewed by
+// nobody, and impossible to audit from here.
+//
+// This list is the current payload keys exactly, so nothing about today's
+// notifications changes. What changes is the direction of the default: adding a
+// field to a Notify call no longer sends it anywhere until it is named here,
+// which is the point at which somebody has to decide it is safe to publish.
+var payloadAllowlist = map[string]struct{}{
+	"request_id": {}, "requester": {}, "device": {}, "device_id": {},
+	"reason": {}, "minutes": {}, "level": {}, "status": {},
+}
+
+// filterPayload drops anything not on the allowlist.
+//
+// Dropped rather than masked: a key nobody has vetted should not advertise its
+// own existence to a Slack channel. The count is reported so a maintainer who
+// adds a field and cannot find it has something to search for.
+func filterPayload(payload map[string]any) (map[string]any, []string) {
+	if len(payload) == 0 {
+		return payload, nil
+	}
+	out := make(map[string]any, len(payload))
+	var dropped []string
+	for k, v := range payload {
+		if _, ok := payloadAllowlist[k]; ok {
+			out[k] = v
+			continue
+		}
+		dropped = append(dropped, k)
+	}
+	sort.Strings(dropped)
+	return out, dropped
+}
+
 // Send routes to the sender for the channel's type.
 func (r *Router) Send(ctx context.Context, ch notify.Channel, event string, payload map[string]any) error {
 	s, ok := r.senders[ch.Type]
 	if !ok {
 		return fmt.Errorf("notify: no sender for channel type %q", ch.Type)
 	}
-	return s.Send(ctx, ch, event, payload)
+	// Filtered here, once, rather than in each sender: every sender marshals the
+	// payload whole, so this is the single place all three share.
+	filtered, dropped := filterPayload(payload)
+	if len(dropped) > 0 && r.log != nil {
+		r.log.Warn("notification fields withheld: not on the payload allowlist",
+			zap.String("event", event), zap.Strings("fields", dropped))
+	}
+	return s.Send(ctx, ch, event, filtered)
 }
 
 // WebhookSender POSTs a JSON envelope to a configured URL.

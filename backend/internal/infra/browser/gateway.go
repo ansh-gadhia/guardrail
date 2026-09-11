@@ -449,7 +449,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 			}
 			bs.mainFrame = e.Frame.ID
 			bs.tl.record("url_change", map[string]any{
-				"path": pathOf(e.Frame.URL), "url": e.Frame.URL, "method": "GET",
+				"path": pathOf(e.Frame.URL), "url": access.RedactURL(e.Frame.URL), "method": "GET",
 			})
 
 		case *page.EventNavigatedWithinDocument:
@@ -461,7 +461,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 				return
 			}
 			bs.tl.record("url_change", map[string]any{
-				"path": pathOf(e.URL), "url": e.URL, "method": "GET", "in_page": true,
+				"path": pathOf(e.URL), "url": access.RedactURL(e.URL), "method": "GET", "in_page": true,
 			})
 
 		case *cdpbrowser.EventDownloadWillBegin:
@@ -470,7 +470,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 			// transfer to police — but it is the single most important line on the
 			// timeline when a review asks what was taken.
 			bs.tl.record("download", map[string]any{
-				"path": pathOf(e.URL), "url": e.URL, "filename": e.SuggestedFilename,
+				"path": pathOf(e.URL), "url": access.RedactURL(e.URL), "filename": e.SuggestedFilename,
 			})
 
 		case *network.EventRequestWillBeSent:
@@ -484,7 +484,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 				return
 			}
 			bs.tl.record("request", map[string]any{
-				"path": pathOf(e.Request.URL), "url": e.Request.URL,
+				"path": pathOf(e.Request.URL), "url": access.RedactURL(e.Request.URL),
 				"method": strings.ToUpper(e.Request.Method),
 			})
 		}

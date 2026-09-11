@@ -335,6 +335,7 @@ func TestEndClosesDeviceConnection(t *testing.T) {
 	g.mu.RUnlock()
 	if sess == nil {
 		t.Fatal("session not registered")
+		return // unreachable; says to the reader and the linter that sess is non-nil below
 	}
 
 	if err := g.End(context.Background(), s.ID); err != nil {

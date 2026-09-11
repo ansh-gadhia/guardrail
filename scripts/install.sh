@@ -34,7 +34,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 APP_NAME="GuardRail"
 REPO="${GUARDRAIL_REPO:-ansh-gadhia/guardrail}"
-VERSION="${GUARDRAIL_VERSION:-1.4.0}"
+VERSION="${GUARDRAIL_VERSION:-1.5.0}"
 # Which git ref the host-side files come from. Images are published from main, so
 # main is the default; set it to a tag or a commit to install a fixed point.
 REF="${GUARDRAIL_REF:-main}"
@@ -835,6 +835,37 @@ ask_password() { # ask_password VAR
 
 secret() { openssl rand -base64 48 | tr -d '\n'; }
 
+# api_curl calls this deployment's own API with TLS verification ON.
+#
+# These calls carry the bootstrap admin password, a bearer JWT and a freshly
+# minted API token, and they used to pass -k, which disables verification
+# outright. The certificate is self-signed — install.sh generates it a few
+# hundred lines above — which is exactly why pinning it with --cacert is the
+# answer rather than plain verification: a self-signed certificate you made
+# yourself is not an unknown one.
+#
+# Falls back to -k and says so, rather than failing: an operator whose
+# certificate lives elsewhere still needs the install to finish, but should know
+# the connection was not verified.
+API_TLS_MODE=""
+api_curl() {
+    local cert="$INSTALL_DIR/deploy/tls/cert.pem"
+    if [ -z "$API_TLS_MODE" ]; then
+        if [ -f "$cert" ] && curl -s --cacert "$cert" --max-time 5 -o /dev/null \
+             "https://127.0.0.1:${HTTPS_PORT}/healthz" 2>/dev/null; then
+            API_TLS_MODE="verified"
+        else
+            API_TLS_MODE="insecure"
+            warn "TLS verification is off for calls to this deployment's own API"
+        fi
+    fi
+    if [ "$API_TLS_MODE" = "verified" ]; then
+        curl -s --cacert "$cert" "$@"
+    else
+        curl -sk "$@"
+    fi
+}
+
 # port_free reports whether nothing is listening on a port.
 port_free() {
     ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${1}\$"
@@ -1040,6 +1071,214 @@ generate_cert() {
         || die "openssl could not generate a certificate"
     chmod 600 "$tls/key.pem"
     ok "self-signed certificate for ${D}${sans}${R}"
+
+    generate_pg_cert
+    generate_guacd_cert
+}
+
+# generate_guacd_cert issues the certificate guacd presents to the API.
+#
+# guacd has no authentication of ANY kind: anything that can reach :4822 can ask
+# it to connect anywhere with any credential. Target RDP and VNC passwords
+# crossed that hop in the clear, so a listener on the same network read them, and
+# a caller on it could drive guacd to reach the estate entirely outside
+# GuardRail's audit trail.
+#
+# Network segmentation (the `session` network) now limits WHO can reach it. TLS
+# closes the other half: the hop is encrypted, and because the API verifies this
+# certificate, it also knows it is talking to the real guacd and not something
+# that answered in its place.
+#
+# CN and SAN are "guacd" — the compose service name, which is what
+# GUARDRAIL_GUACD_ADDR dials.
+#
+# The key is owned root:1000 mode 0640: guacd runs as uid 1000 in its image
+# (deliberately — see the note on the guacd service in docker-compose.yml), and
+# a bind mount carries host ownership through unchanged.
+generate_guacd_cert() {
+    local dir="$INSTALL_DIR/deploy/guacd/tls"
+    mkdir -p "$dir"
+    if [ -f "$dir/guacd.crt" ] && [ -f "$dir/guacd.key" ] &&
+       openssl x509 -in "$dir/guacd.crt" -noout -checkend 2592000 >/dev/null 2>&1; then
+        guacd_cert_modes "$dir"
+        return 0
+    fi
+    openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+        -keyout "$dir/guacd.key" -out "$dir/guacd.crt" \
+        -subj "/CN=guacd" \
+        -addext "subjectAltName=DNS:guacd,DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1 \
+        || die "openssl could not generate the guacd certificate"
+    guacd_cert_modes "$dir"
+    ok "guacd certificate for ${D}DNS:guacd${R}"
+}
+
+# guacd_cert_modes applies the ownership guacd needs to read its own key, and is
+# reapplied on every run so a deployment whose modes drifted is repaired.
+guacd_cert_modes() {
+    local dir=$1
+    chmod 755 "$dir" 2>/dev/null || true
+    chmod 644 "$dir/guacd.crt" 2>/dev/null || true
+    # 1000 is the guacd uid inside guacamole/guacd:1.5.5.
+    chown root:1000 "$dir/guacd.key" 2>/dev/null || true
+    chmod 640 "$dir/guacd.key" 2>/dev/null || true
+}
+
+# generate_pg_cert issues the certificate Postgres presents to the API.
+#
+# The DSN used to say sslmode=disable, so everything between the API and the
+# database crossed the Docker network in the clear: sealed ciphertext AND the
+# wrapped DEKs beside it, Argon2id password hashes, the whole audit chain, the
+# session timeline, and the application role's own password during connection
+# setup. Anything that could join that network could read all of it, and with the
+# password could then read the database directly.
+#
+# CN and SAN are "postgres" — the compose service name, which is the host in the
+# DSN — so the client can verify the name it actually dialled rather than merely
+# encrypting to whatever answered. localhost and 127.0.0.1 are there for psql
+# and backups over the published loopback port.
+#
+# OWNERSHIP IS THE PART THAT BREAKS THIS
+#
+# PostgreSQL refuses to start if the key is too readable. It accepts exactly two
+# shapes: owned by the database user with mode 0600, or owned by root with mode
+# 0640 and readable by the database group. The server runs as uid 70 inside
+# postgres:16-alpine (the entrypoint drops privileges even though the container
+# starts as root), and a bind mount carries host ownership through unchanged —
+# so the mode has to be right HERE or the database will not come up at all.
+#
+# root:70 0640 is chosen over 70:70 0600 because a file the host root cannot
+# read is a file an operator cannot back up or inspect without sudo gymnastics,
+# and it gains nothing: both shapes keep it off-limits to every other user.
+generate_pg_cert() {
+    local dir="$INSTALL_DIR/deploy/postgres/tls"
+    mkdir -p "$dir"
+    if [ -f "$dir/server.crt" ] && [ -f "$dir/server.key" ] &&
+       openssl x509 -in "$dir/server.crt" -noout -checkend 2592000 >/dev/null 2>&1; then
+        # Still valid for at least 30 days. Regenerating would be harmless but it
+        # would also restart every connection for no reason.
+        pg_cert_modes "$dir"
+        return 0
+    fi
+    openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+        -keyout "$dir/server.key" -out "$dir/server.crt" \
+        -subj "/CN=postgres" \
+        -addext "subjectAltName=DNS:postgres,DNS:localhost,IP:127.0.0.1" >/dev/null 2>&1 \
+        || die "openssl could not generate the database certificate"
+    pg_cert_modes "$dir"
+    ok "database certificate for ${D}DNS:postgres${R}"
+}
+
+# enable_tls_flags switches the stack from plaintext to TLS, and only ever after
+# the certificates exist.
+#
+# The compose file defaults both to off so that an update driven by an OLDER
+# install.sh — which happens on every upgrade, because fetch_release replaces
+# this script while the previous version is still running — brings the stack up
+# exactly as it was instead of failing to start. This is the step that turns
+# them on, and it runs from the new script, on the next update.
+enable_tls_flags() {
+    local pgdir="$INSTALL_DIR/deploy/postgres/tls"
+    local gdir="$INSTALL_DIR/deploy/guacd/tls"
+
+    if [ -r "$pgdir/server.crt" ] && [ -r "$pgdir/server.key" ]; then
+        set_env_value GUARDRAIL_PG_SSL on
+        # One variable for the whole client query string, not a mode and a path
+        # separately: pgx opens sslrootcert even when sslmode=disable, so the two
+        # can never be allowed to disagree. See the note in docker-compose.yml.
+        set_env_value GUARDRAIL_PG_SSLPARAMS \
+            "sslmode=verify-full&sslrootcert=/etc/guardrail/pgtls/server.crt"
+        # And REQUIRE it. ssl=on only offers TLS; this file's hostssl rule is
+        # what refuses a client that declines it. Set here, in the same branch,
+        # because requiring TLS without a certificate locks everyone out.
+        set_env_value GUARDRAIL_PG_HBA "/etc/postgresql/hba/pg_hba.conf"
+    else
+        # No certificate: make sure nothing is left demanding TLS that cannot be
+        # served, which would be the restart loop this whole arrangement avoids.
+        set_env_value GUARDRAIL_PG_SSL off
+        set_env_value GUARDRAIL_PG_SSLPARAMS "sslmode=disable"
+        # Back to the image's own file, whose catch-all is plain `host`.
+        set_env_value GUARDRAIL_PG_HBA "/var/lib/postgresql/data/pg_hba.conf"
+    fi
+
+    # guacd's own TLS and the API's verification of it are set together, because
+    # either one alone is a broken hop rather than a weaker one.
+    if [ -r "$gdir/guacd.crt" ] && [ -r "$gdir/guacd.key" ]; then
+        set_env_value GUARDRAIL_GUACD_TLS_ARGS "-C /etc/guacd/tls/guacd.crt -K /etc/guacd/tls/guacd.key"
+        set_env_value GUARDRAIL_GUACD_TLS_CA "/etc/guardrail/guacdtls/guacd.crt"
+    else
+        set_env_value GUARDRAIL_GUACD_TLS_ARGS ""
+        set_env_value GUARDRAIL_GUACD_TLS_CA ""
+    fi
+}
+
+# drop_env_key removes a key outright. Used for settings this installer has
+# stopped honouring, so an operator reading .env is not misled by a line that no
+# longer controls anything.
+drop_env_key() {
+    local key=$1 tmp
+    grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null || return 0
+    tmp=$(mktemp)
+    grep -vE "^${key}=" "$ENV_FILE" >"$tmp" || true
+    cat "$tmp" >"$ENV_FILE"
+    rm -f "$tmp"
+}
+
+# set_env_value writes a key, adding it when absent and replacing it when not.
+# Unlike ensure_env_key this OWNS the value: these are derived from what is on
+# disk, not operator choices.
+#
+# A value that is not a bare word is QUOTED, because .env has two readers that
+# disagree about what a line means. docker compose takes everything after the =
+# verbatim; a shell running `set -a; . ./.env` — which scripts/run-host-api.sh,
+# run-host-browser.sh and bootstrap.sh all do — parses it as shell. Unquoted,
+#
+#   GUARDRAIL_GUACD_TLS_ARGS=-C /etc/guacd/tls/guacd.crt -K ...
+#
+# assigns "-C" and then tries to EXECUTE /etc/guacd/tls/guacd.crt, and under
+# `set -e` that aborts the script before it starts; and
+#
+#   GUARDRAIL_PG_SSLPARAMS=sslmode=verify-full&sslrootcert=...
+#
+# is worse, because & backgrounds the assignment into a subshell and the
+# variable comes back UNSET with no error at all. Quoting satisfies both
+# readers: compose strips the quotes, the shell assigns the whole string.
+#
+# make's `-include .env` strips nothing, so nothing in the Makefile may read a
+# quoted value. It derives what it needs from GUARDRAIL_PG_SSL, which is a bare
+# word by construction.
+set_env_value() {
+    local key=$1 value=$2 tmp quoted
+    case $value in
+        # No value written here contains either, so this needs no escaping —
+        # and refusing is better than emitting a line that quietly means
+        # something else.
+        *[\"\\]*) die "refusing to write a quote or backslash into $key" ;;
+        "") quoted='""' ;;
+        # Bare only for what a shell would leave alone; anything else is quoted.
+        *[!A-Za-z0-9_./:=-]*) quoted="\"$value\"" ;;
+        *) quoted=$value ;;
+    esac
+    if ! grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
+        printf '%s=%s\n' "$key" "$quoted" >>"$ENV_FILE"
+        return 0
+    fi
+    tmp=$(mktemp)
+    awk -v k="$key" -v v="$quoted" -F= '$1==k {print k "=" v; next} {print}' "$ENV_FILE" >"$tmp"
+    cat "$tmp" >"$ENV_FILE"
+    rm -f "$tmp"
+}
+
+# pg_cert_modes applies the ownership PostgreSQL insists on, and is reapplied on
+# every run so a deployment whose modes drifted is repaired rather than left to
+# fail at the next restart.
+pg_cert_modes() {
+    local dir=$1
+    chmod 755 "$dir" 2>/dev/null || true
+    chmod 644 "$dir/server.crt" 2>/dev/null || true
+    # 70 is the postgres uid/gid inside postgres:16-alpine. Numeric on purpose:
+    # the host has no such user and does not need one.
+    chown root:70 "$dir/server.key" 2>/dev/null || true
+    chmod 640 "$dir/server.key" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -1079,10 +1318,36 @@ retire_env_default() {
     info "updated ${B}${key}${R} to ${B}${new}${R}${why:+ ${D}(${why})${R}}"
 }
 
+# fill_env_blank generates a value for a key that exists but is empty.
+#
+# ensure_env_key deliberately does nothing when a key is already present, which
+# is right for settings an operator may have chosen to leave blank. It is wrong
+# for a setting where blank means "off" and off is unsafe — REDIS_PASSWORD being
+# the case that prompted this: every install before this release wrote it empty,
+# which disables Redis authentication, and no amount of re-running the installer
+# would have fixed it.
+#
+# Only ever fills a BLANK value. A password an operator set themselves is left
+# exactly as it is.
+fill_env_blank() {
+    local key=$1 value=$2 why=${3:-} tmp
+    grep -qE "^${key}=\$" "$ENV_FILE" || return 0
+    tmp=$(mktemp)
+    awk -v k="$key" -v v="$value" -F= '$1==k {print k "=" v; next} {print}' "$ENV_FILE" >"$tmp"
+    cat "$tmp" >"$ENV_FILE"
+    rm -f "$tmp"
+    info "generated a value for ${B}${key}${R}${why:+ ${D}(${why})${R}}"
+}
+
 # migrate_env brings an older .env up to what this release expects. Add a line
 # here for every setting a release introduces; it is a no-op on a file that
 # already has it, so it is safe to leave in place across releases.
 migrate_env() {
+    # Redis shipped unauthenticated in every release up to 1.4.0. This is the
+    # only way an existing deployment gets a password, because the key is
+    # already present and ensure_env_key will not touch it.
+    fill_env_blank REDIS_PASSWORD "$(secret | tr -d '/+=' | cut -c1-32)" \
+        "Redis was running with authentication disabled"
     ensure_env_key GUARDRAIL_RECORDING_RETENTION_DAYS 90 \
         "How long recordings are kept, in days (0 = indefinitely). Seeds an organization that has never set its own policy; the console (Organization -> Recording retention) is what is in force once one has."
     # Added blank on purpose: an existing deployment's data is in the named
@@ -1195,7 +1460,8 @@ POSTGRES_DB=guardrail
 GUARDRAIL_DB_APP_PASSWORD=${PG_APP_PASSWORD}
 
 # ---- Redis ----
-REDIS_PASSWORD=
+# Never blank. An empty requirepass turns Redis authentication off entirely.
+REDIS_PASSWORD=${REDIS_PW}
 
 # ---- Primary super admin (seeded on first boot) ----
 GUARDRAIL_ADMIN_EMAIL=${ADMIN_EMAIL}
@@ -1456,13 +1722,35 @@ enforce_modes() {
             chmod 644 "$INSTALL_DIR/deploy/siem/jwks-ca.pem" 2>/dev/null
     fi
 
-    # Traefik's routing rules, Postgres's bootstrap SQL, the migrations and the
-    # seed: all read from inside a container, none of them secret. a+rX adds the
-    # search bit to directories without making files executable.
+    # Traefik's routing rules, Postgres's bootstrap SQL and client-authentication
+    # file, the migrations and the seed: all read from inside a container, none of
+    # them secret. a+rX adds the search bit to directories without making files
+    # executable.
     local d
     for d in deploy/traefik deploy/postgres backend; do
         [ -d "$INSTALL_DIR/$d" ] && chmod -R a+rX "$INSTALL_DIR/$d" 2>/dev/null
     done
+
+    # AFTER the loop above, and this order is not optional.
+    #
+    # That chmod -R a+rX walks deploy/postgres, which now contains the database's
+    # TLS key. Making it world-readable does not merely weaken it: PostgreSQL
+    # REFUSES TO START with a key that permissive —
+    #
+    #   FATAL: private key file "/etc/postgresql/tls/server.key" has group or
+    #          world access
+    #
+    # — and with restart: unless-stopped that is a database in a restart loop and
+    # a deployment that never comes back. Re-asserting the modes here is what
+    # makes an upgrade survive its own hardening pass, and it repairs a
+    # deployment whose modes drifted for any other reason too.
+    [ -d "$INSTALL_DIR/deploy/postgres/tls" ] && pg_cert_modes "$INSTALL_DIR/deploy/postgres/tls"
+    [ -d "$INSTALL_DIR/deploy/guacd/tls" ] && guacd_cert_modes "$INSTALL_DIR/deploy/guacd/tls"
+
+    # Certificates are present and their modes are right, so TLS can be demanded.
+    enable_tls_flags
+    # Superseded by GUARDRAIL_PG_SSLPARAMS.
+    drop_env_key GUARDRAIL_PG_SSLMODE
 
     local s
     for s in install.sh siem-sso.sh migrate-data.sh; do
@@ -1508,6 +1796,112 @@ start_stack() {
     # migration container is where the wait actually is.
     stream "starting services" \
         docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "${prof[@]}" up -d --remove-orphans
+
+    retire_flat_network
+    pin_image_digests
+}
+
+# pin_image_digests records the exact image each service is running.
+#
+# An operator updates by VERSION and should keep doing so — it is the number in
+# the release notes and the one they can reason about. What the version did not
+# do until now is IDENTIFY anything: publishing overwrote :<VERSION> on every
+# push, so the tag moved and "we were running 1.4.0" could not be corroborated.
+# CI now refuses to republish a version, and this records the digest behind it
+# so the deployment can prove what it holds even if a registry is later
+# tampered with.
+#
+# Written to .env as "@sha256:…", which compose appends to the tag. The
+# reference stays readable (guardrail-api:1.4.0@sha256:…) and names exactly one
+# build.
+#
+# Best effort throughout. A deployment that builds from source has no registry
+# digest at all, and one that cannot reach the registry must still start — so a
+# missing digest clears the pin rather than failing the update, and compose
+# falls back to the plain tag.
+pin_image_digests() {
+    _pin_one api GUARDRAIL_API_DIGEST
+    _pin_one web GUARDRAIL_WEB_DIGEST
+    return 0
+}
+
+# _pin_one records the registry digest of the image a service is RUNNING.
+#
+# Read from the live container rather than from the compose file, because that
+# is the only source that answers the question actually being asked: not "what
+# were we told to run" but "what is running". A build-from-source deployment has
+# no registry digest, and in that case the pin is cleared rather than guessed.
+_pin_one() {
+    local svc=$1 key=$2 cid img digest current tmp
+    cid=$(docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
+            ps -q "$svc" 2>/dev/null | head -1)
+    if [ -n "$cid" ]; then
+        img=$(docker inspect "$cid" --format '{{.Image}}' 2>/dev/null || true)
+        if [ -n "$img" ]; then
+            local repo full
+            repo=$(docker image inspect "$img" \
+                --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' 2>/dev/null || true)
+            digest=$(printf '%s' "$repo" | sed -n 's/.*@\(sha256:[0-9a-f]\{64\}\)$/@\1/p')
+            # A digest is only worth recording if it actually names THIS image.
+            #
+            # A locally built image normally has no registry digest at all, but a
+            # build that reuses a tag which was previously pulled can leave a
+            # stale one behind — and pinning to that would quietly deploy the
+            # OLD published image on the next update, reverting the very upgrade
+            # being performed. Resolving it back and comparing is cheap and makes
+            # the difference between a pin and a trap.
+            if [ -n "$digest" ]; then
+                full=$(docker image inspect "$repo" --format '{{.Id}}' 2>/dev/null || true)
+                if [ "$full" != "$img" ]; then
+                    warn "${svc}: the recorded digest does not name the running image; not pinning"
+                    digest=""
+                fi
+            fi
+        fi
+    fi
+    digest=${digest:-}
+    current=$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)
+    [ "$digest" = "$current" ] && return 0
+    ensure_env_key "$key" "" \
+        "Digest of the image this deployment is running. Recorded automatically; do not edit."
+    tmp=$(mktemp)
+    awk -v k="$key" -v v="$digest" -F= '$1==k {print k "=" v; next} {print}' "$ENV_FILE" >"$tmp"
+    cat "$tmp" >"$ENV_FILE"
+    rm -f "$tmp"
+    if [ -n "$digest" ]; then
+        info "pinned ${B}${svc}${R} to ${D}${digest}${R}"
+    fi
+    return 0
+}
+
+
+# retire_flat_network removes the single bridge every service used to share.
+#
+# Up to 1.4.0 the compose file declared no networks, so compose created one
+# implicit "<project>_default" and put all nine services on it — guacd with no
+# authentication of its own, Redis with an empty password, and Postgres reached
+# over a cleartext DSN, all within reach of anything that could join. The file
+# now declares edge/data/session and the api is the only service on more than
+# one.
+#
+# `compose up` creates the new networks but never removes the old one, so an
+# UPDATED deployment would keep an empty bridge with the old name lying around.
+# Harmless, but it is the kind of leftover that makes somebody wonder later
+# whether it is still load-bearing.
+#
+# Only ever removed when it has no containers attached: if anything is still on
+# it, that is a real signal — something did not get recreated — and quietly
+# deleting the network would turn a visible problem into a confusing one.
+retire_flat_network() {
+    local net="${PROJECT}_default" attached
+    docker network inspect "$net" >/dev/null 2>&1 || return 0
+    attached=$(docker network inspect "$net" --format '{{len .Containers}}' 2>/dev/null || echo 1)
+    if [ "$attached" = "0" ]; then
+        docker network rm "$net" >/dev/null 2>&1 &&
+            info "removed the old shared network ${D}${net}${R}"
+    else
+        warn "${net} still has ${attached} container(s) attached; leaving it alone"
+    fi
 }
 
 wait_healthy() {
@@ -1580,7 +1974,7 @@ mint_api_token() {
     # during start-up and is normally there already, but a slow first migration
     # can land it a second or two later. Retry rather than race it.
     while [ "$tries" -gt 0 ]; do
-        login=$(curl -sk --max-time 15 -X POST "$base/auth/login" \
+        login=$(api_curl --max-time 15 -X POST "$base/auth/login" \
             -H 'Content-Type: application/json' -d "$body" 2>/dev/null) || true
         jwt=$(printf '%s' "$login" | json_str access_token '[A-Za-z0-9._-]')
         [ -n "$jwt" ] && break
@@ -1594,7 +1988,7 @@ mint_api_token() {
         return 0
     fi
 
-    created=$(curl -sk --max-time 15 -X POST "$base/api-tokens" \
+    created=$(api_curl --max-time 15 -X POST "$base/api-tokens" \
         -H "Authorization: Bearer ${jwt}" -H 'Content-Type: application/json' \
         -d "{\"name\":\"${BOOTSTRAP_TOKEN_NAME}\",\"scopes\":${BOOTSTRAP_TOKEN_SCOPES}}" 2>/dev/null) || true
     BOOTSTRAP_TOKEN=$(printf '%s' "$created" | json_str token 'grt_[A-Za-z0-9_-]')
@@ -1636,7 +2030,7 @@ summary() {
         printf '  %s\n' "${D}It does not expire. Revoke or replace it in the console: Account → API tokens.${R}"
         printf '\n'
         printf '  %s\n' "${D}Try it:${R}"
-        printf '    %s\n' "${D}curl -sk ${url}/api/v1/status/devices \\${R}"
+        printf '    %s\n' "${D}curl --cacert ${INSTALL_DIR}/deploy/tls/cert.pem ${url}/api/v1/status/devices \\${R}"
         printf '    %s\n' "${D}     -H \"Authorization: Bearer ${BOOTSTRAP_TOKEN}\"${R}"
     fi
 
@@ -1707,6 +2101,13 @@ do_install() {
     JWT_KEY=$(secret); MASTER_KEY=$(secret)
     PG_PASSWORD=$(secret | tr -d '/+=' | cut -c1-32)
     PG_APP_PASSWORD=$(secret | tr -d '/+=' | cut -c1-32)
+    # Redis was shipped with this blank, which disables authentication outright
+    # and left the login-throttle keys, the SSO replay nonces and the live
+    # session registry readable to anything that could reach the port. Same
+    # alphabet as the database passwords: it is passed on the redis-server
+    # command line, so characters a shell would reinterpret are not worth the
+    # risk for the entropy they add.
+    REDIS_PW=$(secret | tr -d '/+=' | cut -c1-32)
 
     step "Installing"
     install_docker
@@ -1737,6 +2138,8 @@ do_update() {
     fi
 
     step "Update"
+    local old_version
+    old_version=$(grep -E '^VERSION=' "$ENV_FILE" | cut -d= -f2- || true)
     ask NEW_VERSION "Version to install" "$VERSION"
     VERSION="$NEW_VERSION"
 
@@ -1769,6 +2172,27 @@ do_update() {
         -e "s|^GUARDRAIL_HOST_IP=.*|GUARDRAIL_HOST_IP=${HOST_IP}|" \
         "$ENV_FILE"
     grep -q '^GUARDRAIL_DNS_UPSTREAM=' "$ENV_FILE" || echo "GUARDRAIL_DNS_UPSTREAM=${DNS_UPSTREAM}" >>"$ENV_FILE"
+
+    # A CHANGE OF VERSION CLEARS THE DIGEST PIN. This is not tidying.
+    #
+    # The pin is appended to the image reference, so the file says
+    # guardrail-api:<VERSION>@sha256:<digest>. Docker resolves that by DIGEST and
+    # treats the tag as a label — so carrying last release's digest into an
+    # update makes `pull` fetch the OLD image while .env, the console footer and
+    # /healthz all report the new version. The upgrade reverts itself and says it
+    # succeeded, which is the worst shape a deployment bug can take.
+    #
+    # Clearing it is safe: start_stack pulls by tag and pin_image_digests records
+    # the digest of what actually came down, immediately afterwards. The pin's
+    # job is to IDENTIFY what is running, not to hold a version in place — and
+    # CI now refuses to republish a version, so the tag cannot move underneath a
+    # deployment that stays put.
+    if [ "$old_version" != "$VERSION" ]; then
+        sed -i -e 's|^GUARDRAIL_API_DIGEST=.*|GUARDRAIL_API_DIGEST=|' \
+               -e 's|^GUARDRAIL_WEB_DIGEST=.*|GUARDRAIL_WEB_DIGEST=|' "$ENV_FILE"
+        [ -n "$old_version" ] && info "version ${D}${old_version}${R} -> ${B}${VERSION}${R}; digest pin cleared so the new images are pulled"
+    fi
+
     migrate_env
     ok "configuration updated (secrets and admin credentials untouched)"
 

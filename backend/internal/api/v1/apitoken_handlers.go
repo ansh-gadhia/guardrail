@@ -63,8 +63,7 @@ func (h *Handler) createAPIToken(c *gin.Context) {
 	out := apiTokenDTO(&res.Token)
 	out["token"] = res.Raw
 	out["warning"] = "Copy this token now — it is not stored and cannot be shown again."
-	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusCreated, out)
+	secretJSON(c, http.StatusCreated, out)
 }
 
 func (h *Handler) listAPITokens(c *gin.Context) {

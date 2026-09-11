@@ -83,12 +83,27 @@ func (f fakeTOTP) ValidateConsecutive(_, code1, code2 string) bool {
 }
 func (f fakeTOTP) ProvisioningURI(_, _, _ string) string { return "otpauth://totp/test" }
 
-// identityCipher is a reversible no-op cipher for tests.
+// identityCipher is a reversible stand-in cipher for tests.
+//
+// It ENFORCES the associated data rather than ignoring it. A double that
+// accepted any aad would let a caller pass the wrong one — or none — and every
+// MFA test would still pass, which is precisely the bug the real binding
+// exists to prevent.
 type identityCipher struct{}
 
-func (identityCipher) Encrypt(p []byte) ([]byte, error) { return append([]byte("enc:"), p...), nil }
-func (identityCipher) Decrypt(b []byte) ([]byte, error) {
-	return bytes.TrimPrefix(b, []byte("enc:")), nil
+func (identityCipher) Encrypt(p, aad []byte) ([]byte, error) {
+	out := append([]byte("enc:"), aad...)
+	out = append(out, '|')
+	return append(out, p...), nil
+}
+
+func (identityCipher) Decrypt(b, aad []byte) ([]byte, error) {
+	want := append([]byte("enc:"), aad...)
+	want = append(want, '|')
+	if !bytes.HasPrefix(b, want) {
+		return nil, errors.New("iam: associated data does not match")
+	}
+	return bytes.TrimPrefix(b, want), nil
 }
 
 // mfaHarness builds an MFA-enabled service over the base fakes.
@@ -287,5 +302,66 @@ func TestMFA_RecoveryCodeAcceptedInAnyFormatting(t *testing.T) {
 				t.Errorf("recovery code %q rejected: %v", mangle(codes[0]), err)
 			}
 		})
+	}
+}
+
+// A recovery code bypasses TOTP outright and is stored as unsalted SHA-256, so
+// its entropy is the only thing standing between a stolen hash table and a
+// second factor. Forty bits was hours of GPU time.
+func TestRecoveryCodeEntropy(t *testing.T) {
+	code, err := newRecoveryCode()
+	if err != nil {
+		t.Fatalf("newRecoveryCode: %v", err)
+	}
+
+	// Hex, so two characters per byte once separators are stripped.
+	bare := strings.ReplaceAll(code, "-", "")
+	if got := len(bare) / 2; got != recoveryCodeBytes {
+		t.Fatalf("code carries %d bytes of entropy, want %d (code %q)", got, recoveryCodeBytes, code)
+	}
+	if recoveryCodeBytes*8 < 80 {
+		t.Errorf("entropy is %d bits, want at least 80", recoveryCodeBytes*8)
+	}
+	for _, c := range bare {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			t.Fatalf("non-hex character %q in %q", c, code)
+		}
+	}
+}
+
+// Raising the length must not invalidate codes already issued: hashRecoveryCode
+// strips separators before hashing, so a stored five-byte hash still matches.
+func TestHashRecoveryCodeIsLengthAgnostic(t *testing.T) {
+	// The old format, exactly as it was minted before the change.
+	const legacy = "a1b2c-3d4e5"
+	if !bytes.Equal(hashRecoveryCode(legacy), hashRecoveryCode("A1B2C3D4E5")) {
+		t.Error("legacy code stopped matching its own normalized form")
+	}
+
+	// And the new one normalizes the same way, whatever the operator types.
+	fresh, err := newRecoveryCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spaced := strings.ReplaceAll(fresh, "-", " ")
+	if !bytes.Equal(hashRecoveryCode(fresh), hashRecoveryCode(spaced)) {
+		t.Error("separators are not normalized consistently")
+	}
+	if !bytes.Equal(hashRecoveryCode(fresh), hashRecoveryCode(strings.ToUpper(fresh))) {
+		t.Error("case is not normalized")
+	}
+}
+
+func TestRecoveryCodesAreDistinct(t *testing.T) {
+	seen := make(map[string]bool, 64)
+	for range 64 {
+		c, err := newRecoveryCode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen[c] {
+			t.Fatalf("newRecoveryCode repeated %q within 64 draws", c)
+		}
+		seen[c] = true
 	}
 }

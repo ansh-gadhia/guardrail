@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -159,13 +160,37 @@ func TestPageFurniture(t *testing.T) {
 func TestPathOf(t *testing.T) {
 	cases := map[string]string{
 		"https://10.0.0.1/ng/firewall/policy": "/ng/firewall/policy",
-		"https://10.0.0.1/api?vdom=root&q=1":  "/api?vdom=root&q=1",
-		"https://10.0.0.1":                    "https://10.0.0.1",
-		"about:blank":                         "about:blank",
+		// Query KEYS are kept — "which parameters were sent" is the forensic
+		// value — and every VALUE is redacted. This assertion used to expect
+		// "/api?vdom=root&q=1", which is the shape that wrote target credentials
+		// into session_events for any device authenticating over the query
+		// string. See SECURITY_AUDIT/01-findings.md H1.
+		"https://10.0.0.1/api?vdom=root&q=1": "/api?vdom=<redacted>&q=<redacted>",
+		"https://10.0.0.1":                   "https://10.0.0.1",
+		"about:blank":                        "about:blank",
 	}
 	for in, want := range cases {
 		if got := pathOf(in); got != want {
 			t.Errorf("pathOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The regression test for H1, written in the shape the audit actually found in
+// the database: a legacy appliance authenticating over the query string.
+func TestPathOfRedactsCredentialsInTheQuery(t *testing.T) {
+	const secret = "hunter2"
+	got := pathOf("http://192.168.1.1/login.html?Username=admin&Password=" + secret + "&sessionKey=abc")
+
+	for _, leaked := range []string{secret, "admin", "abc"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("pathOf leaked %q: %s", leaked, got)
+		}
+	}
+	// The keys have to survive, or the entry stops being useful evidence.
+	for _, key := range []string{"Username=", "Password=", "sessionKey=", "/login.html"} {
+		if !strings.Contains(got, key) {
+			t.Errorf("pathOf dropped %q, which the reviewer needs: %s", key, got)
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -166,4 +167,48 @@ func TestGateway_RejectsAfterEnd(t *testing.T) {
 
 func (f fakeResolver) CredentialInherited(context.Context, access.Scope, uuid.UUID, uuid.UUID) (bool, error) {
 	return false, nil
+}
+
+// TestTimelineDataRedactsTheQuery is the proxy half of the H1 regression.
+//
+// Both RecordEvent call sites in this gateway pass a "path?query" string
+// through timelineData — Serve receives upstreamPath already in that shape, and
+// the tunnel path passes req.URL.RequestURI(). Redacting inside timelineData is
+// what covers both without either call site having to remember.
+func TestTimelineDataRedactsTheQuery(t *testing.T) {
+	const secret = "hunter2"
+	d := timelineData("GET", "/login.html?Username=admin&Password="+secret+"&sessionKey=abc")
+
+	got, _ := d["path"].(string)
+	for _, leaked := range []string{secret, "admin", "abc"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("timelineData leaked %q: %s", leaked, got)
+		}
+	}
+	for _, key := range []string{"/login.html", "Username=", "Password=", "sessionKey="} {
+		if !strings.Contains(got, key) {
+			t.Errorf("timelineData dropped %q: %s", key, got)
+		}
+	}
+	if d["method"] != "GET" {
+		t.Errorf("method not preserved: %v", d["method"])
+	}
+}
+
+// Redaction must not break the asset classification, which is what keeps page
+// furniture out of a reviewer's timeline. isAssetPath truncates at the "?", so
+// a redacted query is invisible to it — this pins that.
+func TestTimelineDataStillClassifiesAssetsAfterRedaction(t *testing.T) {
+	asset := timelineData("GET", "/static/app.css?v=abc123")
+	if asset["asset"] != true {
+		t.Errorf("stylesheet with a query lost its asset flag: %v", asset)
+	}
+	if p, _ := asset["path"].(string); strings.Contains(p, "abc123") {
+		t.Errorf("asset path kept its query value: %s", p)
+	}
+
+	action := timelineData("POST", "/api/firewall/policy?vdom=root")
+	if _, flagged := action["asset"]; flagged {
+		t.Errorf("an API call was misclassified as page furniture: %v", action)
+	}
 }

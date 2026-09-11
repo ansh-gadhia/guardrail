@@ -217,3 +217,52 @@ func TestRedactOfAnEmptySecretIsANoop(t *testing.T) {
 		t.Errorf("redact(%q, \"\") = %q, want it unchanged", in, got)
 	}
 }
+
+// A device that echoes the password one character at a time, with carriage
+// returns or NULs between them, used to defeat redaction entirely: ReplaceAll
+// looks for a contiguous match and there is not one. The vaulted password then
+// went into the transcript an auditor reads.
+func TestRedactCatchesInterleavedEcho(t *testing.T) {
+	const secret = "hunter2"
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"contiguous", "login: admin\r\nPassword: " + secret + "\r\n#"},
+		{"cr between characters", "Password: h\ru\rn\rt\re\rr\r2\r\n#"},
+		{"nul between characters", "Password: h\x00u\x00n\x00t\x00e\x00r\x002\r\n#"},
+		{"mixed filler", "Password: h\r\x00u\nn\x00t\re\x00r\r2\r\n#"},
+		{"backspace echo", "Password: h\x08u\x08n\x08t\x08e\x08r\x082\r\n#"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := string(redact([]byte(c.in), secret))
+			if strings.Contains(got, secret) {
+				t.Fatalf("secret survived redaction: %q", got)
+			}
+			// And the characters must not survive spread out either.
+			squeezed := strings.NewReplacer("\r", "", "\n", "", "\x00", "", "\x08", "").Replace(got)
+			if strings.Contains(squeezed, secret) {
+				t.Fatalf("secret survived once filler was removed: %q", got)
+			}
+			if !strings.Contains(got, "[redacted]") {
+				t.Errorf("no redaction marker in %q", got)
+			}
+		})
+	}
+}
+
+// Redaction must not eat output that merely starts with the same byte, or the
+// transcript stops being a faithful record of the session.
+func TestRedactLeavesOtherOutputAlone(t *testing.T) {
+	const secret = "hunter2"
+	in := "hostname core-sw-1\r\nhelp\r\nh\r\n#"
+	if got := string(redact([]byte(in), secret)); got != in {
+		t.Fatalf("redact altered unrelated output:\n got %q\nwant %q", got, in)
+	}
+
+	// An empty secret is a no-op, not a crash.
+	if got := string(redact([]byte(in), "")); got != in {
+		t.Errorf("empty secret changed the output: %q", got)
+	}
+}

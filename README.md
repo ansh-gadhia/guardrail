@@ -27,7 +27,7 @@ diagram, the default port map, first sign-in, and troubleshooting.
 
 ## Status
 
-Current version: **1.2.0** (see [`CHANGELOG.md`](CHANGELOG.md)).
+Current version: **1.4.0** (see [`CHANGELOG.md`](CHANGELOG.md)).
 
 | Milestone | Scope | State |
 |---|---|---|

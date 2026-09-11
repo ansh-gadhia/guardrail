@@ -2,6 +2,7 @@ package guacgw
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"slices"
@@ -76,9 +77,21 @@ type guacConn struct {
 
 // dialGuacd opens a connection to guacd and completes the handshake, leaving the
 // connection ready to relay.
-func dialGuacd(ctx context.Context, addr string, cfg connConfig, timeout time.Duration) (*guacConn, error) {
+func dialGuacd(ctx context.Context, addr string, cfg connConfig, timeout time.Duration, tlsCfg *tls.Config) (*guacConn, error) {
 	var d net.Dialer
-	c, err := d.DialContext(ctx, "tcp", addr)
+	var c net.Conn
+	var err error
+	if tlsCfg != nil {
+		// Target RDP and VNC passwords go over this connection as guacd
+		// connection parameters. guacd has no authentication of its own, so
+		// verifying its certificate is doing two jobs: it keeps the password off
+		// the wire in the clear, and it is the only way the API can tell the real
+		// guacd from anything else that answered on that address.
+		td := &tls.Dialer{NetDialer: &d, Config: tlsCfg}
+		c, err = td.DialContext(ctx, "tcp", addr)
+	} else {
+		c, err = d.DialContext(ctx, "tcp", addr)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("guac: dial guacd at %s: %w", addr, err)
 	}

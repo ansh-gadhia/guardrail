@@ -84,6 +84,7 @@ func TestSetNetworkPolicy_StoresAndAuditsAPolicyThatKeepsTheAuthorIn(t *testing.
 	e := h.audit.find("settings.network_policy")
 	if e == nil {
 		t.Fatal("changing who may reach the console must be audited")
+		return // unreachable; says to the reader and the linter that e is non-nil below
 	}
 	if e.Detail["allowlist_enabled"] != true || e.Detail["blocklist_enabled"] != true {
 		t.Errorf("audit detail = %v", e.Detail)
@@ -133,6 +134,7 @@ func TestSetBranding_StoresAndAuditsWithoutPuttingTheArtworkInTheLedger(t *testi
 	e := h.audit.find("settings.branding")
 	if e == nil {
 		t.Fatal("changing the console's identity must be audited")
+		return // unreachable; says to the reader and the linter that e is non-nil below
 	}
 	// The ledger is hash-chained and kept forever; a data URI does not belong in
 	// it. What changed is recorded, what it looks like lives in the settings row.

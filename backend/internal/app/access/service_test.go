@@ -68,6 +68,7 @@ func TestConnect_UnentitledUser_IsDeniedAndCreatesNoSession(t *testing.T) {
 	ev := h.audit.find("access.denied")
 	if ev == nil {
 		t.Fatal("no access.denied audit event recorded; a refused connection must be visible")
+		return // unreachable; says to the reader and the linter that ev is non-nil below
 	}
 	if ev.Result != audit.ResultDenied {
 		t.Errorf("audit result = %q, want %q", ev.Result, audit.ResultDenied)
@@ -325,6 +326,7 @@ func TestConnectRefusesRecordedDeviceWhenNothingCanRecord(t *testing.T) {
 	ev := h.audit.find("access.denied")
 	if ev == nil {
 		t.Fatal("no access.denied audit event; a refused connection must be visible")
+		return // unreachable; says to the reader and the linter that ev is non-nil below
 	}
 	if ev.Result != audit.ResultDenied {
 		t.Errorf("audit result = %q, want %q", ev.Result, audit.ResultDenied)

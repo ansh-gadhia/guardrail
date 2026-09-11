@@ -344,6 +344,7 @@ func TestConnect_GatedDevice_RequestIsAuditedAsPendingNotDenied(t *testing.T) {
 	ev := h.audit.find("approval.requested")
 	if ev == nil {
 		t.Fatal("no approval.requested audit event; asking for access must be visible")
+		return // unreachable; says to the reader and the linter that ev is non-nil below
 	}
 	if ev.Result == audit.ResultDenied {
 		t.Error("asking for access was recorded as denied; nobody has decided it yet")
@@ -368,6 +369,7 @@ func TestConnect_GatedDevice_RequestCarriesNoFabricatedSessionID(t *testing.T) {
 	ev := h.audit.find("approval.requested")
 	if ev == nil {
 		t.Fatal("no approval.requested audit event")
+		return // unreachable; says to the reader and the linter that ev is non-nil below
 	}
 	if ev.SessionID != nil && *ev.SessionID == uuid.Nil {
 		t.Error("the event names session 00000000-0000-0000-0000-000000000000, which has never existed")

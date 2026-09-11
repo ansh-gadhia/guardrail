@@ -40,6 +40,9 @@ type sessionCtx struct {
 	token       string // browser-binding token
 	headers     map[string]string
 	expiresAt   time.Time
+	// auth is the injected Authorization value, derived once and erasable. The
+	// credential itself is deliberately NOT held: see authheader.go.
+	auth *authHeader
 }
 
 // HTTPGateway implements access.Gateway for http/https targets.
@@ -113,9 +116,14 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 		return access.LiveSession{}, access.ErrInjectionUnsupported
 	}
 
+	// Derived here, once, and the credential is not carried any further. From
+	// this point the plaintext secret exists only as the local `cred`, which
+	// becomes garbage when Establish returns.
+	auth := newAuthHeader(cred)
+
 	prefix := "/proxy/" + s.ID.String() + "/"
 	rp := &httputil.ReverseProxy{
-		Director: g.director(target, ep.CustomHeaders, cred, prefix),
+		Director: g.director(target, ep.CustomHeaders, auth, prefix),
 		Transport: &http.Transport{
 			// verify_tls is honored per device; management UIs often use
 			// self-signed certs, so this is configurable per target.
@@ -150,7 +158,7 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 	if g.tunnelAuthority != "" {
 		tunnelHost = s.ID.String() + "." + g.tunnelAuthority
 		tp = &httputil.ReverseProxy{
-			Director:  g.tunnelDirector(target, ep.CustomHeaders, cred, tunnelHost),
+			Director:  g.tunnelDirector(target, ep.CustomHeaders, auth, tunnelHost),
 			Transport: rp.Transport,
 			//nolint:bodyclose // as above: the body is forwarded, not consumed.
 			ModifyResponse: modifyTunnelResponse(target, tunnelHost),
@@ -166,7 +174,7 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 	g.mu.Lock()
 	g.sessions[s.ID] = &sessionCtx{
 		target: target, proxy: rp, tunnelProxy: tp,
-		token: token, headers: ep.CustomHeaders, expiresAt: until,
+		token: token, headers: ep.CustomHeaders, expiresAt: until, auth: auth,
 	}
 	g.mu.Unlock()
 
@@ -179,7 +187,7 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 
 // director rewrites the outbound request to the target and injects credentials
 // server-side. The user's browser never sees the credential.
-func (g *HTTPGateway) director(target *url.URL, headers map[string]string, cred access.Credential, prefix string) func(*http.Request) {
+func (g *HTTPGateway) director(target *url.URL, headers map[string]string, auth *authHeader, prefix string) func(*http.Request) {
 	return func(req *http.Request) {
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
@@ -191,13 +199,7 @@ func (g *HTTPGateway) director(target *url.URL, headers map[string]string, cred 
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
-		switch cred.Injection {
-		case "basic":
-			req.SetBasicAuth(cred.Username, cred.Secret)
-		case "header":
-			// Secret carries the full header value, e.g. "Bearer <token>".
-			req.Header.Set("Authorization", cred.Secret)
-		}
+		auth.apply(req)
 		// Strip hop-by-hop / forwarded identity that could confuse the device.
 		req.Header.Del("X-Forwarded-For")
 		// Ask upstream not to compress so ModifyResponse can rewrite HTML bodies
@@ -244,8 +246,16 @@ func rebaseRequestOrigin(req *http.Request, target *url.URL, prefix string) {
 // End tears down a session's proxy state and wipes the in-memory credential.
 func (g *HTTPGateway) End(_ context.Context, sessionID uuid.UUID) error {
 	g.mu.Lock()
+	sc := g.sessions[sessionID]
 	delete(g.sessions, sessionID)
 	g.mu.Unlock()
+	// Erase the injected credential rather than leaving it for the collector.
+	// Dropping the map entry was all this used to do, which meant the secret
+	// stayed readable in the heap for an unbounded time after the session it
+	// belonged to had ended.
+	if sc != nil {
+		sc.auth.destroy()
+	}
 	return nil
 }
 
@@ -379,7 +389,16 @@ Telling a session's actions apart from its page loads.
 
 	Extension, not Content-Type, because this runs before the response exists.
 */
+//
+// The path arrives as "path?query" from both call sites, and the query VALUES
+// are redacted before anything is recorded. A device that authenticates over
+// the query string would otherwise write the target credential into a durable
+// timeline row, readable by anyone holding recording:read. isAssetPath is
+// unaffected: it truncates at the "?" before matching an extension.
 func timelineData(method, path string) map[string]any {
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i+1] + access.RedactQuery(path[i+1:])
+	}
 	d := map[string]any{"path": path, "method": method}
 	if isAssetPath(path) {
 		d["asset"] = true

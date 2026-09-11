@@ -98,17 +98,25 @@ func (t *APIToken) Claims() Claims {
 //
 // Widening this means answering who owns a session a machine opened, and what
 // the recording of it is evidence of. Until there is an answer, reads only.
+//   - recording:read is absent, and that is the third reason rather than an
+//     oversight. A recording is not metadata about a session, it is the session:
+//     an unredacted transcript of everything the device printed, which on network
+//     gear means a `show running-config` with its keys in it, and on a web UI
+//     means whatever the page rendered. Nothing in the product redacts it. A
+//     credential that never expires and sits in a config file on a monitoring box
+//     should not be able to pull the estate's evidence archive; a person with a
+//     session and a second factor should. Machines get to see WHAT happened, not
+//     WATCH it.
 var AllowedTokenScopes = map[string]struct{}{
-	"device:read":    {},
-	"session:read":   {},
-	"recording:read": {},
-	"group:read":     {},
-	"log:read":       {},
-	"report:read":    {},
-	"user:read":      {},
-	"role:read":      {},
-	"team:read":      {},
-	"org:read":       {},
+	"device:read":  {},
+	"session:read": {},
+	"group:read":   {},
+	"log:read":     {},
+	"report:read":  {},
+	"user:read":    {},
+	"role:read":    {},
+	"team:read":    {},
+	"org:read":     {},
 }
 
 // ValidateScopes checks a requested scope set, returning it de-duplicated and in

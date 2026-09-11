@@ -59,7 +59,7 @@ func TestLiveHandshakeIsAcceptedByRealGuacd(t *testing.T) {
 					"password": "unused",
 					"security": "any", "ignore-cert": "true",
 				},
-			}, 25*time.Second)
+			}, 25*time.Second, nil)
 			if err != nil {
 				t.Fatalf("real guacd rejected the handshake: %v", err)
 			}
@@ -86,7 +86,7 @@ func TestLiveDeviceFailureArrivesInTheStreamNotTheHandshake(t *testing.T) {
 	conn, err := dialGuacd(context.Background(), addr, connConfig{
 		Protocol: "vnc", Width: 1024, Height: 768, DPI: 96,
 		Params: map[string]string{"hostname": "203.0.113.1", "port": "5900", "password": "unused"},
-	}, 25*time.Second)
+	}, 25*time.Second, nil)
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestLiveUnknownProtocolHitsTheTimeout(t *testing.T) {
 	start := time.Now()
 	_, err := dialGuacd(context.Background(), addr, connConfig{
 		Protocol: "telnet-ish", Params: map[string]string{"hostname": "203.0.113.1"},
-	}, 2*time.Second)
+	}, 2*time.Second, nil)
 	if err == nil {
 		t.Fatal("guacd accepted a protocol it does not implement")
 	}

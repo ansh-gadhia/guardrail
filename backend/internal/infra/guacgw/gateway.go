@@ -3,8 +3,12 @@ package guacgw
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"path"
 	"strconv"
 	"sync"
@@ -33,6 +37,13 @@ type Config struct {
 	// guacd can write to — under compose that means a volume shared with it, which
 	// is why this is configured rather than derived.
 	RecordingDir string
+	// TLSCACert is the PEM file holding guacd's certificate. When set, the
+	// connection to guacd is TLS and that certificate must be presented.
+	//
+	// Empty leaves the hop in plaintext, which is what every deployment before
+	// this did and what a deployment pointing at somebody else's guacd may still
+	// need. It is a downgrade and the gateway says so at construction.
+	TLSCACert string
 }
 
 func (c Config) withDefaults() Config {
@@ -86,6 +97,12 @@ type Gateway struct {
 
 	mu       sync.RWMutex
 	sessions map[uuid.UUID]*guacSession
+
+	// tlsCfg is nil when the guacd hop is plaintext. Built once at construction
+	// rather than per dial: reading and parsing the certificate on every connect
+	// would turn a missing file into a per-session failure instead of a startup
+	// one.
+	tlsCfg *tls.Config
 }
 
 type guacSession struct {
@@ -112,12 +129,55 @@ type guacSession struct {
 
 // NewGateway constructs a gateway for one desktop protocol.
 func NewGateway(proto access.Protocol, cfg Config, deps Deps) *Gateway {
-	return &Gateway{
+	g := &Gateway{
 		proto:    proto,
 		cfg:      cfg.withDefaults(),
 		deps:     deps,
 		sessions: map[uuid.UUID]*guacSession{},
 	}
+	if cfg.TLSCACert != "" {
+		if tc, err := guacdTLS(cfg.TLSCACert, cfg.Addr); err == nil {
+			g.tlsCfg = tc
+		} else if deps.Log != nil {
+			// Not fatal, and deliberately so: refusing to start would take the
+			// whole API down over a desktop gateway that may not be in use. But
+			// it IS a downgrade to a plaintext hop carrying target passwords, so
+			// it is said at WARN with the reason.
+			deps.Log.Warn("guacd TLS is configured but could not be enabled; the connection to guacd will be plaintext",
+				zap.String("ca", cfg.TLSCACert), zap.Error(err))
+		}
+	}
+	return g
+}
+
+// guacdTLS builds the client config for the guacd hop.
+//
+// The certificate is pinned as the ONLY root rather than added to the system
+// pool. guacd's certificate is self-signed and issued by install.sh; trusting
+// every public CA in addition would mean any of them could vouch for something
+// claiming to be guacd, which is most of what pinning was for.
+func guacdTLS(caPath, addr string) (*tls.Config, error) {
+	// #nosec G304 -- caPath is deployment configuration (GUARDRAIL_GUACD_TLS_CA),
+	// set by install.sh alongside the certificate it names. It is not reachable
+	// from a request, a credential, or any tenant-supplied value, and an operator
+	// who can set it can already read the file by other means.
+	pem, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("guac: read guacd certificate: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("guac: %s contains no certificate", caPath)
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	return &tls.Config{
+		RootCAs:    pool,
+		ServerName: host,
+		MinVersion: tls.VersionTLS12,
+	}, nil
 }
 
 // Protocol reports which devices this gateway serves.
@@ -236,7 +296,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		Width:    g.cfg.Width, Height: g.cfg.Height, DPI: g.cfg.DPI,
 		Params: g.params(ep, cred, port, sess.recordingName),
 	}
-	conn, err := dialGuacd(ctx, g.cfg.Addr, cfg, g.cfg.HandshakeTimeout)
+	conn, err := dialGuacd(ctx, g.cfg.Addr, cfg, g.cfg.HandshakeTimeout, g.tlsCfg)
 	if err != nil {
 		return access.LiveSession{}, err
 	}

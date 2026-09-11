@@ -306,6 +306,17 @@ Run the tests:
 ```bash
 cd backend
 make test                                  # unit
-GUARDRAIL_TEST_DSN=postgres://guardrail_app:...@localhost:5432/guardrail?sslmode=disable \
-  go test -tags integration ./test/...     # integration (needs live Postgres)
+
+# Integration (needs the live Postgres). Once install.sh has issued a
+# certificate the database REFUSES a plaintext connection, so sslmode=disable
+# here is a connection refused rather than an unencrypted one. The certificate
+# carries IP:127.0.0.1, so verify-full works over the published port.
+SSL="sslmode=verify-full&sslrootcert=$PWD/../deploy/postgres/tls/server.crt"
+GUARDRAIL_TEST_DSN="postgres://guardrail_app:...@localhost:5432/guardrail?$SSL" \
+GUARDRAIL_TEST_OWNER_DSN="postgres://guardrail:...@localhost:5432/guardrail?$SSL" \
+GUARDRAIL_TEST_MASTER_KEY="$(grep '^GUARDRAIL_MASTER_KEY=' ../.env | cut -d= -f2-)" \
+  go test -tags integration ./test/...
+
+# On a deployment with no certificate yet (GUARDRAIL_PG_SSL=off), use
+# SSL="sslmode=disable" instead.
 ```

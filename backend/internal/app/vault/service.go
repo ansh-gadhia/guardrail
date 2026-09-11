@@ -149,12 +149,16 @@ func (s *Service) Create(ctx context.Context, actor iam.Claims, in CredentialInp
 	if err := validateInjection(in); err != nil {
 		return nil, err
 	}
-	sealed, err := s.enc.Seal([]byte(in.Secret))
+	// The id is generated BEFORE sealing, because it is part of what the
+	// ciphertext is bound to. Sealing first and assigning an id afterwards would
+	// mean binding to an id the secret was not sealed under.
+	id := uuid.New()
+	sealed, err := s.enc.Seal([]byte(in.Secret), vault.CredentialAAD(actor.OrganizationID, id))
 	if err != nil {
 		return nil, err
 	}
 	c := &vault.Credential{
-		ID: uuid.New(), OrganizationID: actor.OrganizationID, Name: in.Name,
+		ID: id, OrganizationID: actor.OrganizationID, Name: in.Name,
 		Type: defaultType(in.Type), Username: in.Username, Injection: defaultInjection(in.Injection, in.Scheme),
 		Sealed: sealed,
 	}
@@ -195,7 +199,7 @@ func (s *Service) Rotate(ctx context.Context, actor iam.Claims, id uuid.UUID, in
 	if err != nil {
 		return nil, err
 	}
-	sealed, err := s.enc.Seal([]byte(in.Secret))
+	sealed, err := s.enc.Seal([]byte(in.Secret), vault.CredentialAAD(c.OrganizationID, c.ID))
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +299,7 @@ func (s *Service) setBinding(ctx context.Context, actor iam.Claims, deviceID uui
 			return gerr
 		}
 		if in.Secret != "" {
-			sealed, serr := s.enc.Seal([]byte(in.Secret))
+			sealed, serr := s.enc.Seal([]byte(in.Secret), vault.CredentialAAD(cred.OrganizationID, cred.ID))
 			if serr != nil {
 				return serr
 			}
@@ -558,7 +562,7 @@ func (s *Service) ResolveForDevice(ctx context.Context, actor iam.Claims, device
 		return nil, err
 	}
 	c := res.Credential
-	plaintext, err := s.enc.Open(c.Sealed)
+	plaintext, err := s.enc.Open(c.Sealed, vault.CredentialAAD(c.OrganizationID, c.ID))
 	if err != nil {
 		return nil, err
 	}
@@ -588,35 +592,59 @@ func (s *Service) ResolveForDevice(ctx context.Context, actor iam.Claims, device
 }
 
 // RotateKEK re-wraps all credentials currently under oldKEKID onto the active
-// KEK, in batches. Secret ciphertext is untouched. Returns the count rotated.
-func (s *Service) RotateKEK(ctx context.Context, oldKEKID string, batch int) (int, error) {
+// KEK, in batches. Secret ciphertext is untouched, so the associated data bound
+// into it by 0036 is unaffected — the two mechanisms sit on different layers of
+// the envelope precisely so rotation never has to know about identity.
+//
+// Reachable from `guardrail rotate-kek`. It existed for a long time with no
+// caller at all, which meant the documented rotation story was not a story
+// anybody could act on.
+func (s *Service) RotateKEK(ctx context.Context, oldKEKID string, batch int) (rotated, unopenable int, err error) {
 	if batch <= 0 {
 		batch = 100
 	}
-	rotated := 0
+	// Remembered so the loop does not fetch the same unreadable rows forever:
+	// they keep the old key id by definition.
+	skipped := make(map[uuid.UUID]bool)
 	for {
-		creds, err := s.repo.ListByKEK(ctx, oldKEKID, batch)
-		if err != nil {
-			return rotated, err
+		creds, lerr := s.repo.ListByKEK(ctx, oldKEKID, batch)
+		if lerr != nil {
+			return rotated, len(skipped), lerr
 		}
 		if len(creds) == 0 {
-			return rotated, nil
+			return rotated, len(skipped), nil
 		}
+		progressed := false
 		for i := range creds {
 			c := &creds[i]
+			if skipped[c.ID] {
+				continue
+			}
 			resealed, err := s.enc.Rewrap(c.Sealed)
 			if err != nil {
-				return rotated, err
+				// A row this deployment's keys cannot unwrap was already
+				// unreadable before the rotation started — typically something
+				// sealed under a master key that is long gone. Skipping it is
+				// right: stopping would mean one piece of dead data makes
+				// rotation impossible for every live secret beside it, which is
+				// how a deployment ends up never rotating at all.
+				skipped[c.ID] = true
+				continue
 			}
-			c.Sealed = resealed
-			scope := vault.Scope{OrganizationID: c.OrganizationID, IsSuperAdmin: true}
-			if err := s.repo.Update(ctx, scope, c); err != nil {
-				return rotated, err
+			// ReplaceSealed, not Update: re-wrapping changes how a secret is
+			// protected, not what it is. Update stamps rotated_at, which would
+			// tell every operator that every credential had just been rotated —
+			// and send them looking for password changes that never happened.
+			if err := s.repo.ReplaceSealed(ctx, c.ID, resealed); err != nil {
+				return rotated, len(skipped), err
 			}
 			rotated++
+			progressed = true
 		}
-		if len(creds) < batch {
-			return rotated, nil
+		// Nothing moved this pass, so the next query returns the same rows and
+		// looping again would spin forever.
+		if !progressed {
+			return rotated, len(skipped), nil
 		}
 	}
 }
@@ -680,4 +708,135 @@ func joinMethods(ms []vault.InjectionMethod) string {
 		out = append(out, string(m))
 	}
 	return strings.Join(out, " or ")
+}
+
+// ReSealLegacyCredentials re-seals every credential still sealed with no
+// associated data, binding each to its organization and id.
+//
+// Returns how many it converted and how many it could not open. The second
+// number is not an error: a secret this deployment's key cannot open was
+// already unreadable before the upgrade — typically a row left behind by
+// something sealed under a different master key — and reporting it is more
+// useful than refusing to start.
+//
+// This is what lets migration 0036 ship without an outage. Secrets sealed before
+// that migration carry no tag over any associated data and cannot be opened as
+// though they did, so Open honours the version recorded on the row and this
+// removes the last of the old ones on the next boot. Nobody has to run anything.
+//
+// Idempotent, and safe to interrupt: each credential is re-sealed and written on
+// its own, so a crash halfway leaves a mix of versions that the next boot
+// finishes. It works in batches for the same reason — an estate with tens of
+// thousands of credentials should not need them all in memory at once.
+//
+// A row that will not open is reported and skipped rather than failing the run.
+// The likeliest cause is a master key that has changed (see the KEK rotation
+// notes), and in that case every row fails; stopping at the first would turn a
+// key problem into a boot loop.
+func (s *Service) ReSealLegacyCredentials(ctx context.Context, batch int) (converted, unopenable int, err error) {
+	if batch <= 0 {
+		batch = 200
+	}
+	// Rows that will not open are remembered so the loop does not fetch the same
+	// ones forever: they stay at version 0 by definition, so the next query
+	// returns them again.
+	stuck := make(map[uuid.UUID]bool)
+	for {
+		legacy, lerr := s.repo.ListByAADVersion(ctx, vault.AADNone, batch)
+		if lerr != nil {
+			return converted, len(stuck), lerr
+		}
+		progressed := false
+		for i := range legacy {
+			c := &legacy[i]
+			if stuck[c.ID] {
+				continue
+			}
+			// Opened with no AAD, because that is how it was sealed.
+			plaintext, oerr := s.enc.Open(c.Sealed, nil)
+			if oerr != nil {
+				// Not a failure of this job. A secret this deployment's key
+				// cannot open was already unreadable before the upgrade, and the
+				// commonest cause is a row left behind by something sealed under
+				// a different master key. Record it and move on; stopping here
+				// would turn old data into a boot loop.
+				stuck[c.ID] = true
+				continue
+			}
+			sealed, serr := s.enc.Seal(plaintext, vault.CredentialAAD(c.OrganizationID, c.ID))
+			if serr != nil {
+				stuck[c.ID] = true
+				continue
+			}
+			if rerr := s.repo.ReplaceSealed(ctx, c.ID, sealed); rerr != nil {
+				return converted, len(stuck), rerr
+			}
+			converted++
+			progressed = true
+		}
+		// Nothing left that this run can do.
+		if !progressed {
+			return converted, len(stuck), nil
+		}
+	}
+}
+
+// credentialPurgeBatch bounds one sweep, so a deployment that has accumulated
+// thousands of deleted credentials does not try to destroy them in one
+// transaction-heavy burst on the first boot after this ships.
+const credentialPurgeBatch = 100
+
+// PurgeDeletedCredentials permanently removes credentials soft-deleted longer
+// ago than retention, together with their bindings. Returns how many went.
+//
+// # WHY THIS EXISTS
+//
+// Deleting a credential only ever set deleted_at. The ciphertext and its wrapped
+// DEK stayed in the table for good — a secret nobody believes exists any more,
+// present in every backup taken since, and readable by anything that can reach
+// the database and the master key. "Deleted" meant "hidden from the console".
+//
+// A zero retention disables the sweep entirely, which is a real choice for a
+// deployment whose retention rules live elsewhere; it is NOT treated as "purge
+// immediately", because that is the reading that destroys data on an upgrade
+// nobody thought was destructive.
+func (s *Service) PurgeDeletedCredentials(ctx context.Context, retention time.Duration) (int, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().Add(-retention)
+	due, err := s.repo.DueForPurge(ctx, cutoff, credentialPurgeBatch)
+	if err != nil {
+		return 0, err
+	}
+	purged := 0
+	for i := range due {
+		c := &due[i]
+		// Audited BEFORE the row goes, and by id and name only — never the
+		// secret, and never anything that would let a reader reconstruct it. An
+		// entry written only after a successful delete is an entry missing for
+		// exactly the deletions worth investigating.
+		if s.audit != nil {
+			org := c.OrganizationID
+			_ = s.audit.Record(ctx, audit.Event{
+				ID: uuid.New(), OrganizationID: &org,
+				Action: "credential.purge", Category: audit.CategoryVault,
+				TargetType: "credential", TargetID: c.ID.String(),
+				Result: audit.ResultSuccess,
+				Detail: map[string]any{
+					"name":    c.Name,
+					"account": c.Username,
+					"reason":  "retention_expired",
+				},
+			})
+		}
+		if err := s.repo.HardDelete(ctx, c.ID); err != nil {
+			// One row that will not go must not stop the rest: the commonest
+			// cause is a binding added between the query and the delete, and
+			// that resolves itself on the next sweep.
+			continue
+		}
+		purged++
+	}
+	return purged, nil
 }

@@ -40,6 +40,18 @@ func newCredFixture(t *testing.T, pg *postgres.DB) *credFixture {
 	if err != nil {
 		t.Fatalf("key provider: %v", err)
 	}
+	// credentials.kek_id is a foreign key into encryption_keys, and the id is now
+	// derived from the key rather than the fixed 'env:1' that migration 0003
+	// seeded. A fixture with its own master key therefore names a key the
+	// registry has never heard of, and every insert fails on the constraint.
+	// The API registers its active key at startup; a test that builds its own
+	// repo has to do the same.
+	fixtureKEKID, _, _ := kp.Active()
+	trackKEK(t, fixtureKEKID)
+	if err := postgres.NewCredentialRepo(pg).RegisterKEK(context.Background(), fixtureKEKID, "env"); err != nil {
+		t.Fatalf("register fixture kek: %v", err)
+	}
+
 	return &credFixture{
 		devices: postgres.NewDeviceRepo(pg),
 		creds:   postgres.NewCredentialRepo(pg),
@@ -70,12 +82,13 @@ func (f *credFixture) device(t *testing.T, ctx context.Context, mode string) *do
 // credential seals a secret and returns the stored credential id.
 func (f *credFixture) credential(t *testing.T, ctx context.Context, username, secret string) uuid.UUID {
 	t.Helper()
-	sealed, err := f.enc.Seal([]byte(secret))
+	credID := uuid.New()
+	sealed, err := f.enc.Seal([]byte(secret), domvault.CredentialAAD(defaultOrgID, credID))
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	c := &domvault.Credential{
-		ID: uuid.New(), OrganizationID: defaultOrgID, Name: username,
+		ID: credID, OrganizationID: defaultOrgID, Name: username,
 		Type: domvault.TypePassword, Username: username,
 		Injection: domvault.InjectSSHPassword, Sealed: sealed,
 	}

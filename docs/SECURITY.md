@@ -43,6 +43,37 @@ KEK (master, from env GUARDRAIL_MASTER_KEY or KMS/Vault provider)
 - Idle timeout + absolute session timeout + automatic logout; access-session
   windows are independently time-boxed (approval-driven).
 
+## Internal hops (API → datastores, API → guacd)
+
+Everything below is issued and enabled by `scripts/install.sh`. A deployment
+whose installer has not run since these landed keeps the old plaintext
+behaviour — the flags default off so an update driven by an older installer
+still starts — and switches over at its next update.
+
+- **API → PostgreSQL:** TLS 1.3, and **required**, not merely offered.
+  `ssl=on` alone still serves plaintext to any client that asks for
+  `sslmode=disable`, so `deploy/postgres/hba/pg_hba.conf` ends in `hostssl`
+  and a connection that declines encryption matches no rule at all:
+
+      FATAL: no pg_hba.conf entry for host "…", user "…", no encryption
+
+  The client uses `sslmode=verify-full` against the server's own self-signed
+  certificate pinned as the trust anchor, so the name is verified rather than
+  just encrypted to whatever answered. The local socket stays `trust`, which is
+  what the healthcheck, `docker compose exec postgres psql` and the documented
+  `pg_dump` backup use.
+- **API → guacd:** TLS, with guacd's certificate pinned as the API's **only**
+  root. This hop carries target RDP and VNC passwords as guacd connection
+  parameters, and guacd authenticates nobody — in the clear, anything on the
+  network could read them *and* drive guacd into the estate outside the audit
+  trail. guacd now refuses a plaintext client outright.
+- **API → Redis:** password-authenticated. Redis shipped with an empty password;
+  the login throttle, the SSO replay nonces and the live session registry all
+  live there.
+- **Network segmentation:** three compose networks — `edge`, `data`, `session`.
+  The API is the only service on more than one, so `traefik`, `web` and `guacd`
+  cannot reach the database at all.
+
 ## Web app hardening (edge + app)
 - **Traefik/edge:** TLS (HSTS, `max-age` + preload), redirect http→https.
 - **Security headers:** CSP (default-src 'self', no inline via nonces),

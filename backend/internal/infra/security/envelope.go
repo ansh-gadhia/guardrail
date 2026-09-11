@@ -26,7 +26,7 @@ func NewEnvelopeEncryptor(keys vault.KeyProvider) *EnvelopeEncryptor {
 const dekLen = 32 // 256-bit DEK
 
 // Seal encrypts plaintext under a fresh DEK and wraps the DEK with the active KEK.
-func (e *EnvelopeEncryptor) Seal(plaintext []byte) (vault.SealedSecret, error) {
+func (e *EnvelopeEncryptor) Seal(plaintext, aad []byte) (vault.SealedSecret, error) {
 	kekID, kek, err := e.keys.Active()
 	if err != nil {
 		return vault.SealedSecret{}, err
@@ -36,31 +36,47 @@ func (e *EnvelopeEncryptor) Seal(plaintext []byte) (vault.SealedSecret, error) {
 		return vault.SealedSecret{}, fmt.Errorf("security: generate dek: %w", err)
 	}
 
-	ciphertext, secretNonce, err := gcmSeal(dek, plaintext)
+	// AAD goes on the INNER layer only — the secret under the DEK. Rewrap
+	// re-encrypts the DEK under a new KEK and leaves this ciphertext alone, so
+	// binding here means KEK rotation never has to know the credential's
+	// identity and the two mechanisms cannot collide.
+	ciphertext, secretNonce, err := gcmSeal(dek, plaintext, aad)
 	if err != nil {
 		return vault.SealedSecret{}, err
 	}
-	wrapped, dekNonce, err := gcmSeal(kek, dek)
+	wrapped, dekNonce, err := gcmSeal(kek, dek, nil)
 	if err != nil {
 		return vault.SealedSecret{}, err
+	}
+	version := vault.AADNone
+	if len(aad) > 0 {
+		version = vault.AADCredentialV1
 	}
 	return vault.SealedSecret{
 		KEKID: kekID, Ciphertext: ciphertext, SecretNonce: secretNonce,
-		DEKWrapped: wrapped, DEKNonce: dekNonce,
+		DEKWrapped: wrapped, DEKNonce: dekNonce, AADVersion: version,
 	}, nil
 }
 
 // Open unwraps the DEK with the recorded KEK and decrypts the secret.
-func (e *EnvelopeEncryptor) Open(s vault.SealedSecret) ([]byte, error) {
+func (e *EnvelopeEncryptor) Open(s vault.SealedSecret, aad []byte) ([]byte, error) {
 	kek, err := e.keys.Get(s.KEKID)
 	if err != nil {
 		return nil, err
 	}
-	dek, err := gcmOpen(kek, s.DEKNonce, s.DEKWrapped)
+	dek, err := gcmOpen(kek, s.DEKNonce, s.DEKWrapped, nil)
 	if err != nil {
 		return nil, fmt.Errorf("security: unwrap dek: %w", err)
 	}
-	plaintext, err := gcmOpen(dek, s.SecretNonce, s.Ciphertext)
+	// Version 0 predates associated data, so there is no tag over any to check.
+	// This is not a switch an attacker can flip to disarm the binding: a
+	// version-1 ciphertext opened with no AAD fails authentication, which makes
+	// a downgraded row unreadable rather than transplantable.
+	inner := aad
+	if s.AADVersion == vault.AADNone {
+		inner = nil
+	}
+	plaintext, err := gcmOpen(dek, s.SecretNonce, s.Ciphertext, inner)
 	if err != nil {
 		return nil, fmt.Errorf("security: open secret: %w", err)
 	}
@@ -74,7 +90,7 @@ func (e *EnvelopeEncryptor) Rewrap(s vault.SealedSecret) (vault.SealedSecret, er
 	if err != nil {
 		return vault.SealedSecret{}, err
 	}
-	dek, err := gcmOpen(oldKEK, s.DEKNonce, s.DEKWrapped)
+	dek, err := gcmOpen(oldKEK, s.DEKNonce, s.DEKWrapped, nil)
 	if err != nil {
 		return vault.SealedSecret{}, fmt.Errorf("security: unwrap dek: %w", err)
 	}
@@ -82,7 +98,7 @@ func (e *EnvelopeEncryptor) Rewrap(s vault.SealedSecret) (vault.SealedSecret, er
 	if err != nil {
 		return vault.SealedSecret{}, err
 	}
-	wrapped, dekNonce, err := gcmSeal(newKEK, dek)
+	wrapped, dekNonce, err := gcmSeal(newKEK, dek, nil)
 	if err != nil {
 		return vault.SealedSecret{}, err
 	}
@@ -95,8 +111,8 @@ func (e *EnvelopeEncryptor) Rewrap(s vault.SealedSecret) (vault.SealedSecret, er
 // Encrypt seals a small secret into a self-describing opaque blob (a
 // JSON-encoded SealedSecret). It satisfies iam.Cipher so MFA secrets are
 // protected by the same envelope scheme as the credential vault.
-func (e *EnvelopeEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
-	sealed, err := e.Seal(plaintext)
+func (e *EnvelopeEncryptor) Encrypt(plaintext, aad []byte) ([]byte, error) {
+	sealed, err := e.Seal(plaintext, aad)
 	if err != nil {
 		return nil, err
 	}
@@ -104,16 +120,16 @@ func (e *EnvelopeEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
 }
 
 // Decrypt opens a blob produced by Encrypt.
-func (e *EnvelopeEncryptor) Decrypt(blob []byte) ([]byte, error) {
+func (e *EnvelopeEncryptor) Decrypt(blob, aad []byte) ([]byte, error) {
 	var sealed vault.SealedSecret
 	if err := json.Unmarshal(blob, &sealed); err != nil {
 		return nil, fmt.Errorf("security: decode sealed blob: %w", err)
 	}
-	return e.Open(sealed)
+	return e.Open(sealed, aad)
 }
 
 // gcmSeal encrypts plaintext with key using AES-256-GCM and a random nonce.
-func gcmSeal(key, plaintext []byte) (ciphertext, nonce []byte, err error) {
+func gcmSeal(key, plaintext, aad []byte) (ciphertext, nonce []byte, err error) {
 	gcm, err := newGCM(key)
 	if err != nil {
 		return nil, nil, err
@@ -122,16 +138,19 @@ func gcmSeal(key, plaintext []byte) (ciphertext, nonce []byte, err error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, nil, fmt.Errorf("security: generate nonce: %w", err)
 	}
-	return gcm.Seal(nil, nonce, plaintext, nil), nonce, nil
+	// The fourth argument is the associated data: not encrypted, but covered by
+	// the authentication tag. Passing nil here is what let a sealed secret be
+	// copied between credential rows and still open. See vault.CredentialAAD.
+	return gcm.Seal(nil, nonce, plaintext, aad), nonce, nil
 }
 
 // gcmOpen decrypts ciphertext with key and nonce using AES-256-GCM.
-func gcmOpen(key, nonce, ciphertext []byte) ([]byte, error) {
+func gcmOpen(key, nonce, ciphertext, aad []byte) ([]byte, error) {
 	gcm, err := newGCM(key)
 	if err != nil {
 		return nil, err
 	}
-	return gcm.Open(nil, nonce, ciphertext, nil)
+	return gcm.Open(nil, nonce, ciphertext, aad)
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {

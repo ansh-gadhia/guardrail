@@ -41,15 +41,14 @@ func (h *Handler) ssoExchange(c *gin.Context) {
 	// response is byte-identical to the one a password login produces, so the
 	// console's existing MFA screen handles it with no special case.
 	if pair.MFARequired {
-		c.JSON(http.StatusOK, gin.H{"mfa_required": true, "mfa_token": pair.MFAToken})
+		secretJSON(c, http.StatusOK, gin.H{"mfa_required": true, "mfa_token": pair.MFAToken})
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
 	// Not cacheable, and said out loud. The body carries a bearer token, and an
 	// intermediary that held it would be handing one person's session to whoever
 	// asked next.
-	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, tokenResponse{
+	secretJSON(c, http.StatusOK, tokenResponse{
 		AccessToken: pair.AccessToken, TokenType: "Bearer",
 		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Principal: toPrincipalDTO(pair.Principal),

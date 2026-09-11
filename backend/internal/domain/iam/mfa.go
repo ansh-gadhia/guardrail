@@ -66,8 +66,20 @@ type TOTP interface {
 // shared secret). Implemented by the envelope encryptor so MFA secrets are
 // protected by the same KEK as the credential vault.
 type Cipher interface {
-	Encrypt(plaintext []byte) ([]byte, error)
-	Decrypt(blob []byte) ([]byte, error)
+	// Encrypt seals plaintext, binding aad into the authentication tag so the
+	// result opens only when the same bytes are supplied again.
+	Encrypt(plaintext, aad []byte) ([]byte, error)
+	// Decrypt opens a blob produced by Encrypt. aad must match what sealed it,
+	// and is ignored for a blob sealed before associated data was bound in.
+	Decrypt(blob, aad []byte) ([]byte, error)
+}
+
+// MFASecretAAD is the associated data for a user's TOTP seed.
+//
+// Bound to the user, so a seed cannot be copied from one account's row onto
+// another's and start accepting that person's authenticator.
+func MFASecretAAD(userID ID) []byte {
+	return []byte("guardrail/mfa/v1|" + userID.String())
 }
 
 // MFAChallenger issues and verifies the short-lived, signed token handed to a

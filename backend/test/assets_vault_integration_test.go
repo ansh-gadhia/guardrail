@@ -56,6 +56,13 @@ func TestIntegration_VaultEnvelopeAndDeviceBinding(t *testing.T) {
 		t.Fatalf("key provider: %v", err)
 	}
 	enc := security.NewEnvelopeEncryptor(kp)
+	// See newCredFixture: the KEK id is derived from the key now, so a fixture
+	// key names a registry row that does not exist until something creates it.
+	fixtureKEKID, _, _ := kp.Active()
+	trackKEK(t, fixtureKEKID)
+	if err := postgres.NewCredentialRepo(pg).RegisterKEK(ctx, fixtureKEKID, "env"); err != nil {
+		t.Fatalf("register fixture kek: %v", err)
+	}
 
 	devices := postgres.NewDeviceRepo(pg)
 	creds := postgres.NewCredentialRepo(pg)
@@ -74,12 +81,16 @@ func TestIntegration_VaultEnvelopeAndDeviceBinding(t *testing.T) {
 
 	// Store a sealed credential — plaintext must never hit the DB.
 	const password = "SuperSecretDevicePw!"
-	sealed, err := enc.Seal([]byte(password))
+	// The id comes first: it is part of what the ciphertext is bound to, so
+	// sealing before it exists would bind to an id the secret was not sealed
+	// under. The service does the same thing for the same reason.
+	credID := uuid.New()
+	sealed, err := enc.Seal([]byte(password), domvault.CredentialAAD(defaultOrgID, credID))
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	cred := &domvault.Credential{
-		ID: uuid.New(), OrganizationID: defaultOrgID, Name: "fw-admin",
+		ID: credID, OrganizationID: defaultOrgID, Name: "fw-admin",
 		Type: domvault.TypePassword, Username: "admin", Injection: domvault.InjectForm, Sealed: sealed,
 	}
 	trackCredential(t, cred.ID)
@@ -98,7 +109,8 @@ func TestIntegration_VaultEnvelopeAndDeviceBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	plaintext, err := enc.Open(resolved.Credential.Sealed)
+	plaintext, err := enc.Open(resolved.Credential.Sealed,
+		domvault.CredentialAAD(resolved.Credential.OrganizationID, resolved.Credential.ID))
 	if err != nil {
 		t.Fatalf("open resolved: %v", err)
 	}
@@ -139,7 +151,13 @@ func TestIntegration_RotatingAnAccountKeepsItsInjectionMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("key provider: %v", err)
 	}
-	svc := appvault.NewService(postgres.NewCredentialRepo(pg), security.NewEnvelopeEncryptor(kp), nil)
+	svcRepo := postgres.NewCredentialRepo(pg)
+	svcKEKID, _, _ := kp.Active()
+	trackKEK(t, svcKEKID)
+	if err := svcRepo.RegisterKEK(context.Background(), svcKEKID, "env"); err != nil {
+		t.Fatalf("register fixture kek: %v", err)
+	}
+	svc := appvault.NewService(svcRepo, security.NewEnvelopeEncryptor(kp), nil)
 
 	scope := domassets.Scope{OrganizationID: defaultOrgID}
 	dev := &domassets.Device{

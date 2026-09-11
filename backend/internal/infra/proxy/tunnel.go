@@ -25,15 +25,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
-	"github.com/guardrail/guardrail/internal/domain/access"
 )
 
 // tunnelDirector rewrites the outbound request to the device and injects the
 // credential server-side, exactly as director does — except that the path and
 // query pass through VERBATIM. That is the whole point of this mode: the browser
 // asked for the device's own URL, so there is no prefix to strip.
-func (g *HTTPGateway) tunnelDirector(target *url.URL, headers map[string]string, cred access.Credential, tunnelHost string) func(*http.Request) {
+func (g *HTTPGateway) tunnelDirector(target *url.URL, headers map[string]string, auth *authHeader, tunnelHost string) func(*http.Request) {
 	return func(req *http.Request) {
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
@@ -47,13 +45,7 @@ func (g *HTTPGateway) tunnelDirector(target *url.URL, headers map[string]string,
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
-		switch cred.Injection {
-		case "basic":
-			req.SetBasicAuth(cred.Username, cred.Secret)
-		case "header":
-			// Secret carries the full header value, e.g. "Bearer <token>".
-			req.Header.Set("Authorization", cred.Secret)
-		}
+		auth.apply(req)
 		// Strip forwarded identity that could confuse the device.
 		req.Header.Del("X-Forwarded-For")
 		// Accept-Encoding is deliberately NOT stripped here, unlike the path-mode

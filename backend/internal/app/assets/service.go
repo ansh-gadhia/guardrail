@@ -129,6 +129,12 @@ func scopeOf(a iam.Claims) assets.Scope {
 // for the purposes of the recording policy.
 func (s *Service) CreateDevice(ctx context.Context, actor iam.Claims, in DeviceInput) (*assets.Device, error) {
 	owner := actor.UserID
+	// Checked before anything is written, so a refused device changes nothing.
+	// custom_headers is stored in the clear; a credential-bearing header belongs
+	// in the vault, which has somewhere for exactly that.
+	if err := assets.ValidateCustomHeaders(in.CustomHeaders); err != nil {
+		return nil, err
+	}
 	scheme, err := schemeOrDefault(in.Scheme)
 	if err != nil {
 		return nil, err
@@ -177,6 +183,9 @@ func (s *Service) CreateDevice(ctx context.Context, actor iam.Claims, in DeviceI
 
 // UpdateDevice mutates an existing device.
 func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UUID, in DeviceInput) (*assets.Device, error) {
+	if err := assets.ValidateCustomHeaders(in.CustomHeaders); err != nil {
+		return nil, err
+	}
 	d, err := s.devices.GetByID(ctx, scopeOf(actor), id)
 	if err != nil {
 		return nil, err

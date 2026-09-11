@@ -80,14 +80,16 @@ func (h *Handler) login(c *gin.Context) {
 		return
 	}
 	if pair.MFARequired {
-		c.JSON(http.StatusOK, gin.H{
+		// The MFA token is a bearer credential for the second step, so it is
+		// no more cacheable than the access token it leads to.
+		secretJSON(c, http.StatusOK, gin.H{
 			"mfa_required": true,
 			"mfa_token":    pair.MFAToken,
 		})
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
-	c.JSON(http.StatusOK, tokenResponse{
+	secretJSON(c, http.StatusOK, tokenResponse{
 		AccessToken: pair.AccessToken, TokenType: "Bearer",
 		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Principal: toPrincipalDTO(pair.Principal),
@@ -114,7 +116,7 @@ func (h *Handler) mfaVerify(c *gin.Context) {
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
-	c.JSON(http.StatusOK, tokenResponse{
+	secretJSON(c, http.StatusOK, tokenResponse{
 		AccessToken: pair.AccessToken, TokenType: "Bearer",
 		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Principal: toPrincipalDTO(pair.Principal),
@@ -135,7 +137,7 @@ func (h *Handler) refresh(c *gin.Context) {
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
-	c.JSON(http.StatusOK, tokenResponse{
+	secretJSON(c, http.StatusOK, tokenResponse{
 		AccessToken: pair.AccessToken, TokenType: "Bearer",
 		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Principal: toPrincipalDTO(pair.Principal),
@@ -172,7 +174,7 @@ func (h *Handler) changePassword(c *gin.Context) {
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
-	c.JSON(http.StatusOK, tokenResponse{
+	secretJSON(c, http.StatusOK, tokenResponse{
 		AccessToken: pair.AccessToken, TokenType: "Bearer",
 		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Principal: toPrincipalDTO(pair.Principal),

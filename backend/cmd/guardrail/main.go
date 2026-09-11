@@ -58,12 +58,21 @@ var version = "dev"
 
 func main() {
 	// Subcommands must be handled before flag parsing.
-	if len(os.Args) > 1 && os.Args[1] == "seed-admin" {
-		if err := runSeedAdmin(os.Args[2:]); err != nil {
-			_, _ = os.Stderr.WriteString("fatal: " + err.Error() + "\n")
-			os.Exit(1)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "seed-admin":
+			if err := runSeedAdmin(os.Args[2:]); err != nil {
+				_, _ = os.Stderr.WriteString("fatal: " + err.Error() + "\n")
+				os.Exit(1)
+			}
+			return
+		case "rotate-kek":
+			if err := runRotateKEK(os.Args[2:]); err != nil {
+				_, _ = os.Stderr.WriteString("fatal: " + err.Error() + "\n")
+				os.Exit(1)
+			}
+			return
 		}
-		return
 	}
 
 	// -healthcheck lets the distroless container (which has no shell or curl)
@@ -82,9 +91,14 @@ func main() {
 }
 
 // startWorkers launches background loops: the notification dispatcher drains the
-// outbox, the reaper expires overdue sessions, and the health poller probes
-// device liveness. All stop when ctx is done.
-func startWorkers(ctx context.Context, log *zap.Logger, notifySvc *appnotify.Service, broker *appaccess.Service, healthSvc *apphealth.Service) {
+// outbox, the reaper expires overdue sessions and sweeps both retention
+// policies, and the health poller probes device liveness. All stop when ctx is
+// done.
+func startWorkers(
+	ctx context.Context, log *zap.Logger, notifySvc *appnotify.Service,
+	broker *appaccess.Service, healthSvc *apphealth.Service,
+	vaultPurger *appvault.Service, credentialPurgeAfter time.Duration,
+) {
 	if healthSvc != nil {
 		go healthSvc.Run(ctx)
 	}
@@ -139,6 +153,15 @@ func startWorkers(ctx context.Context, log *zap.Logger, notifySvc *appnotify.Ser
 					log.Warn("recording retention sweep failed", zap.Error(err))
 				} else if n > 0 {
 					log.Info("purged expired recordings", zap.Int("count", n))
+				}
+				// The same argument for credentials. Deleting one only ever set
+				// deleted_at, so its ciphertext and wrapped DEK stayed in the
+				// table for good — a secret nobody believes exists any more,
+				// sitting in every backup taken since.
+				if n, err := vaultPurger.PurgeDeletedCredentials(ctx, credentialPurgeAfter); err != nil {
+					log.Warn("credential retention sweep failed", zap.Error(err))
+				} else if n > 0 {
+					log.Info("purged deleted credentials past retention", zap.Int("count", n))
 				}
 			}
 		}
@@ -379,7 +402,8 @@ func run() error {
 
 	// Envelope encryptor is shared by the vault and by MFA (to protect TOTP
 	// secrets under the same KEK), so it is constructed before the IAM service.
-	keyProvider, err := security.NewEnvKeyProvider(cfg.Security.MasterKey)
+	keyProvider, err := security.NewEnvKeyProviderWithPrevious(
+		cfg.Security.MasterKey, cfg.Security.PreviousMasterKey)
 	if err != nil {
 		return err
 	}
@@ -451,9 +475,88 @@ func run() error {
 	}, security.NewCookieSigner(cfg.Auth.JWTSigningKey))
 
 	// --- Assets + Vault modules (M4) ---
-	auditRec := postgres.NewAuditRepo(pg)
+	// The audit chain is keyed, so rewriting history needs more than write
+	// access to the table. Derived from the master key under its own HKDF label,
+	// like the vault KEK and the binding signer — nothing extra to configure.
+	auditChainKey, acerr := security.NewAuditChainKey(cfg.Security.MasterKey)
+	if acerr != nil {
+		return acerr
+	}
+	auditRec := postgres.NewAuditRepo(pg).WithChainKey(auditChainKey)
 	assetsSvc := appassets.NewService(postgres.NewDeviceRepo(pg), postgres.NewAssetGroupRepo(pg), auditRec)
-	vaultSvc := appvault.NewService(postgres.NewCredentialRepo(pg), encryptor, auditRec)
+	// The binding signer proves that "this secret is for this device, for this
+	// person" was written by GuardRail. Derived from the same master key as the
+	// vault KEK under a separate HKDF label, so it is nothing extra to configure
+	// and nothing extra to lose.
+	//
+	// Returned, not log.Fatal: run() is where the deferred shutdowns are
+	// registered, and Fatal calls os.Exit, which skips every one of them. Same
+	// reasoning and the same shape as the key provider above.
+	bindingSigner, err := security.NewBindingSigner(cfg.Security.MasterKey)
+	if err != nil {
+		return err
+	}
+	credRepo := postgres.NewCredentialRepo(pg).WithBindingSigner(bindingSigner)
+
+	// credentials.kek_id is a foreign key into encryption_keys, so the active key
+	// has to be registered before anything is sealed under it. Migration 0003
+	// seeded the old fixed id; now that ids are derived from the key, a changed
+	// master key means an id the registry has never heard of and the first
+	// credential written would fail on the constraint.
+	activeKEKID, _, kerr := keyProvider.Active()
+	if kerr != nil {
+		return kerr
+	}
+	if rerr := credRepo.RegisterKEK(ctx, activeKEKID, "env"); rerr != nil {
+		return fmt.Errorf("register the active encryption key: %w", rerr)
+	}
+	if prev := keyProvider.Previous(); prev != "" {
+		// Mid-rotation. Say which key is which, because the next question an
+		// operator has is "did it actually pick up the new one".
+		log.Info("a previous master key is configured; run `guardrail rotate-kek` to move secrets onto the current one",
+			zap.String("active_kek", activeKEKID), zap.String("previous_kek", prev))
+	}
+
+	// Sign any binding written before 0035 added the column. Idempotent, and the
+	// reason that migration can ship without an outage: resolution tolerates an
+	// absent signature, this removes the last of them, and from here a signature
+	// that is present and wrong is refused.
+	if n, serr := credRepo.SignUnsignedBindings(ctx); serr != nil {
+		// Not fatal. Unsigned bindings still resolve, so the estate keeps
+		// working; what is lost is the protection, and that is worth a loud line
+		// rather than a refusal to boot.
+		log.Warn("could not sign existing credential bindings", zap.Error(serr))
+	} else if n > 0 {
+		log.Info("signed credential bindings written before this release",
+			zap.Int("bindings", n))
+	}
+
+	vaultSvc := appvault.NewService(credRepo, encryptor, auditRec)
+
+	// Re-seal any secret still stored with no associated data, binding it to its
+	// organization and id. The companion to the binding backfill above: 0035
+	// stopped a binding being repointed, 0036 stops the ciphertext itself being
+	// copied between rows, and both close the same hole from opposite ends.
+	//
+	// Not fatal. A legacy secret still opens — Open honours the version on the
+	// row — so the estate keeps working; what is lost is the binding, and that
+	// is worth a loud line rather than refusing to boot.
+	if n, stuck, rerr := vaultSvc.ReSealLegacyCredentials(ctx, 200); rerr != nil {
+		log.Warn("could not re-seal every legacy credential",
+			zap.Int("converted", n), zap.Error(rerr))
+	} else {
+		if n > 0 {
+			log.Info("re-sealed credentials stored before associated data was bound in",
+				zap.Int("credentials", n))
+		}
+		if stuck > 0 {
+			// Already unreadable before this ran — this is the first thing that
+			// has ever looked, so say so rather than leaving it silent.
+			log.Warn("credentials that this deployment's master key cannot open",
+				zap.Int("credentials", stuck),
+				zap.String("effect", "they were already unreadable; connections using them would fail"))
+		}
+	}
 	// WithUsers supplies the email lookup the bulk per-user account import needs:
 	// a CSV written by a person names people by email, not by UUID.
 	assetsHandler := v1.NewAssetsHandler(assetsSvc, vaultSvc).WithUsers(iamSvc)
@@ -462,7 +565,7 @@ func run() error {
 	notifySvc := appnotify.NewService(
 		postgres.NewChannelRepo(pg),
 		postgres.NewOutboxRepo(pg),
-		infranotify.NewRouter(nil, nil),
+		infranotify.NewRouter(nil, nil).WithLogger(log),
 		nil,
 		auditRec,
 	)
@@ -616,6 +719,7 @@ func run() error {
 			Width:        cfg.Desktop.Width,
 			Height:       cfg.Desktop.Height,
 			DPI:          cfg.Desktop.DPI,
+			TLSCACert:    cfg.Desktop.TLSCACert,
 		}
 		guacDeps := guacgw.Deps{
 			Devices:    deviceLookup,
@@ -727,7 +831,7 @@ func run() error {
 	})
 
 	// Background workers: notification dispatcher, overdue-session reaper, health poller.
-	startWorkers(ctx, log, notifySvc, brokerSvc, healthSvc)
+	startWorkers(ctx, log, notifySvc, brokerSvc, healthSvc, vaultSvc, cfg.Security.CredentialPurgeAfter)
 
 	// Cross-node terminate: when any node terminates a session it publishes a
 	// signal; every gateway node tears down its local state on receipt so the

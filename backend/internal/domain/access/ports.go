@@ -2,6 +2,8 @@ package access
 
 import (
 	"context"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -133,6 +135,63 @@ type SessionStats struct {
 type EventRecorder interface {
 	RecordEvent(ctx context.Context, sessionID uuid.UUID, kind string, data map[string]any) error
 	ListEvents(ctx context.Context, s Scope, sessionID uuid.UUID, limit int) ([]Event, error)
+}
+
+// RedactedValue is what replaces a query-parameter value in a recorded timeline
+// entry.
+const RedactedValue = "<redacted>"
+
+// RedactQuery replaces every query-parameter VALUE with RedactedValue, keeping
+// the keys, their order, and any duplicates.
+//
+// It exists because a timeline entry is durable evidence read back through the
+// API, and the devices GuardRail fronts are exactly the ones that still
+// authenticate over the query string: a legacy appliance doing
+// GET /login.cgi?username=admin&password=... would otherwise write the target
+// credential into session_events, in the clear, for anyone holding
+// recording:read. Two gateways record these entries and BOTH used to keep the
+// raw query, so this lives here — the one package both of them already import
+// — rather than being implemented twice and fixed once.
+//
+// Keys survive on purpose. "which parameters were sent" is most of the
+// forensic value of the entry, and it is not the part that leaks. Order and
+// duplicates survive because a reviewer comparing two entries is reading them
+// as a sequence; url.Values would sort and collapse them.
+//
+// A bare key with no "=" carries no value and is left exactly as it is.
+func RedactQuery(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	parts := strings.Split(rawQuery, "&")
+	for i, p := range parts {
+		if k, _, ok := strings.Cut(p, "="); ok {
+			parts[i] = k + "=" + RedactedValue
+		}
+	}
+	return strings.Join(parts, "&")
+}
+
+// RedactURL returns raw with every query-parameter value redacted, leaving the
+// scheme, host, path and fragment intact.
+//
+// Anything that does not parse as a URL, or that carries no query, is returned
+// unchanged — with one exception that is the whole point of the fallback: if it
+// does not parse but still contains a "?", the tail is redacted anyway. A
+// malformed URL is not a reason to write a password down.
+func RedactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		if i := strings.IndexByte(raw, '?'); i >= 0 {
+			return raw[:i+1] + RedactQuery(raw[i+1:])
+		}
+		return raw
+	}
+	if u.RawQuery == "" {
+		return raw
+	}
+	u.RawQuery = RedactQuery(u.RawQuery)
+	return u.String()
 }
 
 // Event is one entry in a session's timeline.

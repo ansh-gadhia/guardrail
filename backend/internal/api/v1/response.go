@@ -121,6 +121,25 @@ func detailFor(err, sentinel error, fallback string) string {
 	return fallback
 }
 
+// secretJSON writes a response whose body carries a credential, marking it
+// uncacheable first.
+//
+// A helper rather than a c.Header call at each site, because there are nine of
+// them — access tokens from four sign-in paths, the MFA challenge token, a
+// temporary password, a TOTP seed and two sets of recovery codes — and a rule
+// applied by hand nine times is a rule the tenth endpoint will not follow. The
+// two that already got it right did it by hand; the ones that did not are why
+// this exists.
+//
+// "no-store" rather than "no-cache": no-cache permits storage as long as the
+// entry is revalidated, which still leaves the credential written down in a
+// shared proxy or a service worker. no-store is the one that means do not
+// write this anywhere.
+func secretJSON(c *gin.Context, status int, body any) {
+	c.Header("Cache-Control", "no-store")
+	c.JSON(status, body)
+}
+
 // badRequest is a convenience for request-binding/validation failures.
 func badRequest(c *gin.Context, detail string) {
 	problem(c, http.StatusBadRequest, "Bad Request", detail)
@@ -151,6 +170,68 @@ func failAssets(c *gin.Context, err error) {
 		fail(c, err)
 	}
 }
+
+// rowError renders a single failed row of a bulk operation as a message safe to
+// put in a response body.
+//
+// Bulk import used to report failures as err.Error(), which is the one place in
+// the delivery layer that returned a raw Go error string to a caller — and it
+// did so on the highest-volume credential intake in the system, up to 500
+// secrets per request. Nothing in the vault path deliberately puts a secret in
+// an error today, but "no error anywhere below this ever wraps its input" is
+// not a property anyone can hold still, and this is the wrong endpoint to be
+// wrong about.
+//
+// It mirrors failAssets deliberately: the same sentinels produce the same
+// wording, so an operator reading a row failure and an operator reading a
+// single-row rejection are told the same thing. Two cases pass their own text
+// through, and only those two, because both are written to be read by a person
+// and neither can contain a secret — assets.ErrInvalid names the offending
+// value and the allowed set, and vault.ErrInjectionMismatch names the method
+// and never the secret. Everything unrecognised collapses to a fixed sentence.
+func rowError(err error) string {
+	var shown showableError
+	switch {
+	case err == nil:
+		return ""
+	case errors.As(err, &shown):
+		// Written to be read by the person looking at the import result. The
+		// type is the opt-in: a new row error is unsafe by default and has to
+		// say otherwise.
+		return shown.msg
+	case errors.Is(err, assets.ErrNotFound), errors.Is(err, vault.ErrNotFound):
+		return "not found"
+	case errors.Is(err, assets.ErrForbidden):
+		return "not permitted"
+	case errors.Is(err, assets.ErrInvalid):
+		return detailFor(err, assets.ErrInvalid, "invalid value")
+	case errors.Is(err, vault.ErrSecretRequired):
+		return "a password or secret is required"
+	case errors.Is(err, vault.ErrInjectionMismatch):
+		return detailFor(err, vault.ErrInjectionMismatch,
+			"this credential cannot authenticate this device")
+	case errors.Is(err, iam.ErrConflict):
+		return "already exists"
+	default:
+		// Deliberately says nothing about the cause. A row that fails for a
+		// reason the mapper does not know about is a reason nobody has decided
+		// is safe to print.
+		return "could not be imported"
+	}
+}
+
+// showableError carries a message composed for a person rather than for a log,
+// and is therefore safe to return in a response body verbatim.
+//
+// It exists so that "this string may be shown" is a property the author of an
+// error states deliberately, instead of a property a reader of rowError has to
+// infer from where the error happened to come from.
+type showableError struct{ msg string }
+
+func (e showableError) Error() string { return e.msg }
+
+// showable wraps a message that is safe to show.
+func showable(msg string) error { return showableError{msg: msg} }
 
 // failAccess maps access-broker domain errors to problem responses.
 func failAccess(c *gin.Context, err error) {

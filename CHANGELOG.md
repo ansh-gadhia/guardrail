@@ -12,6 +12,91 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-11
+
+### Security
+
+This release is the remediation pass for a full defensive audit of the codebase.
+Thirty findings were raised; the entries below are the ones that change
+behaviour. Nothing here requires a configuration change — `install.sh` does the
+work — but see **Upgrading** at the end of this section, because the database and
+guacd hops switch to TLS on the *second* update, not the first.
+
+- **A sealed secret is now bound to the row that owns it.** Envelope encryption
+  used no additional authenticated data, so nothing cryptographically stopped a
+  ciphertext being transplanted between credentials or between tenants — an
+  attacker with row-write could move a secret onto a credential they were
+  entitled to and have the gateway inject it. Secrets are now sealed under an
+  AAD naming the organisation and the credential, and the bindings that point
+  devices at credentials carry an HMAC over the pair. Rows written before this
+  keep working and are converted in place: the tag goes on the inner layer only,
+  so KEK rotation never has to know a credential's identity.
+- **PostgreSQL requires TLS.** Everything between the API and the database used
+  to cross the network in the clear — sealed ciphertext with the wrapped DEKs
+  beside it, password hashes, the audit chain, and the application role's own
+  password during connection setup. It is now TLS 1.3 with `verify-full` against
+  a pinned certificate, and `pg_hba.conf` ends in `hostssl`, so a client that
+  declines encryption is refused rather than quietly served plaintext.
+- **guacd requires TLS, and the API verifies it.** Target RDP and VNC passwords
+  travel that hop as connection parameters and guacd authenticates nobody, so in
+  the clear anything on the network could both read them and drive guacd into the
+  estate outside the audit trail.
+- **Redis requires a password.** It shipped with none. The login throttle, the
+  SSO replay nonces and the live session registry all live there.
+- **The flat Docker network is retired.** Nine services shared one bridge; there
+  are now three (`edge`, `data`, `session`) with the API the only member of more
+  than one, so `traefik`, `web` and `guacd` cannot reach the database at all.
+- **The audit hash chain is keyed.** It was unkeyed SHA-256, which made
+  tamper-evidence a property of database privileges rather than of a secret.
+  Existing rows verify under the scheme each row records.
+- **KEK rotation is reachable and non-destructive.** It was implemented but had
+  no caller, and the key id was a constant — so changing the master key produced
+  a different key under the same id and made every credential permanently
+  unopenable. The id is now derived from the key, and a previous key can be
+  supplied so a rotation can be completed rather than begun.
+- **Proxy credentials are erasable.** The injected `Authorization` value is held
+  as bytes, precomputed once, and zeroed when the session ends — a Go string
+  cannot be overwritten, which is why it was not one.
+- **Session recordings no longer capture query strings.** A legacy appliance that
+  authenticates via `GET /login?user=…&pass=…` was writing the target credential
+  into the timeline, durably, where the console rendered it.
+- **A version tag names one build, for ever.** Publishing overwrote
+  `:<VERSION>` on every push to main, so the tag a deployment pins to moved
+  underneath it. Re-publishing an existing version now fails; images also carry
+  provenance and SBOM attestations.
+- **A 16.7 MB prebuilt binary is no longer tracked**, and both build contexts
+  have `.dockerignore` files — they were `COPY . .` with none.
+
+### Fixed
+
+- **Integration tests no longer skip themselves silently.** Five tests — the ones
+  covering credential sealing and binding tamper-evidence — asked the database
+  what it happened to contain and called `t.Skip` when it was empty. On CI's
+  clean database that was all five, every run, reported as `ok`. They now create
+  their own fixtures, and CI fails if any integration test skips.
+- **CI lint has been failing on `main`**, which is why no image was published
+  after 1.3.0. Six pre-existing `staticcheck` findings in test files are fixed.
+- The bundled Redis and PostgreSQL clients, `make migrate-down`,
+  `run-host-api.sh` and `run-host-browser.sh` all negotiate TLS when it is on and
+  plaintext when it is not, rather than hard-coding `sslmode=disable`.
+- **A change of version clears the image digest pin.** The pin is appended to the
+  image reference, and Docker resolves `name:tag@sha256:…` by digest while
+  treating the tag as a label — so carrying one release's digest into the next
+  update would pull the OLD image while `.env`, the console footer and
+  `/healthz` all reported the new version. An upgrade that reverts itself and
+  says it succeeded. The pin exists to identify what is running, so it is now
+  recorded after the pull rather than allowed to govern it.
+
+### Upgrading
+
+No action beyond the usual `sudo /opt/guardrail/install.sh` → Update. Note that
+an update replaces `docker-compose.yml` and `install.sh` together while the *old*
+`install.sh` is still running, so the first update brings the stack up exactly as
+it was, and the second — now running this version's installer — issues the
+certificates and turns TLS on. Both are safe; the stack is never down between
+them.
+
+
 ## [1.4.0] - 2026-09-08
 
 ### Added

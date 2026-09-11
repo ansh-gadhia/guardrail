@@ -70,3 +70,58 @@ func TestChannel_Wants(t *testing.T) {
 		t.Error("disabled channel should want nothing")
 	}
 }
+
+// A notification leaves the trust boundary — to Slack, an operator-supplied
+// webhook, or an SMTP relay. The payload used to be marshalled whole, so what
+// could leave was whatever the newest caller put in a map. The allowlist makes
+// that a decision instead of an accident.
+func TestFilterPayloadDropsUnknownFields(t *testing.T) {
+	in := map[string]any{
+		"request_id": "r-1",
+		"requester":  "op@corp",
+		"device":     "core-sw-1",
+		// Not on the list: exactly the shape of a field somebody adds later
+		// without thinking about where notifications go.
+		"credential": "hunter2",
+		"secret":     "hunter2",
+	}
+	out, dropped := filterPayload(in)
+
+	for _, k := range []string{"credential", "secret"} {
+		if _, present := out[k]; present {
+			t.Errorf("%q was forwarded off-platform", k)
+		}
+	}
+	for _, k := range []string{"request_id", "requester", "device"} {
+		if _, present := out[k]; !present {
+			t.Errorf("%q was dropped but is on the allowlist", k)
+		}
+	}
+	if len(dropped) != 2 || dropped[0] != "credential" || dropped[1] != "secret" {
+		t.Errorf("dropped = %v, want [credential secret]", dropped)
+	}
+}
+
+// Today's notifications must be byte-identical: the allowlist was built from
+// the payload keys actually in use, so nothing an operator currently receives
+// changes.
+func TestFilterPayloadPassesEveryKeyInUse(t *testing.T) {
+	// Every key across both notifier.Notify call sites.
+	inUse := map[string]any{
+		"request_id": "r", "requester": "e", "device": "d", "device_id": "i",
+		"reason": "why", "minutes": 30, "level": 2, "status": "approved",
+	}
+	out, dropped := filterPayload(inUse)
+	if len(dropped) != 0 {
+		t.Fatalf("a key in current use was dropped: %v", dropped)
+	}
+	if len(out) != len(inUse) {
+		t.Fatalf("payload changed size: got %d, want %d", len(out), len(inUse))
+	}
+}
+
+func TestFilterPayloadHandlesEmpty(t *testing.T) {
+	if out, dropped := filterPayload(nil); out != nil || dropped != nil {
+		t.Errorf("nil payload should pass through untouched, got %v / %v", out, dropped)
+	}
+}

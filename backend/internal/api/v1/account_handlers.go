@@ -1,7 +1,6 @@
 package v1
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -372,7 +371,7 @@ func (h *AssetsHandler) importAccounts(c *gin.Context) {
 		row := &body.Accounts[i]
 		userID, err := idx.resolve(row)
 		if err != nil {
-			failures = append(failures, rowErr{Index: i, Error: err.Error()})
+			failures = append(failures, rowErr{Index: i, Error: rowError(err)})
 			continue
 		}
 		var deviceID, groupID *uuid.UUID
@@ -411,7 +410,7 @@ func (h *AssetsHandler) importAccounts(c *gin.Context) {
 			Injection: row.Injection, Name: row.Name,
 		}.toInput(vaultMeta(c), scheme)
 		if serr := h.vault.SetForUser(c.Request.Context(), actor, deviceID, groupID, userID, in); serr != nil {
-			failures = append(failures, rowErr{Index: i, Error: serr.Error()})
+			failures = append(failures, rowErr{Index: i, Error: rowError(serr)})
 			continue
 		}
 		imported++
@@ -474,9 +473,12 @@ func (idx userIndex) resolve(row *importAccountRow) (uuid.UUID, error) {
 	return uuid.Nil, errNoSuchUser
 }
 
+// These three are the only row failures whose text reaches the caller. They are
+// showable because each was written for the operator fixing the spreadsheet;
+// everything else a row can fail on collapses to a fixed sentence in rowError.
 var (
-	errInvalidUser     = errors.New("needs a user_id or a user_email")
-	errNoSuchUser      = errors.New("no user with that email")
-	errLookupTruncated = errors.New(
+	errInvalidUser     = showable("needs a user_id or a user_email")
+	errNoSuchUser      = showable("no user with that email")
+	errLookupTruncated = showable(
 		"email lookup only covers the first 200 users and this address was not among them; supply user_id for this row")
 )

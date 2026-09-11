@@ -133,6 +133,10 @@ type DesktopConfig struct {
 	RecordingDir string
 	// Width/Height/DPI are the desktop geometry requested of the device.
 	Width, Height, DPI int
+	// TLSCACert is guacd's certificate, pinned so the API can verify the hop
+	// that carries target RDP and VNC passwords. Empty leaves it plaintext,
+	// which is what every deployment before 1.4 did.
+	TLSCACert string
 }
 
 // FederationConfig configures external identity providers. Each provider is
@@ -321,9 +325,26 @@ type AuthConfig struct {
 type SecurityConfig struct {
 	// MasterKey is the KEK used for envelope encryption of the credential vault.
 	// It must be at least 32 bytes; the process refuses to start otherwise.
-	MasterKey        string
-	CORSAllowOrigins []string
-	CookieDomain     string
+	MasterKey string
+	// PreviousMasterKey is the superseded master key, held only while a KEK
+	// rotation is in flight so `guardrail rotate-kek` can open what it sealed.
+	// Empty is the normal, finished state.
+	PreviousMasterKey string
+	// CredentialPurgeAfter is how long a DELETED credential's ciphertext is kept
+	// before it is destroyed for good.
+	//
+	// Deleting a credential only ever set deleted_at, so the ciphertext and its
+	// wrapped DEK stayed in the table forever — a secret nobody believes exists
+	// any more, still sitting in every backup taken since.
+	//
+	// The delay is deliberate rather than immediate: deletion is a thing people
+	// do by accident, and a window in which a database restore can still recover
+	// the credential is worth more than a few weeks of extra ciphertext. Zero
+	// disables the sweep, which is a legitimate choice for a deployment whose
+	// retention rules live somewhere else.
+	CredentialPurgeAfter time.Duration
+	CORSAllowOrigins     []string
+	CookieDomain         string
 	// TrustProxyHeaders enables honoring X-Forwarded-* — only true behind a
 	// trusted edge proxy (Traefik).
 	TrustProxyHeaders bool
@@ -407,10 +428,12 @@ func Load() (*Config, error) {
 			Issuer:          getEnv("GUARDRAIL_JWT_ISSUER", "guardrail"),
 		},
 		Security: SecurityConfig{
-			MasterKey:         getEnv("GUARDRAIL_MASTER_KEY", ""),
-			CORSAllowOrigins:  getCSV("GUARDRAIL_CORS_ALLOW_ORIGINS", []string{"http://localhost:5173"}),
-			CookieDomain:      getEnv("GUARDRAIL_COOKIE_DOMAIN", ""),
-			TrustProxyHeaders: getBool("GUARDRAIL_TRUST_PROXY_HEADERS", false),
+			MasterKey:            getEnv("GUARDRAIL_MASTER_KEY", ""),
+			PreviousMasterKey:    getEnv("GUARDRAIL_MASTER_KEY_PREVIOUS", ""),
+			CredentialPurgeAfter: getDuration("GUARDRAIL_CREDENTIAL_PURGE_AFTER", 30*24*time.Hour),
+			CORSAllowOrigins:     getCSV("GUARDRAIL_CORS_ALLOW_ORIGINS", []string{"http://localhost:5173"}),
+			CookieDomain:         getEnv("GUARDRAIL_COOKIE_DOMAIN", ""),
+			TrustProxyHeaders:    getBool("GUARDRAIL_TRUST_PROXY_HEADERS", false),
 		},
 		Bootstrap: BootstrapConfig{
 			AdminEmail:    getEnv("GUARDRAIL_ADMIN_EMAIL", ""),
@@ -486,6 +509,7 @@ func Load() (*Config, error) {
 			Width:        getInt("GUARDRAIL_DESKTOP_WIDTH", 1280),
 			Height:       getInt("GUARDRAIL_DESKTOP_HEIGHT", 800),
 			DPI:          getInt("GUARDRAIL_DESKTOP_DPI", 96),
+			TLSCACert:    getEnv("GUARDRAIL_GUACD_TLS_CA", ""),
 		},
 		Log: LogConfig{
 			Level:  getEnv("GUARDRAIL_LOG_LEVEL", "info"),

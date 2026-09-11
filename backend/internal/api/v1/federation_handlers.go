@@ -42,7 +42,7 @@ func (h *Handler) ldapLogin(c *gin.Context) {
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
-	c.JSON(http.StatusOK, tokenResponse{
+	secretJSON(c, http.StatusOK, tokenResponse{
 		AccessToken: pair.AccessToken, TokenType: "Bearer",
 		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Principal: toPrincipalDTO(pair.Principal),
@@ -103,7 +103,7 @@ func (h *Handler) oidcCallback(c *gin.Context) {
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
-	c.JSON(http.StatusOK, tokenResponse{
+	secretJSON(c, http.StatusOK, tokenResponse{
 		AccessToken: pair.AccessToken, TokenType: "Bearer",
 		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		Principal: toPrincipalDTO(pair.Principal),

@@ -101,7 +101,7 @@ func TestHandshakeSendsValuesInTheOrderGuacdAsked(t *testing.T) {
 			"hostname": "10.0.0.5", "port": "5900",
 			"username": "operator", "password": "s3cr3t",
 		},
-	}, 5*time.Second)
+	}, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestHandshakeSendsTheExpectedOpcodes(t *testing.T) {
 	conn, err := dialGuacd(context.Background(), addr, connConfig{
 		Protocol: "rdp", Width: 1280, Height: 800, DPI: 96,
 		Params: map[string]string{"hostname": "h"},
-	}, 5*time.Second)
+	}, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestHandshakeSurfacesGuacdError(t *testing.T) {
 
 	_, err := dialGuacd(context.Background(), addr, connConfig{
 		Protocol: "vnc", Params: map[string]string{"hostname": "h"},
-	}, 5*time.Second)
+	}, 5*time.Second, nil)
 	if err == nil {
 		t.Fatal("a refused connection returned no error")
 	}
@@ -213,7 +213,7 @@ func TestHandshakeTimesOutOnSilentGuacd(t *testing.T) {
 	start := time.Now()
 	_, err = dialGuacd(context.Background(), ln.Addr().String(), connConfig{
 		Protocol: "vnc", Params: map[string]string{},
-	}, 300*time.Millisecond)
+	}, 300*time.Millisecond, nil)
 	if err == nil {
 		t.Fatal("a silent guacd did not fail the handshake")
 	}
@@ -226,7 +226,7 @@ func TestHandshakeTimesOutOnSilentGuacd(t *testing.T) {
 // no address sends an operator looking at the wrong service.
 func TestHandshakeNamesGuacdWhenUnreachable(t *testing.T) {
 	// Port 1 on loopback: nothing listens there.
-	_, err := dialGuacd(context.Background(), "127.0.0.1:1", connConfig{Protocol: "vnc"}, time.Second)
+	_, err := dialGuacd(context.Background(), "127.0.0.1:1", connConfig{Protocol: "vnc"}, time.Second, nil)
 	if err == nil {
 		t.Fatal("dialling a dead address succeeded")
 	}

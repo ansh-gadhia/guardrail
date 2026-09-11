@@ -1,0 +1,13 @@
+# Build context hygiene for frontend/Dockerfile, which does `COPY . .`.
+#
+# node_modules and dist are rebuilt inside the image; shipping the host's copies
+# makes the build slower and non-reproducible, and dist may hold a stale bundle.
+node_modules/
+dist/
+.vite/
+
+# Never, regardless of where they came from.
+.env
+.env.*
+*.pem
+*.key

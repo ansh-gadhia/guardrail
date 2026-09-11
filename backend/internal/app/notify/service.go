@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/guardrail/guardrail/internal/domain/assets"
 	"github.com/guardrail/guardrail/internal/domain/audit"
 	"github.com/guardrail/guardrail/internal/domain/iam"
 	"github.com/guardrail/guardrail/internal/domain/notify"
@@ -105,6 +106,12 @@ func scopeOf(a iam.Claims) notify.Scope {
 
 // CreateChannel creates a notification channel.
 func (s *Service) CreateChannel(ctx context.Context, actor iam.Claims, in ChannelInput) (*notify.Channel, error) {
+	// notification_channels.config is stored in the clear and is documented as
+	// non-secret — which was a comment, not a property. Checked before anything
+	// is written, so a refused channel changes nothing.
+	if err := assets.ValidateChannelConfig(in.Config); err != nil {
+		return nil, err
+	}
 	events := in.Events
 	if events == nil {
 		events = []string{"*"}

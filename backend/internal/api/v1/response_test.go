@@ -3,9 +3,18 @@ package v1
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/guardrail/guardrail/internal/domain/access"
+	"github.com/guardrail/guardrail/internal/domain/iam"
+	"github.com/guardrail/guardrail/internal/domain/vault"
 )
 
 // detailFor turns a wrapped sentinel into something worth showing somebody. The
@@ -45,5 +54,164 @@ func TestDetailFor(t *testing.T) {
 				t.Errorf("detailFor = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// secretJSON must mark the response uncacheable. no-store specifically: no-cache
+// still permits a shared proxy or a service worker to write the credential down
+// as long as it revalidates later.
+func TestSecretJSONSetsNoStore(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	secretJSON(c, http.StatusOK, gin.H{"recovery_codes": []string{"a", "b"}})
+
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want %q", got, "no-store")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !strings.Contains(w.Body.String(), "recovery_codes") {
+		t.Errorf("body not written: %s", w.Body.String())
+	}
+}
+
+// TestNoSecretEscapesThroughPlainJSON is the guard for the tenth endpoint.
+//
+// The finding this fixes was not that one handler forgot the header — it was
+// that nine did, while two remembered. A per-site rule does not hold, so this
+// scans the delivery package itself: any c.JSON whose body names a known
+// credential field is a site that skipped secretJSON. Add a new secret-bearing
+// response and this fails until it goes through the helper.
+func TestNoSecretEscapesThroughPlainJSON(t *testing.T) {
+	// Field names that are, or directly yield, a credential. "token" alone is
+	// absent on purpose: it appears in non-secret contexts such as token IDs.
+	secretKeys := []string{
+		`"password"`, `"recovery_codes"`, `"provisioning_uri"`,
+		`"mfa_token"`, `"access_token"`, `AccessToken:`,
+	}
+
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(src)
+		for _, call := range callsTo(text, "c.JSON(") {
+			for _, key := range secretKeys {
+				if strings.Contains(call.body, key) {
+					t.Errorf("%s:%d writes %s through c.JSON — use secretJSON so the "+
+						"response is marked no-store", f, call.line, key)
+				}
+			}
+		}
+	}
+}
+
+type jsonCall struct {
+	line int
+	body string
+}
+
+// callsTo extracts each invocation of fn, spanning exactly to its balanced
+// closing paren.
+//
+// A fixed line-count window was the obvious approach and it was wrong: it read
+// past the end of short calls into whatever followed, and reported
+// admin_handlers.go's {"coverage": ...} response as leaking a password because
+// a resetPasswordRequest type happened to be declared three lines below. A
+// guard that cries wolf gets deleted, so it counts parens.
+func callsTo(src, fn string) []jsonCall {
+	var out []jsonCall
+	for i := 0; ; {
+		j := strings.Index(src[i:], fn)
+		if j < 0 {
+			return out
+		}
+		start := i + j
+		depth, end := 0, start
+		for k := start + len(fn) - 1; k < len(src); k++ {
+			switch src[k] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+			if depth == 0 {
+				end = k
+				break
+			}
+		}
+		if end <= start {
+			end = len(src) - 1
+		}
+		out = append(out, jsonCall{
+			line: strings.Count(src[:start], "\n") + 1,
+			body: src[start : end+1],
+		})
+		i = end + 1
+	}
+}
+
+// rowError is the bulk-import failure renderer. The property under test is that
+// an unrecognised error says nothing about itself: bulk import is the highest
+// volume credential intake in the system (500 secrets per request) and used to
+// return err.Error() straight into the response body.
+func TestRowErrorNeverEchoesAnUnknownError(t *testing.T) {
+	// Stand-in for any future error that wraps its input. If this string can
+	// reach the caller, so can a secret.
+	leaky := fmt.Errorf("vault: seal failed for secret %q on host %s", "hunter2", "10.0.0.1")
+
+	got := rowError(leaky)
+	if strings.Contains(got, "hunter2") {
+		t.Fatalf("rowError echoed the wrapped value: %q", got)
+	}
+	if strings.Contains(got, "10.0.0.1") {
+		t.Errorf("rowError echoed wrapped context: %q", got)
+	}
+	if got != "could not be imported" {
+		t.Errorf("rowError(unknown) = %q, want the fixed fallback", got)
+	}
+}
+
+func TestRowErrorKeepsMessagesWrittenForPeople(t *testing.T) {
+	// The three import sentinels are showable: their text is the whole point,
+	// and losing it would make a failed row unfixable.
+	for _, err := range []error{errInvalidUser, errNoSuchUser, errLookupTruncated} {
+		if got := rowError(err); got != err.Error() {
+			t.Errorf("rowError(%v) = %q, want the sentinel's own text", err, got)
+		}
+	}
+
+	// Wrapped, it still comes through — errors.As, not equality.
+	wrapped := fmt.Errorf("importing row 4: %w", errNoSuchUser)
+	if got := rowError(wrapped); got != errNoSuchUser.Error() {
+		t.Errorf("rowError(wrapped) = %q, want %q", got, errNoSuchUser.Error())
+	}
+}
+
+func TestRowErrorMapsDomainSentinels(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{nil, ""},
+		{vault.ErrNotFound, "not found"},
+		{vault.ErrSecretRequired, "a password or secret is required"},
+		{iam.ErrConflict, "already exists"},
+	}
+	for _, c := range cases {
+		if got := rowError(c.err); got != c.want {
+			t.Errorf("rowError(%v) = %q, want %q", c.err, got, c.want)
+		}
 	}
 }

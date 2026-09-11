@@ -10,23 +10,25 @@ import { BrandMark } from "@/components/brand";
 // readExchangeToken pulls the SIEM's exchange token off the URL and scrubs it
 // from the address bar in the same breath.
 //
-// FRAGMENT FIRST, and this is the part worth copying rather than the part worth
-// skimming. A URL fragment is never transmitted to a server. A query string is —
-// so `?token=…` is written verbatim into the reverse proxy's access log, which
-// is rotated, shipped somewhere, and kept for far longer than the thirty seconds
-// the credential is alive. It also lands in browser history and in the Referer
-// header of the next thing the page loads. The query string is accepted anyway
-// so that a SIEM already redirecting that way keeps working, and has a strictly
-// better option to move to.
+// FRAGMENT ONLY. A URL fragment is never transmitted to a server; a query string
+// is. `?token=…` would be written verbatim into the fronting proxy's access log,
+// which is rotated, shipped somewhere, and kept for far longer than the thirty
+// seconds the credential is alive — and it lands in browser history and in the
+// Referer header of the next thing the page loads.
+//
+// The query string used to be accepted as a fallback, for a SIEM already
+// redirecting that way. It is not any more: accepting a live bearer credential
+// somewhere it will certainly be logged is not a compatibility shim, it is the
+// vulnerability, and a fallback nobody is using is just an unguarded door. If a
+// launcher is ever pointed at `?token=`, it fails closed here rather than
+// succeeding and writing the token to disk on the way past.
 //
 // The scrub uses replaceState rather than pushState so the token-bearing URL
 // does not become a back-button destination. The token is single-use by the time
 // this returns, so what is left is only useful to somebody reading over a
 // shoulder — but that is a real threat in a SOC.
 function readExchangeToken(): string | null {
-  const fromFragment = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("token");
-  const fromQuery = new URLSearchParams(window.location.search).get("token");
-  const token = fromFragment ?? fromQuery;
+  const token = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("token");
   if (token) {
     window.history.replaceState(null, "", window.location.pathname);
   }

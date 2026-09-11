@@ -282,7 +282,9 @@ function AddMfaStep({ federated = false }: { federated?: boolean }) {
         subtitle="Each code works once if you lose your authenticator. This is the only time they're shown."
         icon={IconKey}
       >
-        <ul className="mb-4 grid grid-cols-2 gap-2">
+        {/* One column until there is room for two: a recovery code is now four
+            groups rather than two, and a wrapped code is one somebody mistypes. */}
+        <ul className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
           {recoveryCodes.map((c) => (
             <li key={c} className="rounded-lg bg-surface-2 px-3 py-2 text-center font-mono text-sm text-fg">{c}</li>
           ))}

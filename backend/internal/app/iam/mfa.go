@@ -37,7 +37,9 @@ func (s *Service) BeginTOTPEnrollment(ctx context.Context, actor iam.Claims) (*M
 	if err != nil {
 		return nil, err
 	}
-	enc, err := s.cipher.Encrypt([]byte(secret))
+	// Bound to the user, so a seed cannot be copied onto another account's row
+	// and start accepting this person's authenticator.
+	enc, err := s.cipher.Encrypt([]byte(secret), iam.MFASecretAAD(actor.UserID))
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +79,7 @@ func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, actor iam.Claims, c
 	if m.Confirmed() {
 		return nil, iam.ErrMFAAlreadyEnrolled
 	}
-	secret, err := s.cipher.Decrypt(m.Secret)
+	secret, err := s.cipher.Decrypt(m.Secret, iam.MFASecretAAD(actor.UserID))
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +152,7 @@ func (s *Service) VerifyMFA(ctx context.Context, in MFAVerifyInput) (*TokenPair,
 // recovery code. It returns whether the factor was valid and which method
 // ("totp" or "recovery") succeeded.
 func (s *Service) checkSecondFactor(ctx context.Context, m *iam.MFAMethod, userID iam.ID, code string) (bool, string) {
-	secret, err := s.cipher.Decrypt(m.Secret)
+	secret, err := s.cipher.Decrypt(m.Secret, iam.MFASecretAAD(userID))
 	if err == nil && s.totp.Validate(string(secret), code) {
 		return true, "totp"
 	}
@@ -176,13 +178,32 @@ func (s *Service) DisableMFA(ctx context.Context, actor iam.Claims, code string)
 	if !m.Confirmed() {
 		return iam.ErrMFANotEnrolled
 	}
+	// Throttled, like every other place a second factor is checked. This one
+	// was not, which left an unlimited oracle against a recovery code — the
+	// weakest of the two factors it accepts — behind nothing but a session
+	// cookie. Keyed on the user rather than the IP because the caller is already
+	// authenticated here, so the account is the thing worth protecting and the
+	// address is just where they happen to be.
+	throttleKey := "mfa-disable:" + actor.UserID.String()
+	if s.throttle != nil {
+		if allowed, _, e := s.throttle.Allow(ctx, throttleKey); e == nil && !allowed {
+			return ErrThrottled
+		}
+	}
+
 	ok, _ := s.checkSecondFactor(ctx, m, actor.UserID, code)
 	if !ok {
+		if s.throttle != nil {
+			_ = s.throttle.Fail(ctx, throttleKey)
+		}
 		s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "mfa.disable",
 			Category: audit.CategoryAuth, ActorID: &actor.UserID, ActorEmail: actor.Email,
 			TargetType: "user", TargetID: actor.UserID.String(),
 			Result: audit.ResultFailure, Detail: map[string]any{"reason": "mfa_bad_code"}})
 		return iam.ErrMFAInvalidCode
+	}
+	if s.throttle != nil {
+		_ = s.throttle.Reset(ctx, throttleKey)
 	}
 	if err := s.mfa.Delete(ctx, actor.UserID); err != nil {
 		return err
@@ -252,15 +273,36 @@ func (s *Service) regenerateRecoveryCodes(ctx context.Context, userID iam.ID) ([
 	return codes, nil
 }
 
-// newRecoveryCode returns a random code formatted as "xxxxx-xxxxx" (base32-ish
-// hex), easy to read and type.
+// recoveryCodeBytes is the entropy behind one recovery code.
+//
+// Ten bytes, not five. A recovery code bypasses TOTP entirely — it is a
+// standalone second factor — and forty bits is not enough for something with
+// that authority: the codes are stored as unsalted SHA-256, so an attacker
+// holding the table faces 2^40 hashes per code, which is hours of GPU time, not
+// years. Eighty bits puts it out of reach.
+//
+// Raising it is backward compatible. hashRecoveryCode strips separators before
+// hashing, so the stored hash of an existing five-byte code still verifies
+// unchanged; the length only affects codes minted from here on. Existing users
+// pick the new length up when they regenerate.
+const recoveryCodeBytes = 10
+
+// newRecoveryCode returns a random code in dash-separated groups of five hex
+// characters, easy to read off a printout and type back.
 func newRecoveryCode() (string, error) {
-	buf := make([]byte, 5)
+	buf := make([]byte, recoveryCodeBytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("iam: generate recovery code: %w", err)
 	}
-	h := hex.EncodeToString(buf) // 10 hex chars
-	return h[:5] + "-" + h[5:], nil
+	h := hex.EncodeToString(buf) // 2 hex chars per byte
+	var b strings.Builder
+	for i := 0; i < len(h); i += 5 {
+		if i > 0 {
+			b.WriteByte('-')
+		}
+		b.WriteString(h[i:min(i+5, len(h))])
+	}
+	return b.String(), nil
 }
 
 // hashRecoveryCode normalizes and SHA-256-hashes a recovery code for storage and

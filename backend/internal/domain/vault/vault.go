@@ -95,10 +95,41 @@ func DefaultInjectionFor(scheme string) InjectionMethod {
 // No field reveals plaintext without the KEK.
 type SealedSecret struct {
 	KEKID       string
-	Ciphertext  []byte // AES-256-GCM(plaintext, DEK, SecretNonce)
+	Ciphertext  []byte // AES-256-GCM(plaintext, DEK, SecretNonce, AAD)
 	SecretNonce []byte
 	DEKWrapped  []byte // AES-256-GCM(DEK, KEK, DEKNonce)
 	DEKNonce    []byte
+	// AADVersion says which associated-data rule this ciphertext was sealed
+	// under, so a row sealed before the rule existed can still be opened.
+	//
+	//   AADNone (0)        no associated data — pre-0036
+	//   AADCredentialV1(1) bound to organization_id and credential id
+	//
+	// It is NOT a switch an opener may honour blindly. Opening a version-1
+	// ciphertext as version 0 passes no AAD against a tag computed over one, so
+	// it fails: downgrading makes a row unreadable, not transplantable.
+	AADVersion int
+}
+
+// Associated-data rules. The number is stored, so these values are permanent.
+const (
+	// AADNone is ciphertext sealed before associated data was bound in.
+	AADNone = 0
+	// AADCredentialV1 binds a secret to its organization and credential id.
+	AADCredentialV1 = 1
+)
+
+// CredentialAAD is the associated data for a credential's secret.
+//
+// Organization AND credential id: the credential id alone would already stop a
+// ciphertext moving between rows, and the organization is there so that a tenant
+// boundary is crossed by the crypto too rather than by row-level security alone.
+//
+// The "v1" is part of the signed bytes on purpose. If this format ever has to
+// change, the new one produces different AAD and old ciphertext keeps opening
+// under its own recorded version instead of silently failing.
+func CredentialAAD(organizationID, credentialID uuid.UUID) []byte {
+	return []byte("guardrail/cred/v1|" + organizationID.String() + "|" + credentialID.String())
 }
 
 // Credential is a vault entry. The plaintext secret is only ever present in the
@@ -225,6 +256,25 @@ type CredentialRepository interface {
 
 	// ListByKEK returns credentials sealed under a given KEK (for rotation).
 	ListByKEK(ctx context.Context, kekID string, limit int) ([]Credential, error)
+	// ListByAADVersion returns credentials sealed under a given associated-data
+	// rule, so the re-seal job can find the ones that predate the current one.
+	ListByAADVersion(ctx context.Context, version, limit int) ([]Credential, error)
+	// ReplaceSealed swaps a credential's sealed material in place, touching
+	// nothing else. Used by re-sealing and by KEK rotation, both of which change
+	// how a secret is protected and not what it is.
+	ReplaceSealed(ctx context.Context, id uuid.UUID, sealed SealedSecret) error
+	// RegisterKEK records a key id in the registry, so that credentials.kek_id —
+	// which is a foreign key — can name it. Idempotent.
+	RegisterKEK(ctx context.Context, id, provider string) error
+	// CountByKEK returns how many live credentials are sealed under a key id,
+	// so a rotation can say what is left to move.
+	CountByKEK(ctx context.Context, kekID string) (int, error)
+	// DueForPurge returns credentials soft-deleted before the cutoff, oldest
+	// first, for permanent removal.
+	DueForPurge(ctx context.Context, before time.Time, limit int) ([]Credential, error)
+	// HardDelete removes a credential and its bindings for good. Only ever
+	// called for a row already soft-deleted past its retention.
+	HardDelete(ctx context.Context, id uuid.UUID) error
 }
 
 // Scope is the tenant scope for vault operations (mirrors iam.TenantScope to

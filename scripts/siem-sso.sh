@@ -129,6 +129,10 @@ Options
                     A migration aid only: it hands this server a key that can
                     FORGE the SIEM's assertions rather than merely check them.
                     Clear it the day the SIEM signs from its JWKS.
+  --secret-file ${D}<path>${R}  read the shared secret from a file instead of the command
+                    line. Prefer this: an argument is visible in `ps` to every
+                    user on the box and lands in shell history.
+  --secret -        read the shared secret from stdin.
   --no-secret       stop accepting HS256: clears any shared secret already set.
                     Omitting --secret does NOT do this — a re-run leaves an
                     existing secret alone, so that re-pinning a rotated
@@ -202,7 +206,7 @@ api_login() {
             printf '\n' >&2
         fi
         body=$(printf '{"email":"%s","password":"%s"}' "$(json_escape "$email")" "$(json_escape "$password")")
-        login=$(curl -sk --max-time 15 -X POST "$base/auth/login" \
+        login=$(api_curl --max-time 15 -X POST "$base/auth/login" \
             -H 'Content-Type: application/json' -d "$body" 2>/dev/null) || true
 
         jwt=$(printf '%s' "$login" | json_str access_token '[A-Za-z0-9._-]')
@@ -214,7 +218,7 @@ api_login() {
         if [ -n "$mfa" ]; then
             printf '%s' "  Authentication code: " >&2
             IFS= read -r -u 3 code || return 1
-            login=$(curl -sk --max-time 15 -X POST "$base/auth/mfa/verify" \
+            login=$(api_curl --max-time 15 -X POST "$base/auth/mfa/verify" \
                 -H 'Content-Type: application/json' \
                 -d "$(printf '{"mfa_token":"%s","code":"%s"}' "$(json_escape "$mfa")" "$(json_escape "$code")")" 2>/dev/null) || true
             jwt=$(printf '%s' "$login" | json_str access_token '[A-Za-z0-9._-]')
@@ -247,7 +251,7 @@ mint_token() {
     # rather than leave a second standing credential behind them.
     step "Tokens this deployment already has"
     local listing
-    listing=$(curl -sk --max-time 15 "$base/api-tokens" -H "Authorization: Bearer $jwt" 2>/dev/null || true)
+    listing=$(api_curl --max-time 15 "$base/api-tokens" -H "Authorization: Bearer $jwt" 2>/dev/null || true)
     case "$listing" in
         *'"name"'*)
             printf '%s' "$listing" \
@@ -259,7 +263,7 @@ mint_token() {
 
     step "Minting ${B}${name}${R}"
     local created
-    created=$(curl -sk --max-time 15 -X POST "$base/api-tokens" \
+    created=$(api_curl --max-time 15 -X POST "$base/api-tokens" \
         -H "Authorization: Bearer $jwt" -H 'Content-Type: application/json' \
         -d "$(printf '{"name":"%s","scopes":%s}' "$(json_escape "$name")" "$TOKEN_SCOPES")" 2>/dev/null) || true
 
@@ -275,7 +279,7 @@ mint_token() {
     warn "Copy it now. Only its hash is stored; this is the only time it is shown."
     info "It does not expire. Revoke it in the console: ${B}Security -> API tokens${R}"
     printf '\n  %s\n' "${D}Give it to the SIEM for the device feed:${R}"
-    printf '    %s\n' "${D}curl -sk $(console_url)/api/v1/status/devices \\${R}"
+    printf '    %s\n' "${D}curl --cacert ${CONSOLE_CERT} $(console_url)/api/v1/status/devices \\${R}"
     printf '    %s\n\n' "${D}     -H \"Authorization: Bearer ${token}\"${R}"
 }
 
@@ -330,6 +334,50 @@ console_url() {
     printf 'https://127.0.0.1:%s' "$port"
 }
 
+# CONSOLE_CERT is the certificate this deployment serves. install.sh generates it
+# and Traefik presents it, so it is both self-signed AND the right thing to pin
+# against — a self-signed certificate you generated is not an unknown one.
+CONSOLE_CERT="$INSTALL_DIR/deploy/tls/cert.pem"
+
+# api_curl calls the local API with TLS verification ON where that is possible.
+#
+# Every call here used to pass -k, which disables verification outright. That is
+# the wrong default for a script whose whole job is wiring up an authentication
+# path, and three of these calls carry a bearer JWT or a freshly minted API
+# token: -k means anything that can answer on 127.0.0.1 collects them.
+#
+# The certificate is self-signed, which is exactly why --cacert is the answer
+# rather than plain verification: pinning the deployment's own certificate
+# verifies the connection without needing a public CA anywhere.
+#
+# It falls back to -k rather than failing, and says so. An operator whose
+# certificate lives somewhere else, or predates the SAN that covers 127.0.0.1,
+# still needs `siem-sso.sh status` to work — but they should know the connection
+# was not verified, which is the part that was silent before.
+API_TLS_MODE=""
+api_curl() {
+    if [ -z "$API_TLS_MODE" ]; then
+        if [ -f "$CONSOLE_CERT" ] &&
+           curl -s --cacert "$CONSOLE_CERT" --max-time 5 -o /dev/null \
+                "$(console_url)/api/v1/auth/providers" 2>/dev/null; then
+            API_TLS_MODE="verified"
+        else
+            API_TLS_MODE="insecure"
+            warn "TLS verification is OFF for calls to this deployment's own API."
+            if [ ! -f "$CONSOLE_CERT" ]; then
+                warn "  no certificate at ${CONSOLE_CERT}"
+            else
+                warn "  ${CONSOLE_CERT} does not verify $(console_url) — check its SAN covers 127.0.0.1"
+            fi
+        fi
+    fi
+    if [ "$API_TLS_MODE" = "verified" ]; then
+        curl -s --cacert "$CONSOLE_CERT" "$@"
+    else
+        curl -sk "$@"
+    fi
+}
+
 # why_disabled names the reason instead of guessing at one.
 #
 # "it may not have been restarted" was the only thing this used to say, which is
@@ -381,7 +429,7 @@ why_disabled() {
 
 probe_live() {
     local out
-    out=$(curl -sk --max-time 5 "$(console_url)/api/v1/auth/providers" 2>/dev/null || true)
+    out=$(api_curl --max-time 5 "$(console_url)/api/v1/auth/providers" 2>/dev/null || true)
     case "$out" in
         *'"siem_sso":true'*)  ok "the running API reports SIEM single sign-on as ${B}enabled${R}" ;;
         *'"siem_sso":false'*) warn "the running API reports it as ${B}DISABLED${R}"
@@ -414,7 +462,19 @@ parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --cert)      CERT_IN="${2:-}"; shift 2 ;;
-            --secret)    SECRET="${2:-}"; shift 2 ;;
+            --secret)
+                # "-" means stdin, so a secret can reach this script without
+                # ever appearing in an argument list or a shell history file.
+                if [ "${2:-}" = "-" ]; then
+                    IFS= read -r SECRET || die "no secret on stdin"
+                else
+                    SECRET="${2:-}"
+                fi
+                shift 2 ;;
+            --secret-file)
+                [ -f "${2:-}" ] || die "no such file: ${2:-}"
+                IFS= read -r SECRET < "$2" || die "could not read ${2}"
+                shift 2 ;;
             --no-secret) CLEAR_SECRET=1; shift ;;
             --org)       ORG="${2:-}"; shift 2 ;;
             --audience)  AUDIENCE="${2:-}"; shift 2 ;;
@@ -611,7 +671,7 @@ do_setup() {
         step "Verifying"
         local i=0
         while [ $i -lt 30 ]; do
-            case "$(curl -sk --max-time 3 "$(console_url)/api/v1/auth/providers" 2>/dev/null || true)" in
+            case "$(api_curl --max-time 3 "$(console_url)/api/v1/auth/providers" 2>/dev/null || true)" in
                 *'"siem_sso":true'*) ok "the API reports SIEM single sign-on as ${B}enabled${R}"; break ;;
             esac
             i=$((i + 1)); sleep 2

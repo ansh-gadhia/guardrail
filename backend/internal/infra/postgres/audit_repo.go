@@ -3,9 +3,11 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"net/netip"
 	"strconv"
 	"time"
@@ -24,10 +26,31 @@ import (
 // A transaction-scoped advisory lock per org serializes concurrent inserts so
 // the chain never forks. The application DB role has no UPDATE/DELETE grant on
 // audit_events, so the chain is append-only and tamper-evident.
-type AuditRepo struct{ db *DB }
+type AuditRepo struct {
+	db *DB
+	// chainKey keys the tamper-evidence HMAC. Optional; see WithChainKey.
+	chainKey []byte
+}
 
 // NewAuditRepo constructs an AuditRepo.
 func NewAuditRepo(db *DB) *AuditRepo { return &AuditRepo{db: db} }
+
+// WithChainKey makes the chain tamper-EVIDENT rather than merely
+// tamper-detectable-by-somebody-without-write-access, and returns the repo so
+// wiring stays a one-liner.
+//
+// Without it the chain is a plain SHA-256 that anyone can recompute, so the
+// guarantee rested entirely on the database grant withholding UPDATE from the
+// application role — a real control, but not one that survives a compromised
+// database, a doctored backup restore, or the owner role. With it, forging
+// history needs a key that exists only in this process.
+//
+// Optional because the repo is constructed in tests that care about audit
+// storage and not about forgery; main always sets it.
+func (r *AuditRepo) WithChainKey(key []byte) *AuditRepo {
+	r.chainKey = key
+	return r
+}
 
 // Record appends an event, linking it to the previous event for its org.
 func (r *AuditRepo) Record(ctx context.Context, e audit.Event) error {
@@ -85,7 +108,7 @@ func (r *AuditRepo) Record(ctx context.Context, e audit.Event) error {
 		// Hashed over the canonical form, not the bytes Go happened to produce:
 		// jsonb re-orders object keys and drops whitespace, so the raw encoding is
 		// not what comes back out.
-		hash := chainHash(prev, e, canonicalJSON(detail))
+		hash := chainHash(r.chainKey, prev, e, canonicalJSON(detail))
 
 		_, err = tx.Exec(ctx, `
 			INSERT INTO audit_events (id, organization_id, ts, actor_id, actor_email,
@@ -94,7 +117,7 @@ func (r *AuditRepo) Record(ctx context.Context, e audit.Event) error {
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULLIF($11,'')::inet,$12,$13,$14,$15,$16,$17)`,
 			e.ID, e.OrganizationID, e.Timestamp, e.ActorID, e.ActorEmail,
 			e.Action, string(e.Category), e.TargetType, e.TargetID, e.SessionID,
-			e.IP, e.UserAgent, string(e.Result), detail, prev, hash, chainHashVersion)
+			e.IP, e.UserAgent, string(e.Result), detail, prev, hash, r.chainVersion())
 		if err != nil {
 			return fmt.Errorf("audit: insert: %w", err)
 		}
@@ -102,10 +125,16 @@ func (r *AuditRepo) Record(ctx context.Context, e audit.Event) error {
 	})
 }
 
-// chainHash computes the tamper-evident hash over the previous hash and a
-// canonical encoding of the event's immutable fields.
-func chainHash(prev []byte, e audit.Event, detail []byte) []byte {
-	h := sha256.New()
+// chainHash computes the chain value. With a key it is HMAC-SHA256 (version 3);
+// without one it is the plain SHA-256 the chain has always used (version 2), so
+// a repo built without a key still writes rows the verifier can check.
+func chainHash(key, prev []byte, e audit.Event, detail []byte) []byte {
+	var h hash.Hash
+	if len(key) > 0 {
+		h = hmac.New(sha256.New, key)
+	} else {
+		h = sha256.New()
+	}
 	h.Write(prev)
 	canonical := struct {
 		Org        string `json:"org"`
@@ -143,7 +172,24 @@ func chainHash(prev []byte, e audit.Event, detail []byte) []byte {
 // chainHashVersion marks rows whose hash was taken over values that survive the
 // database round trip, and can therefore be recomputed. Rows written before this
 // existed carry version 1 and are reported as unverifiable — not as altered.
-const chainHashVersion = 2
+const (
+	// chainHashRecomputable is the lowest version whose hash can be recomputed
+	// from what the database stored. Anything below it is reported as
+	// unverifiable rather than altered.
+	chainHashRecomputable = 2
+	// chainHashKeyed is the first version whose hash is an HMAC. Rows at this
+	// version or above cannot be forged without the chain key.
+	chainHashKeyed = 3
+)
+
+// chainVersion is the version this repo stamps on new rows: keyed when a key is
+// configured, and the old unkeyed value when it is not.
+func (r *AuditRepo) chainVersion() int {
+	if len(r.chainKey) > 0 {
+		return chainHashKeyed
+	}
+	return chainHashRecomputable
+}
 
 // canonicalJSON re-encodes a JSON document so the same value always yields the
 // same bytes on both sides of the database.
@@ -288,7 +334,7 @@ func (r *AuditRepo) VerifyChain(ctx context.Context, orgID *uuid.UUID, limit int
 			e.Result = audit.Result(result)
 			seen++
 
-			if version < chainHashVersion {
+			if version < chainHashRecomputable {
 				// Unverifiable, not wrong. Its hash still anchors the events that
 				// follow it, so the link is carried forward.
 				rep.Unverifiable++
@@ -300,7 +346,13 @@ func (r *AuditRepo) VerifyChain(ctx context.Context, orgID *uuid.UUID, limit int
 				rep.Fail(e, "this event does not follow the one before it: an event has been inserted, removed or reordered")
 				return nil
 			}
-			if want := chainHash(storedPrev, e, canonicalJSON(detail)); !bytes.Equal(want, storedHash) {
+			// Recomputed under the rule the ROW records, not the current one, so
+			// turning the key on does not make every existing event look forged.
+			var key []byte
+			if version >= chainHashKeyed {
+				key = r.chainKey
+			}
+			if want := chainHash(key, storedPrev, e, canonicalJSON(detail)); !bytes.Equal(want, storedHash) {
 				rep.Fail(e, "this event's contents no longer match its hash: a stored field has been altered")
 				return nil
 			}

@@ -333,7 +333,7 @@ function MfaTab() {
                 two-factor off. They are how you get back in if you lose the app — keep them somewhere other than the
                 phone the app is on.
               </p>
-              <div className="grid grid-cols-2 gap-2 font-mono text-sm text-fg">
+              <div className="grid grid-cols-1 gap-2 font-mono text-sm text-fg sm:grid-cols-2">
                 {recoveryCodes.map((c) => (
                   <div key={c} className="rounded bg-surface px-2 py-1">{c}</div>
                 ))}

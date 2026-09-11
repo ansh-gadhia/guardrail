@@ -166,7 +166,75 @@ func redact(b []byte, secret string) []byte {
 	if secret == "" || len(b) == 0 {
 		return b
 	}
-	return bytes.ReplaceAll(b, []byte(secret), []byte("[redacted]"))
+	b = bytes.ReplaceAll(b, []byte(secret), []byte("[redacted]"))
+	return redactInterleaved(b, secret)
+}
+
+// interleaved are bytes some gear emits BETWEEN the characters of an echo.
+//
+// A plain ReplaceAll misses "p\r\x00a\r\x00s\r\x00s" entirely. It is not the
+// common case — the telnet state machine has already removed IAC negotiation by
+// the time output reaches here, and redact runs on the whole accumulated banner
+// rather than per-read, so neither protocol bytes nor a chunk boundary can split
+// a secret. What is left is per-character echo, which some console servers and
+// terminal servers do, and which would otherwise put the vaulted password in the
+// transcript verbatim.
+var interleaved = [...]bool{'\r': true, '\n': true, 0x00: true, 0x08: true, 0x7f: true}
+
+func isInterleave(c byte) bool { return int(c) < len(interleaved) && interleaved[c] }
+
+// redactInterleaved removes the secret from b even when filler bytes sit between
+// its characters, preserving everything else exactly.
+//
+// It walks b once, and at each position tries to match the secret allowing any
+// number of filler bytes between characters. A match is replaced whole — filler
+// included — because the filler inside an echoed password is not output anybody
+// needs and leaving it would spell the secret's length out.
+func redactInterleaved(b []byte, secret string) []byte {
+	sec := []byte(secret)
+	if len(sec) == 0 {
+		return b
+	}
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); {
+		if end, ok := matchAt(b, i, sec); ok {
+			out = append(out, []byte("[redacted]")...)
+			i = end
+			continue
+		}
+		out = append(out, b[i])
+		i++
+	}
+	return out
+}
+
+// matchAt reports whether the secret starts at b[i] once filler bytes are
+// ignored, and where the match ends.
+//
+// It requires the FIRST byte to match exactly: without that, a run of filler
+// would let a match start anywhere and the scan would be quadratic for no gain.
+func matchAt(b []byte, i int, sec []byte) (int, bool) {
+	if b[i] != sec[0] {
+		return 0, false
+	}
+	si, bi := 0, i
+	for si < len(sec) && bi < len(b) {
+		switch {
+		case b[bi] == sec[si]:
+			si++
+			bi++
+		case isInterleave(b[bi]) && si > 0:
+			// Filler between characters. Only once the match is under way, so a
+			// leading newline is never swallowed.
+			bi++
+		default:
+			return 0, false
+		}
+	}
+	if si == len(sec) {
+		return bi, true
+	}
+	return 0, false
 }
 
 // trimBanner keeps the tail of the login output for replay to a viewer, so a
