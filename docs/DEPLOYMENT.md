@@ -217,7 +217,44 @@ network where that matters, use an internal CA your machines already trust.
 
 Also set `GUARDRAIL_ENV=production` so cookies are marked `Secure`.
 
-### 5.2 Everything else
+### 5.2 Local DNS records
+
+The bundled resolver (`--profile dns`) answers `*.<tunnel domain>` -> this host,
+which is what makes whole-host session delivery work. Anything else you want it
+to answer goes in two directories beside the compose file:
+
+```
+deploy/dns/
+  hosts/     A/AAAA records, /etc/hosts syntax. Reloaded live.
+  conf.d/    wildcards, CNAME, SRV, TXT — dnsmasq syntax, *.conf. Needs a restart.
+```
+
+```bash
+# an A record — takes effect in about a second, no restart
+cat >> /opt/guardrail/deploy/dns/hosts/estate <<'EOF'
+10.200.10.98   fw1.corp.lan fw1
+10.200.10.99   switch1.corp.lan
+EOF
+dig +short @<host ip> fw1.corp.lan
+
+# anything richer — read only at startup
+cat > /opt/guardrail/deploy/dns/conf.d/lab.conf <<'EOF'
+address=/lab.corp.lan/10.200.10.97
+cname=old-fw.corp.lan,fw1.corp.lan
+EOF
+cd /opt/guardrail && docker compose --profile dns restart dns
+```
+
+dnsmasq watches `hosts/` with inotify, which is why one reloads and the other
+does not: it re-reads hosts files on the fly but never its own configuration.
+
+Both directories survive updates — `install.sh` merges the release over them and
+deletes nothing — and both are gitignored, so records naming your estate stay on
+the deployment. Records under the tunnel domain itself are shadowed by the
+wildcard, so use a different domain for your own. Full notes, including the
+gotchas, are in `deploy/dns/README.md`.
+
+### 5.3 Everything else
 
 2. **CORS.** Leave `GUARDRAIL_CORS_ALLOW_ORIGINS` empty under compose — the
    console and API share an origin. Only set it (to exact origins) if you host

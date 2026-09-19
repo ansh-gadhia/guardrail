@@ -608,10 +608,42 @@ services:
         echo "  retrying in 20s in case that listener is on its way out...";
         sleep 20; fi;
         echo "guardrail-dns: *.$$DOMAIN -> $$IP (listening on $$IP:53, upstreams ${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8} ${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1})";
+        echo "guardrail-dns: your own records go in deploy/dns/ — see deploy/dns/README.md";
         exec dnsmasq --no-daemon --log-facility=-
         --bind-interfaces --listen-address=$$IP
         --no-resolv --server=${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8} --server=${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}
         --address=/$$DOMAIN/$$IP
+        --hostsdir=/etc/guardrail/dns/hosts
+        --conf-dir=/etc/guardrail/dns/conf.d,*.conf
+    # Where an operator's OWN records live.
+    #
+    # The resolver used to answer exactly one thing — the tunnel wildcard, on the
+    # command line — so adding a record to the estate meant editing this file,
+    # and an update overwrote it. These two directories are on the host, survive
+    # updates (install.sh merges the release over them and deletes nothing), and
+    # split along the one distinction that matters in practice:
+    #
+    #   hosts/   A/AAAA records in /etc/hosts syntax. dnsmasq watches the
+    #            directory with inotify, so an edit or a new file takes effect
+    #            in about a second — no restart.
+    #   conf.d/  full dnsmasq syntax for wildcards, CNAMEs, SRV and TXT. Read
+    #            ONLY AT STARTUP: dnsmasq re-reads hosts files on the fly but
+    #            never its own configuration, so these need a restart.
+    #
+    # MOUNTED ONE SUBDIRECTORY AT A TIME, not the parent. Docker creates a
+    # missing bind-mount SOURCE, but only the path it was actually given — so
+    # mounting ./deploy/dns alone left the host with an empty deploy/dns and no
+    # hosts/ or conf.d/ inside it, and dnsmasq refused to start:
+    #
+    #   dnsmasq: cannot access directory /etc/guardrail/dns/conf.d: No such file
+    #            or directory
+    #
+    # — in a restart loop, taking the resolver down with it. That is exactly the
+    # state an update driven by an older install.sh produces, because that script
+    # never fetched deploy/dns. Naming both paths makes Docker create both.
+    volumes:
+      - ./deploy/dns/hosts:/etc/guardrail/dns/hosts:ro
+      - ./deploy/dns/conf.d:/etc/guardrail/dns/conf.d:ro
     restart: unless-stopped
 
 # ---------------------------------------------------------------------------

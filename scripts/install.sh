@@ -638,6 +638,10 @@ fetch_release() {
         mkdir -p "$INSTALL_DIR/deploy" "$INSTALL_DIR/backend"
         cp -r "$src_root/deploy/traefik" "$INSTALL_DIR/deploy/"
         cp -r "$src_root/deploy/postgres" "$INSTALL_DIR/deploy/"
+        # MERGES onto whatever is already there, which is the point: an operator's
+        # own record files under deploy/dns live here and must survive an update.
+        # Only README.md and the .gitkeep placeholders are refreshed.
+        cp -r "$src_root/deploy/dns" "$INSTALL_DIR/deploy/"
         cp -r "$src_root/backend/migrations" "$INSTALL_DIR/backend/"
         mkdir -p "$INSTALL_DIR/backend/db"
         cp "$src_root/backend/db/seed.sql" "$INSTALL_DIR/backend/db/seed.sql"
@@ -667,6 +671,8 @@ fetch_release() {
         mkdir -p "$INSTALL_DIR/deploy" "$INSTALL_DIR/backend/db"
         cp -r "$tmp/deploy/traefik" "$INSTALL_DIR/deploy/"
         cp -r "$tmp/deploy/postgres" "$INSTALL_DIR/deploy/"
+        # Merges; see the note in the checkout branch above.
+        cp -r "$tmp/deploy/dns" "$INSTALL_DIR/deploy/"
         cp -r "$tmp/backend/migrations" "$INSTALL_DIR/backend/"
         cp "$tmp/backend/db/seed.sql" "$INSTALL_DIR/backend/db/seed.sql"
         install_helper "$tmp/scripts/migrate-data.sh"
@@ -1723,11 +1729,11 @@ enforce_modes() {
     fi
 
     # Traefik's routing rules, Postgres's bootstrap SQL and client-authentication
-    # file, the migrations and the seed: all read from inside a container, none of
-    # them secret. a+rX adds the search bit to directories without making files
-    # executable.
+    # file, the operator's DNS records, the migrations and the seed: all read from
+    # inside a container, none of them secret. a+rX adds the search bit to
+    # directories without making files executable.
     local d
-    for d in deploy/traefik deploy/postgres backend; do
+    for d in deploy/traefik deploy/postgres deploy/dns backend; do
         [ -d "$INSTALL_DIR/$d" ] && chmod -R a+rX "$INSTALL_DIR/$d" 2>/dev/null
     done
 

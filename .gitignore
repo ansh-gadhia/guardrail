@@ -71,3 +71,13 @@ logs/
 .Trashes
 Thumbs.db
 Desktop.ini
+
+# An operator's own DNS records. They name internal infrastructure — device
+# hostnames and addresses across the estate — which is a map of what GuardRail
+# brokers, and belongs on the deployment rather than in the repository.
+# install.sh merges the release over these directories and deletes nothing, so
+# what a server has stays there across updates.
+deploy/dns/hosts/*
+!deploy/dns/hosts/.gitkeep
+deploy/dns/conf.d/*
+!deploy/dns/conf.d/.gitkeep

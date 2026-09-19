@@ -14,6 +14,24 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [1.5.0] - 2026-09-11
 
+### Added
+
+- **The bundled resolver has somewhere to keep your own DNS records.** It
+  answered exactly one thing — the `*.<tunnel domain>` wildcard, on the command
+  line — so adding a record for the estate meant editing `docker-compose.yml`,
+  and the next update overwrote it. Records now live in two directories beside
+  the compose file, and survive updates:
+
+      deploy/dns/hosts/     A/AAAA records, /etc/hosts syntax. Reloaded live.
+      deploy/dns/conf.d/    wildcards, CNAME, SRV, TXT. Needs a restart.
+
+  dnsmasq watches `hosts/` with inotify, so a new or edited file takes effect in
+  about a second; `conf.d/` is read only at startup, because dnsmasq re-reads
+  hosts files on the fly but never its own configuration. Both are gitignored —
+  a record set names device hostnames and addresses across the estate, which is
+  a map of what GuardRail brokers and belongs on the deployment, not in the
+  repository. See `deploy/dns/README.md`.
+
 ### Security
 
 This release is the remediation pass for a full defensive audit of the codebase.
