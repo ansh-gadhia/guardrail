@@ -102,7 +102,7 @@ func TestLiveDesktopConnectsAndStreamsFrames(t *testing.T) {
 		Protocol: "vnc",
 		Width:    1024, Height: 768, DPI: 96,
 		Params: map[string]string{"hostname": host, "port": port, "password": password},
-	}, 25*time.Second, nil)
+	}, 25*time.Second, liveTLS(t, addr))
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestLiveDesktopRefusesAWrongCredential(t *testing.T) {
 		// password of 8+ characters produces the SAME secret, and this test passed
 		// against a deliberately wrong password until that showed up here.
 		Params: map[string]string{"hostname": host, "port": port, "password": "wrong-" + password},
-	}, 25*time.Second, nil)
+	}, 25*time.Second, liveTLS(t, addr))
 	if err != nil {
 		return // refused during the handshake is a refusal too
 	}
@@ -171,7 +171,7 @@ func TestLiveDesktopStreamNeverCarriesTheCredential(t *testing.T) {
 		Protocol: "vnc",
 		Width:    1024, Height: 768, DPI: 96,
 		Params: map[string]string{"hostname": host, "port": port, "password": password},
-	}, 25*time.Second, nil)
+	}, 25*time.Second, liveTLS(t, addr))
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestLiveDesktopWritesARecordingGuacdCanBeReadBack(t *testing.T) {
 			// evidence store into a credential store.
 			"recording-include-keys": "false",
 		},
-	}, 25*time.Second, nil)
+	}, 25*time.Second, liveTLS(t, addr))
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestLiveRDPConnectsAndStreamsFrames(t *testing.T) {
 			"security": "any", "ignore-cert": "true",
 			"resize-method": "display-update",
 		},
-	}, 30*time.Second, nil)
+	}, 30*time.Second, liveTLS(t, addr))
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestLiveRDPRefusesAWrongCredential(t *testing.T) {
 			"username": user, "password": password + "-wrong",
 			"security": "any", "ignore-cert": "true",
 		},
-	}, 30*time.Second, nil)
+	}, 30*time.Second, liveTLS(t, addr))
 	if err != nil {
 		return // refused during the handshake is a refusal too
 	}

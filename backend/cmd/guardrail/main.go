@@ -415,6 +415,22 @@ func run() error {
 	ssoVerifier, ssoReplay, ssoRoles := buildSIEMSSO(cfg.Federation, rdb, log)
 
 	iamCfg := appiam.DefaultConfig()
+	// The audit chain is keyed, so rewriting history needs more than write access
+	// to the table. Derived from the master key under its own HKDF label, like the
+	// vault KEK and the binding signer — nothing extra to configure.
+	//
+	// DERIVED HERE, above the first consumer, and every module is handed the SAME
+	// keyed repo. It used to be built further down, next to the assets and vault
+	// wiring, which left the IAM service holding a plain NewAuditRepo(pg) — so
+	// sign-ins, MFA enrolment and revocation, role grants and session events, the
+	// events an attacker most wants to rewrite, were the ones still chained with
+	// an unkeyed hash anybody with table access could recompute.
+	auditChainKey, acerr := security.NewAuditChainKey(cfg.Security.MasterKey)
+	if acerr != nil {
+		return acerr
+	}
+	auditRec := postgres.NewAuditRepo(pg).WithChainKey(auditChainKey)
+
 	iamCfg.RefreshTTL = cfg.Auth.RefreshTokenTTL
 	iamSvc := appiam.NewService(appiam.Deps{
 		Users:    postgres.NewUserRepo(pg),
@@ -425,7 +441,7 @@ func run() error {
 		Hasher:   hasher,
 		Tokens:   issuer,
 		Refresh:  security.NewRefreshGenerator(),
-		Audit:    postgres.NewAuditRepo(pg),
+		Audit:    auditRec,
 		Throttle: infracache.NewThrottle(rdb.Client, iamCfg.MaxLoginFailures*2, iamCfg.LockoutDuration),
 		Config:   iamCfg,
 		// --- MFA (M3) ---
@@ -475,14 +491,6 @@ func run() error {
 	}, security.NewCookieSigner(cfg.Auth.JWTSigningKey))
 
 	// --- Assets + Vault modules (M4) ---
-	// The audit chain is keyed, so rewriting history needs more than write
-	// access to the table. Derived from the master key under its own HKDF label,
-	// like the vault KEK and the binding signer — nothing extra to configure.
-	auditChainKey, acerr := security.NewAuditChainKey(cfg.Security.MasterKey)
-	if acerr != nil {
-		return acerr
-	}
-	auditRec := postgres.NewAuditRepo(pg).WithChainKey(auditChainKey)
 	assetsSvc := appassets.NewService(postgres.NewDeviceRepo(pg), postgres.NewAssetGroupRepo(pg), auditRec)
 	// The binding signer proves that "this secret is for this device, for this
 	// person" was written by GuardRail. Derived from the same master key as the

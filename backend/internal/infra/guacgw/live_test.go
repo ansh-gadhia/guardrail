@@ -2,6 +2,7 @@ package guacgw
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"os"
 	"testing"
@@ -18,6 +19,13 @@ import (
 //
 //	docker run -d --name guacd -p 127.0.0.1:4822:4822 guacamole/guacd:1.5.5
 //	GUACD_ADDR=127.0.0.1:4822 go test ./internal/infra/guacgw/ -run Live
+//
+// Against a guacd that REQUIRES TLS — which is what install.sh now configures —
+// add the certificate it presents, or every one of these hangs up mid-handshake
+// for a reason that looks nothing like "you did not offer TLS":
+//
+//	GUACD_ADDR=127.0.0.1:4822 GUACD_TLS_CA=deploy/guacd/tls/guacd.crt \
+//	  go test ./internal/infra/guacgw/ -run Live
 
 func liveGuacd(t *testing.T) string {
 	t.Helper()
@@ -31,6 +39,26 @@ func liveGuacd(t *testing.T) string {
 	}
 	_ = c.Close()
 	return addr
+}
+
+// liveTLS builds the client config for a guacd that requires TLS, from the
+// certificate named by GUACD_TLS_CA. Returns nil when it is unset, which is a
+// plaintext daemon and the way these tests have always run.
+//
+// It goes through guacdTLS, the same function the gateway uses, so the tests
+// verify the certificate exactly as production does rather than trusting
+// whatever is presented.
+func liveTLS(t *testing.T, addr string) *tls.Config {
+	t.Helper()
+	ca := os.Getenv("GUACD_TLS_CA")
+	if ca == "" {
+		return nil
+	}
+	cfg, err := guacdTLS(ca, addr)
+	if err != nil {
+		t.Fatalf("GUACD_TLS_CA=%s: %v", ca, err)
+	}
+	return cfg
 }
 
 // The real daemon must accept our handshake and open a connection.
@@ -59,7 +87,7 @@ func TestLiveHandshakeIsAcceptedByRealGuacd(t *testing.T) {
 					"password": "unused",
 					"security": "any", "ignore-cert": "true",
 				},
-			}, 25*time.Second, nil)
+			}, 25*time.Second, liveTLS(t, addr))
 			if err != nil {
 				t.Fatalf("real guacd rejected the handshake: %v", err)
 			}
@@ -86,7 +114,7 @@ func TestLiveDeviceFailureArrivesInTheStreamNotTheHandshake(t *testing.T) {
 	conn, err := dialGuacd(context.Background(), addr, connConfig{
 		Protocol: "vnc", Width: 1024, Height: 768, DPI: 96,
 		Params: map[string]string{"hostname": "203.0.113.1", "port": "5900", "password": "unused"},
-	}, 25*time.Second, nil)
+	}, 25*time.Second, liveTLS(t, addr))
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
@@ -117,7 +145,7 @@ func TestLiveUnknownProtocolHitsTheTimeout(t *testing.T) {
 	start := time.Now()
 	_, err := dialGuacd(context.Background(), addr, connConfig{
 		Protocol: "telnet-ish", Params: map[string]string{"hostname": "203.0.113.1"},
-	}, 2*time.Second, nil)
+	}, 2*time.Second, liveTLS(t, addr))
 	if err == nil {
 		t.Fatal("guacd accepted a protocol it does not implement")
 	}

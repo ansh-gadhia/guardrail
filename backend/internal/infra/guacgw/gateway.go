@@ -157,7 +157,7 @@ func NewGateway(proto access.Protocol, cfg Config, deps Deps) *Gateway {
 // every public CA in addition would mean any of them could vouch for something
 // claiming to be guacd, which is most of what pinning was for.
 func guacdTLS(caPath, addr string) (*tls.Config, error) {
-	// #nosec G304 -- caPath is deployment configuration (GUARDRAIL_GUACD_TLS_CA),
+	// #nosec G304,G703 -- caPath is deployment configuration (GUARDRAIL_GUACD_TLS_CA),
 	// set by install.sh alongside the certificate it names. It is not reachable
 	// from a request, a credential, or any tenant-supplied value, and an operator
 	// who can set it can already read the file by other means.
