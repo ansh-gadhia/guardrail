@@ -320,6 +320,12 @@ resolver as secondary.
   own resolvers (required if this network has no internet access).
 - `restart: unless-stopped` means it comes back after a reboot, and a plain
   `docker compose up -d` will not stop it.
+- **It can answer your own names too.** Records go in `deploy/dns/hosts/`
+  (`/etc/hosts` syntax, reloaded live by inotify) and `deploy/dns/conf.d/`
+  (dnsmasq syntax for wildcards, CNAME, SRV and TXT — read only at startup, so
+  restart the container after editing). Both survive updates and are gitignored.
+  See [deploy/dns/README.md](deploy/dns/README.md). Names under the tunnel domain
+  are shadowed by its wildcard, so use a different domain for your own.
 
 > `/etc/hosts` **cannot** do this: it has no wildcards, and a session id is new
 > every time. You need a real resolver.
