@@ -229,6 +229,11 @@ func (g *Gateway) emit(ctx context.Context, ws *websocket.Conn, s *telnetSession
 	if s.mirror != nil {
 		s.mirror.Write(b)
 	}
+	// And so do any supervisors watching live, under the same non-blocking
+	// contract: one falling behind is dropped, never waited for.
+	if s.obs != nil {
+		s.obs.Broadcast(b)
+	}
 	// Bound the write so a browser that has stopped reading cannot wedge the
 	// reader goroutine and, with it, the device session.
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)

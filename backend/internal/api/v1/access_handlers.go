@@ -25,6 +25,20 @@ type SessionServer interface {
 	Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token string) bool
 }
 
+// SessionObserver serves a read-only live view of a session to somebody who is
+// not the operator.
+//
+// Separate from SessionServer because the two authenticate differently and must
+// not be confused: Stream is reached with the operator's per-session proxy
+// cookie and drives the device, while Observe is reached with ordinary API
+// credentials plus a permission, and drives nothing. A gateway that has no live
+// stream to share — the HTTP reverse proxy — simply does not implement it.
+type SessionObserver interface {
+	// Observe streams the session to a supervisor. false => not this gateway's
+	// session, without touching the ResponseWriter.
+	Observe(w http.ResponseWriter, r *http.Request, sid, orgID uuid.UUID) bool
+}
+
 // SessionMux dispatches a request to whichever gateway is holding the session.
 //
 // Both delivery modes can be live at once — recorded devices are isolated while
@@ -53,6 +67,23 @@ func (m SessionMux) Console(w http.ResponseWriter, r *http.Request, sid uuid.UUI
 func (m SessionMux) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token string) bool {
 	for _, s := range m {
 		if s.Stream(w, r, sid, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// Observe streams the session from the owning gateway, if it can be watched.
+//
+// Tried in turn, like Console and Stream: a gateway keys live sessions by id and
+// declines the ones that are not its own without writing a response.
+func (m SessionMux) Observe(w http.ResponseWriter, r *http.Request, sid, orgID uuid.UUID) bool {
+	for _, s := range m {
+		o, ok := s.(SessionObserver)
+		if !ok {
+			continue
+		}
+		if o.Observe(w, r, sid, orgID) {
 			return true
 		}
 	}
@@ -158,6 +189,11 @@ func (h *AccessHandler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 		// Mints a fresh one-time grant so the console can (re)open the session's
 		// own tab. Reading it is a session read; it exposes no device credential.
 		s.GET("/:id/tunnel", middleware.RequirePermission("session:read"), h.tunnelURL)
+		// Watch a colleague's live session, read-only. Its own permission, not
+		// session:read: seeing that a session exists and watching the keystrokes in
+		// it are different powers, and most people who need the first should not
+		// have the second.
+		s.GET("/:id/observe", middleware.RequirePermission("session:observe"), h.observe)
 	}
 }
 
@@ -517,6 +553,36 @@ func (h *AccessHandler) terminate(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// observe streams a live session to a supervisor, read-only.
+//
+// The authorisation and the audit happen in the service before the gateway is
+// touched, so a session that cannot be watched is refused with a status the
+// console can act on rather than a socket that opens and immediately closes.
+func (h *AccessHandler) observe(c *gin.Context) {
+	actor, _ := middleware.ClaimsFrom(c)
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		badRequest(c, "invalid session id")
+		return
+	}
+	sess, err := h.svc.BeginObserve(c.Request.Context(), actor, id, accessMeta(c))
+	if err != nil {
+		failAccess(c, err)
+		return
+	}
+	// h.gateway is a SessionServer; watching is an extra capability a gateway may
+	// or may not have. Asserting keeps the two interfaces separate rather than
+	// forcing every server to carry a method most of them cannot implement.
+	obs, ok := h.gateway.(SessionObserver)
+	if !ok || !obs.Observe(c.Writer, c.Request, id, sess.OrganizationID) {
+		// The session record says active but no gateway holds it. That is a
+		// reverse-proxy session (nothing live to stream — the timeline is how it is
+		// reviewed), or one whose gateway has already let go.
+		problem(c, http.StatusConflict, "Not Watchable",
+			"this session has no live stream to watch; open its recording or timeline instead")
+	}
 }
 
 func sessionDTO(s *domaccess.Session) gin.H {

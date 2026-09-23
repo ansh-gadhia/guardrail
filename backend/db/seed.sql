@@ -14,6 +14,9 @@ INSERT INTO permissions (key, description) VALUES
     ('credential:write',     'Create/rotate/delete credentials'),
     ('session:read',         'View access sessions'),
     ('session:terminate',    'Force-terminate active sessions'),
+    -- Deliberately separate from session:read: seeing that a session exists and
+    -- watching what is typed in it are different powers over different subjects.
+    ('session:observe',      'Watch another user''s live session, read-only'),
     ('recording:read',       'View/playback recordings'),
     ('recording:download',   'Download recordings'),
     ('recording:delete',     'Delete recordings'),
@@ -65,7 +68,7 @@ ON CONFLICT DO NOTHING;
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT '10000000-0000-0000-0000-000000000004', p.id FROM permissions p
 WHERE p.key IN ('device:read', 'device:connect', 'session:read',
-                'session:terminate', 'recording:read', 'group:read')
+                'session:terminate', 'session:observe', 'recording:read', 'group:read')
 ON CONFLICT DO NOTHING;
 
 -- Read-only: view assets and sessions.

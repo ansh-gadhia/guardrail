@@ -520,6 +520,43 @@ func (s *Service) Get(ctx context.Context, actor iam.Claims, id uuid.UUID) (*acc
 	return s.sessions.GetByID(ctx, scopeOf(actor), id)
 }
 
+// BeginObserve authorises a supervisor to watch a live session and records that
+// they did, returning the session so the caller can route to its gateway.
+//
+// Watching a colleague work is exactly the kind of act a privileged-access system
+// exists to make accountable, so it is audited BEFORE the stream opens, not after
+// it closes. An observer whose socket dies in its first second has still watched,
+// and an audit written on the way out is one crash away from never being written
+// at all.
+//
+// The session is fetched through the actor's own scope, so a session in another
+// organisation is not found rather than refused — the caller learns nothing about
+// what exists elsewhere.
+func (s *Service) BeginObserve(ctx context.Context, actor iam.Claims, sessionID uuid.UUID, meta ReqMeta) (*access.Session, error) {
+	sess, err := s.sessions.GetByID(ctx, scopeOf(actor), sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if sess.Status != access.StatusActive {
+		// Nothing to watch. The recording is the way to see a finished session, and
+		// saying so is more useful than an empty stream that never moves.
+		s.recordAuditDetail(ctx, actor, "session.observe", sess, meta, audit.ResultDenied,
+			map[string]any{"reason": "session is not active", "status": string(sess.Status)})
+		return nil, access.ErrNotActive
+	}
+	detail := map[string]any{
+		"observed_user_id": sess.UserID.String(),
+		"device_name":      sess.DeviceName,
+		"protocol":         string(sess.Protocol),
+		// Stated in the record itself: this grants no keyboard. The audit is read
+		// later by people deciding whether a supervisor overstepped, and "watched"
+		// and "took over" are not the same accusation.
+		"mode": "read-only",
+	}
+	s.recordAuditDetail(ctx, actor, "session.observe", sess, meta, audit.ResultSuccess, detail)
+	return sess, nil
+}
+
 // List returns sessions matching the filter.
 func (s *Service) List(ctx context.Context, actor iam.Claims, f access.SessionFilter) ([]access.Session, error) {
 	return s.sessions.List(ctx, scopeOf(actor), f)

@@ -166,6 +166,15 @@ type sshSession struct {
 	// browser was available to open one.
 	mirror access.TerminalMirror
 
+	// obs is the set of read-only supervisors watching this session, and the
+	// recent output a newly-arrived one is shown first.
+	//
+	// Separate from `attached` on purpose. That flag keeps ONE keyboard on the
+	// PTY, which is right — two people typing into one shell interleave into a
+	// transcript that attributes everything to whoever opened it. Watching is not
+	// typing, so it is not governed by that flag and does not contend for it.
+	obs *term.Observers
+
 	// attached guards the socket: one terminal per session. A second viewer would
 	// share the PTY and interleave keystrokes, and the transcript would attribute
 	// both to one operator.
@@ -203,6 +212,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 
 	sess := &sshSession{
 		id: s.ID, orgID: s.OrganizationID,
+		obs:         term.NewObservers(),
 		token:       randomToken(),
 		expires:     time.Now().Add(g.cfg.SessionTTL),
 		watermark:   s.WatermarkOr(),
@@ -347,6 +357,11 @@ func (g *Gateway) teardown(s *sshSession) error {
 		return nil
 	}
 	s.closed = true
+	// Drop the supervisors with it. A watcher left on a dead session sees a frozen
+	// screen and no indication that it is over.
+	if s.obs != nil {
+		s.obs.CloseAll()
+	}
 	s.mu.Unlock()
 
 	if s.client != nil {

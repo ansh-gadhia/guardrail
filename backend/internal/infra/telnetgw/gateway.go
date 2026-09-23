@@ -159,7 +159,13 @@ type telnetSession struct {
 	conn *conn
 	// banner is the login output, replayed to whoever attaches so the operator
 	// sees how they got in rather than an empty black rectangle.
-	banner   []byte
+	banner []byte
+
+	// obs is the set of read-only supervisors watching this session. Separate from
+	// `attached`, which keeps one keyboard on the device: watching is not typing,
+	// so it neither contends for that flag nor is limited to one viewer.
+	obs *term.Observers
+
 	attached bool
 	closed   bool
 }
@@ -193,6 +199,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 
 	sess := &telnetSession{
 		id: s.ID, orgID: s.OrganizationID,
+		obs:            term.NewObservers(),
 		token:          randomToken(),
 		expires:        time.Now().Add(g.cfg.SessionTTL),
 		watermark:      s.WatermarkOr(),
@@ -362,6 +369,10 @@ func (g *Gateway) teardown(s *telnetSession) error {
 		return nil
 	}
 	s.closed = true
+	// Drop the supervisors with it, rather than leaving them on a frozen screen.
+	if s.obs != nil {
+		s.obs.CloseAll()
+	}
 	c := s.conn
 	s.conn = nil
 	s.mu.Unlock()

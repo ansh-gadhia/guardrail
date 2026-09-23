@@ -205,6 +205,12 @@ func (g *Gateway) emit(ctx context.Context, c *websocket.Conn, s *sshSession, b 
 	if s.mirror != nil {
 		s.mirror.Write(b)
 	}
+	// And so do any supervisors watching live. Same contract as the mirror: it
+	// never blocks, and a viewer that falls behind is dropped rather than allowed
+	// to hold up the device copy loop.
+	if s.obs != nil {
+		s.obs.Broadcast(b)
+	}
 	// Bound the write so a browser that has stopped reading cannot wedge the
 	// reader goroutine and, with it, the device session.
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
