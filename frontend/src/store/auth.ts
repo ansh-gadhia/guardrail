@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, setAccessToken } from "@/lib/api";
+import { api, setAccessToken, refreshSession } from "@/lib/api";
 import type { LoginResult, Principal, TokenResponse } from "@/lib/types";
 
 interface AuthState {
@@ -62,11 +62,13 @@ export const useAuth = create<AuthState>((set, get) => ({
 
   // bootstrap tries to restore a session from the refresh cookie on app load.
   bootstrap: async () => {
+    // Through refreshSession, never a direct POST. A direct call here was the
+    // second, unlocked refresh path, and racing it against the 401 handler is how
+    // a page load could present an already-rotated token and sign somebody out.
     try {
-      const { data } = await api.post<TokenResponse>("/auth/refresh", {});
-      get().setSession(data);
-    } catch {
-      get().clear();
+      const data = (await refreshSession()) as TokenResponse | null;
+      if (data) get().setSession(data);
+      else get().clear();
     } finally {
       set({ ready: true });
     }

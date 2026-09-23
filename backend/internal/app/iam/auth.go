@@ -254,10 +254,18 @@ func (s *Service) Refresh(ctx context.Context, rawToken string, meta ReqMeta) (*
 	if err != nil {
 		return nil, err
 	}
-	s.record(ctx, audit.Event{OrganizationID: &user.OrganizationID, Action: "auth.refresh",
-		Category: audit.CategoryAuth, ActorID: &user.ID, ActorEmail: user.Email.String(),
-		TargetType: "user", TargetID: user.ID.String(),
-		IP: meta.IP, UserAgent: meta.UserAgent, Result: audit.ResultSuccess})
+	// A SUCCESSFUL refresh is not audited.
+	//
+	// It is routine token rotation, not a decision anybody made: it happens on
+	// every page load (the access token lives only in memory, by design) and
+	// every fifteen minutes after that, in every tab. It was 15% of this
+	// deployment's entire audit log — one line in seven — and a log where the
+	// signal has to be dug out of the housekeeping is a log people stop reading.
+	//
+	// What IS a decision stays: sign-in, sign-out, and every refresh that FAILS.
+	// Reuse in particular (above) is the one refresh event that means something —
+	// a token presented after it was rotated is a stolen token or a race — and it
+	// still revokes the family and is still recorded.
 	return pair, nil
 }
 
