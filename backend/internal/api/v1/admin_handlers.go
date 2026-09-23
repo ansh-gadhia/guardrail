@@ -415,3 +415,59 @@ func (h *Handler) resetPassword(c *gin.Context) {
 			"next sign-in, and every session they had is now signed out.",
 	})
 }
+
+// ---- A person's teams ----
+
+func (h *Handler) userTeams(c *gin.Context) {
+	actor, _ := middleware.ClaimsFrom(c)
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		badRequest(c, "invalid user id")
+		return
+	}
+	teams, err := h.svc.ListTeamsForUser(c.Request.Context(), actor, iam.ID(id))
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	out := make([]gin.H, 0, len(teams))
+	for _, t := range teams {
+		out = append(out, gin.H{"id": uuid.UUID(t.ID).String(), "name": t.Name})
+	}
+	c.JSON(http.StatusOK, gin.H{"data": out})
+}
+
+type userTeamsRequest struct {
+	// The complete set this person should be on. An empty list takes them off
+	// every team, which is a real thing to want and is not the same as omitting
+	// the field — so the field is required.
+	TeamIDs *[]string `json:"team_ids" binding:"required"`
+}
+
+func (h *Handler) setUserTeams(c *gin.Context) {
+	actor, _ := middleware.ClaimsFrom(c)
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		badRequest(c, "invalid user id")
+		return
+	}
+	var req userTeamsRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.TeamIDs == nil {
+		badRequest(c, "team_ids is required (send [] to remove this person from every team)")
+		return
+	}
+	parsed, err := parseIDs(*req.TeamIDs)
+	if err != nil {
+		badRequest(c, "invalid team id")
+		return
+	}
+	ids := make([]iam.ID, 0, len(parsed))
+	for _, t := range parsed {
+		ids = append(ids, iam.ID(t))
+	}
+	if err := h.svc.SetUserTeams(c.Request.Context(), actor, iam.ID(id), ids, metaFrom(c)); err != nil {
+		fail(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}

@@ -166,7 +166,7 @@ export function AccessPage() {
                         ) : (
                           <>
                             <button className="btn-subtle" onClick={() => setEditRolesFor(u)}>
-                              Edit roles
+                              Roles &amp; teams
                             </button>
                             {/* A federated account has no GuardRail password to
                                 reset — the provider holds the credential. Saying
@@ -963,8 +963,47 @@ function EditRolesModal({
       return n;
     });
 
+  /* This person's teams, pre-ticked from what they are actually on. Editing them
+     here is the point: "what is this person on" is asked while looking at the
+     person, and the alternative was opening every team to find them. */
+  const canReadTeams = useAuth((st) => st.has("team:read"));
+  const canWriteTeams = useAuth((st) => st.has("team:write"));
+  const allTeams = useQuery<Team[]>({
+    queryKey: ["teams"],
+    queryFn: async () => (await api.get<{ data: Team[] }>("/teams")).data.data ?? [],
+    enabled: canReadTeams,
+  });
+  const mine = useQuery<{ id: string; name: string }[]>({
+    queryKey: ["user-teams", user.user_id],
+    queryFn: async () =>
+      (await api.get<{ data: { id: string; name: string }[] }>(`/users/${user.user_id}/teams`)).data.data ?? [],
+    enabled: canReadTeams,
+  });
+  // null until the person's current teams have loaded. Saving before then would
+  // send an empty list and take them off every team they are on.
+  const [teamSel, setTeamSel] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    if (mine.data && teamSel === null) setTeamSel(new Set(mine.data.map((t) => t.id)));
+  }, [mine.data, teamSel]);
+  const toggleTeam = (id: string) =>
+    setTeamSel((s) => {
+      const n = new Set(s ?? []);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+  const teamsChanged =
+    teamSel !== null &&
+    mine.data !== undefined &&
+    (teamSel.size !== mine.data.length || mine.data.some((t) => !teamSel.has(t.id)));
+
   const save = useMutation({
-    mutationFn: async () => api.put(`/users/${user.user_id}/roles`, { role_ids: [...sel] }),
+    mutationFn: async () => {
+      await api.put(`/users/${user.user_id}/roles`, { role_ids: [...sel] });
+      // Only when they actually changed, and only once loaded — see teamSel.
+      if (canWriteTeams && teamsChanged && teamSel) {
+        await api.put(`/users/${user.user_id}/teams`, { team_ids: [...teamSel] });
+      }
+    },
     onSuccess: onSaved,
   });
 
@@ -981,7 +1020,7 @@ function EditRolesModal({
 
   return (
     <Modal
-      title={`Roles — ${user.email}`}
+      title={`Roles & teams — ${user.email}`}
       onClose={onClose}
       footer={
         <>
@@ -989,7 +1028,7 @@ function EditRolesModal({
             Cancel
           </button>
           <button className="btn-primary" disabled={save.isPending} onClick={() => save.mutate()}>
-            {save.isPending ? "Saving…" : "Save roles"}
+            {save.isPending ? "Saving…" : "Save"}
           </button>
         </>
       }
@@ -1000,6 +1039,44 @@ function EditRolesModal({
         </div>
       )}
       <RoleChecklist roles={roles} selected={sel} toggle={toggle} />
+
+      {canReadTeams && (
+        <div className="mt-4 border-t border-line pt-3">
+          <div className="mb-1.5 flex items-baseline justify-between">
+            <span className="text-sm font-medium text-fg">Teams</span>
+            <span className="text-2xs text-faint">optional</span>
+          </div>
+          {(allTeams.data?.length ?? 0) === 0 ? (
+            <p className="text-xs text-muted">No teams exist yet. Create one under Teams, then add people here.</p>
+          ) : teamSel === null ? (
+            <p className="text-xs text-muted">Loading this person's teams…</p>
+          ) : (
+            <div className="max-h-40 space-y-1.5 overflow-y-auto rounded-lg border border-line bg-surface-2/40 p-2">
+              {(allTeams.data ?? []).map((t) => (
+                <label
+                  key={t.id}
+                  className={cn(
+                    "flex items-center gap-2 rounded-md px-1.5 py-1",
+                    canWriteTeams ? "cursor-pointer hover:bg-surface-3/60" : "opacity-70",
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={teamSel.has(t.id)}
+                    disabled={!canWriteTeams}
+                    onChange={() => toggleTeam(t.id)}
+                  />
+                  <span className="font-medium">{t.name}</span>
+                  {t.description && <span className="truncate text-xs text-faint">{t.description}</span>}
+                </label>
+              ))}
+            </div>
+          )}
+          {!canWriteTeams && (
+            <p className="mt-1 text-2xs text-faint">You can see this person's teams but not change them.</p>
+          )}
+        </div>
+      )}
 
       <div className="mt-4 space-y-2 border-t border-line pt-3 text-sm">
         {rankMoved && (

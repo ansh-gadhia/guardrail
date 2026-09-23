@@ -164,6 +164,64 @@ func (s *Service) AddUserToTeams(ctx context.Context, actor iam.Claims, userID i
 	return nil
 }
 
+// SetUserTeams makes one person a member of exactly these teams: added to the
+// ones they are not in, removed from the ones no longer listed, and every other
+// member of every team left exactly where they were.
+//
+// This is the person-shaped view of membership. The team editor asks "who is on
+// this team"; the access-control page asks "what teams is this person on", and
+// answering the second with the first's replace-the-whole-list primitive would
+// either empty teams or require an admin to open every team to move one person.
+func (s *Service) SetUserTeams(ctx context.Context, actor iam.Claims, userID iam.ID, teamIDs []iam.ID, meta ReqMeta) error {
+	if s.teams == nil {
+		return ErrTeamsUnavailable
+	}
+	current, err := s.teams.ListForUser(ctx, actor.Scope(), userID)
+	if err != nil {
+		return err
+	}
+	want := map[iam.ID]bool{}
+	for _, id := range dedupeIDs(teamIDs) {
+		want[id] = true
+	}
+	have := map[iam.ID]bool{}
+	for _, t := range current {
+		have[t.ID] = true
+	}
+
+	var add []iam.ID
+	for id := range want {
+		if !have[id] {
+			add = append(add, id)
+		}
+	}
+	if err := s.AddUserToTeams(ctx, actor, userID, add, meta); err != nil {
+		return err
+	}
+
+	for id := range have {
+		if want[id] {
+			continue
+		}
+		members, err := s.teams.ListMembers(ctx, actor.Scope(), id)
+		if err != nil {
+			return err
+		}
+		keep := make([]iam.ID, 0, len(members))
+		for _, m := range members {
+			if m.UserID != userID {
+				keep = append(keep, m.UserID)
+			}
+		}
+		if err := s.teams.SetMembers(ctx, actor.Scope(), id, keep); err != nil {
+			return err
+		}
+		s.recordTeam(ctx, actor, "team.remove_member", id, meta,
+			map[string]any{"user_id": uuid.UUID(userID).String(), "members": len(keep)})
+	}
+	return nil
+}
+
 // ListTeamsForUser returns the teams one user belongs to.
 func (s *Service) ListTeamsForUser(ctx context.Context, actor iam.Claims, userID iam.ID) ([]iam.Team, error) {
 	if s.teams == nil {

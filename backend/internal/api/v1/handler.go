@@ -85,6 +85,12 @@ func (h *Handler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 		users.GET("/:id", middleware.RequirePermission("user:read"), h.getUser)
 		users.DELETE("/:id", middleware.RequirePermission("user:write"), h.deleteUser)
 		users.PUT("/:id/roles", middleware.RequirePermission("user:write"), h.assignRoles)
+		// A person's teams, from the person's side. The team editor already
+		// answers "who is on this team"; this answers "what is this person on",
+		// which is the question asked while looking at somebody in Access Control
+		// — and without it, moving one person meant opening every team.
+		users.GET("/:id/teams", middleware.RequirePermission("team:read"), h.userTeams)
+		users.PUT("/:id/teams", middleware.RequirePermission("team:write"), h.setUserTeams)
 		// Sets a temporary password for somebody who has locked themselves out.
 		// The service refuses the installation account and anybody who outranks
 		// the caller, so user:write is the floor rather than the whole rule.
