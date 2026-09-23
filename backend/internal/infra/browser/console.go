@@ -47,7 +47,11 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
  /* Pinned and unmissable: a supervisor who believes they are driving will click
     into a device that is deliberately ignoring them. */
- #robar{position:fixed;top:0;left:0;right:0;z-index:40;display:flex;align-items:center;
+ /* :not([hidden]) is load-bearing. An author display:flex rule beats the UA
+    stylesheet's [hidden]{display:none}, so the banner rendered on EVERY
+    session — including the operator's own, telling them their input was not
+    being sent while they were driving the device perfectly well. */
+ #robar:not([hidden]){position:fixed;top:0;left:0;right:0;z-index:40;display:flex;align-items:center;
         gap:8px;padding:5px 10px;background:#1e293b;border-bottom:1px solid #334155;
         color:#cbd5e1;font:12px/1.4 ui-sans-serif,system-ui,sans-serif}
  #robar #rodot{width:7px;height:7px;border-radius:50%;background:#38bdf8;flex:none;

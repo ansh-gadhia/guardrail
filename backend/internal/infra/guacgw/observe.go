@@ -8,6 +8,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/guardrail/guardrail/internal/infra/term"
 )
@@ -72,6 +73,16 @@ func (g *Gateway) Observe(w http.ResponseWriter, r *http.Request, sid, orgID uui
 		Params: map[string]string{},
 	}, g.cfg.HandshakeTimeout, g.tlsCfg)
 	if err != nil {
+		// Said out loud, with the reason. "could not join the desktop" is all the
+		// console can show, and on its own it sends you looking at the join logic
+		// when the cause may be nothing of the sort — a full disk stopping guacd
+		// writing its recording presents exactly this way.
+		if g.deps.Log != nil {
+			g.deps.Log.Warn("guac: a supervisor could not join a live desktop",
+				zap.String("session_id", sid.String()),
+				zap.String("guacd_connection", connID),
+				zap.Error(err))
+		}
 		// The operator's session is untouched by this failing — only the watcher
 		// is turned away, with the code the console reads as "nothing to watch".
 		_ = c.Close(term.CloseDeviceGone, "could not join the desktop")

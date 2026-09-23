@@ -146,7 +146,10 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
     colleague should never be in doubt about which of the two they are doing, and
     a supervisor who believes they are driving will try to type into a terminal
     that is deliberately ignoring them. */
- #ro{position:fixed;top:0;left:0;right:0;z-index:30;display:flex;align-items:center;
+ /* :not([hidden]) is load-bearing — see the note in the canvas viewer. An
+    author display rule beats [hidden], so this banner appeared on the
+    operator's own terminal too. */
+ #ro:not([hidden]){position:fixed;top:0;left:0;right:0;z-index:30;display:flex;align-items:center;
      gap:8px;padding:5px 10px;background:#1e293b;border-bottom:1px solid #334155;
      color:#cbd5e1;font:12px/1.4 ui-sans-serif,system-ui,sans-serif}
  #ro #rodot{width:7px;height:7px;border-radius:50%;background:#38bdf8;flex:none;

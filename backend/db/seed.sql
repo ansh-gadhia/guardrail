@@ -68,7 +68,11 @@ ON CONFLICT DO NOTHING;
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT '10000000-0000-0000-0000-000000000004', p.id FROM permissions p
 WHERE p.key IN ('device:read', 'device:connect', 'session:read',
-                'session:terminate', 'session:observe', 'recording:read', 'group:read')
+                -- session:observe is deliberately absent: an operator ending
+                -- their own session is not the same power as watching a
+                -- colleague type. It is granted by rank instead — see
+                -- migration 0037.
+                'session:terminate', 'recording:read', 'group:read')
 ON CONFLICT DO NOTHING;
 
 -- Read-only: view assets and sessions.

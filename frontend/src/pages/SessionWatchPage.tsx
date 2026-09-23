@@ -28,7 +28,7 @@ export function SessionWatchPage() {
   const navigate = useNavigate();
   const [frameKey, setFrameKey] = useState(0);
   const [full, setFull] = useState(false);
-  const shellRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
 
   // A watch grant is minted per open: it is scoped to this session, expires, and
   // the permission check and audit happen when it is issued. Reopening re-checks
@@ -60,16 +60,28 @@ export function SessionWatchPage() {
   const proto = grant.data?.protocol || status.data?.protocol;
   const isDesktop = proto === "rdp" || proto === "vnc";
 
+  // The browser's own fullscreen, not a fixed-position imitation. Escape and the
+  // F11 chrome leave fullscreen without telling the app, so the state is read
+  // from the document rather than from our click — otherwise the button keeps
+  // saying "Exit full screen" and does nothing.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && full) setFull(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [full]);
+    const onChange = () => setFull(document.fullscreenElement === stageRef.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const toggleFull = () => {
+    const el = stageRef.current;
+    if (!el) return;
+    if (document.fullscreenElement === el) void document.exitFullscreen();
+    else void el.requestFullscreen().catch(() => setFull(false));
+  };
 
   return (
-    <div className="flex h-full flex-col gap-3">
+    /* An explicit viewport height, like the operator's own session view. h-full
+       resolves against the parent, and the app shell above this does not carry a
+       height — so the viewer rendered as a box the size of its content rather
+       than filling the screen. */
+    <div className="flex h-[calc(100vh-8rem)] flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -88,7 +100,7 @@ export function SessionWatchPage() {
           <button className="btn-subtle" onClick={() => setFrameKey((k) => k + 1)} title="Reopen the stream">
             <IconRefresh size={15} /> Reconnect
           </button>
-          <button className="btn-subtle" onClick={() => setFull((f) => !f)} title={full ? "Exit full screen" : "Full screen"}>
+          <button className="btn-subtle" onClick={toggleFull} title={full ? "Exit full screen" : "Full screen"}>
             {full ? <IconMinimize size={15} /> : <IconMaximize size={15} />}
           </button>
           {/* The only way out, and it is navigation. Stopping watching does not
@@ -101,18 +113,14 @@ export function SessionWatchPage() {
       </div>
 
       <div
-        ref={shellRef}
+        ref={stageRef}
         className={
-          full
-            ? "fixed inset-0 z-50 bg-surface-1"
-            : "relative min-h-0 flex-1 overflow-hidden rounded-xl border border-line bg-surface-1"
+          "relative min-h-0 flex-1 overflow-hidden border border-line bg-surface-1 shadow-sm " +
+          // Fullscreen is edge to edge: a rounded card floating on a black screen
+          // is not what anyone means by it.
+          (full ? "rounded-none border-0" : "rounded-xl")
         }
       >
-        {full && (
-          <button className="btn-subtle absolute right-3 top-3 z-10" onClick={() => setFull(false)}>
-            <IconMinimize size={15} /> Exit full screen
-          </button>
-        )}
         {ended ? (
           <div className="grid h-full place-items-center p-6 text-center">
             <div>
