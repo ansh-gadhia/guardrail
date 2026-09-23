@@ -18,11 +18,9 @@ import { toast } from "@/components/Toast";
 export function DeviceAccessPolicy({
   device,
   canEdit,
-  toBody,
 }: {
   device: Device;
   canEdit: boolean;
-  toBody: (d: Device) => Record<string, unknown>;
 }) {
   const qc = useQueryClient();
   const canBind = useAuth((s) => s.has("credential:write"));
@@ -30,7 +28,10 @@ export function DeviceAccessPolicy({
 
   const patch = useMutation({
     mutationFn: async (body: Record<string, unknown>) =>
-      api.patch(`/devices/${device.id}`, { ...toBody(device), ...body }),
+      // Only the policy fields being changed. The endpoint is a real partial
+      // update, so restating the rest of the device would not protect anything —
+      // it is what used to erase the fields the caller forgot to restate.
+      api.patch(`/devices/${device.id}`, body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["device", device.id] });
       void qc.invalidateQueries({ queryKey: ["devices"] });

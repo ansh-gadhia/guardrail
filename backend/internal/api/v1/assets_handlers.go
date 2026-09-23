@@ -84,6 +84,64 @@ func (h *AssetsHandler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 	}
 }
 
+// deviceUpdateRequest is a PARTIAL device edit. Every field is optional, and one
+// that is absent leaves the stored value alone.
+//
+// It does not reuse deviceRequest, which is the create payload and marks name
+// and host required. Sharing them made PATCH behave as PUT in both directions:
+// an honest partial edit was rejected outright, and one that satisfied the
+// required fields silently erased every value field it did not resend. The
+// console papered over that by resending the whole device on every edit — except
+// custom_headers, which it does not carry, so toggling a device's recording
+// deleted its headers.
+type deviceUpdateRequest struct {
+	Name           *string            `json:"name"`
+	Description    *string            `json:"description"`
+	Vendor         *string            `json:"vendor"`
+	DeviceType     *string            `json:"device_type"`
+	Host           *string            `json:"host"`
+	Port           *int               `json:"port"`
+	Scheme         *string            `json:"scheme"`
+	VerifyTLS      *bool              `json:"verify_tls"`
+	CustomHeaders  *map[string]string `json:"custom_headers"`
+	Tags           *[]string          `json:"tags"`
+	AllowUnmanaged *bool              `json:"allow_unmanaged"`
+
+	RecordSessions     *bool     `json:"record_sessions"`
+	RecordingKinds     *[]string `json:"recording_kinds"`
+	DeliveryMode       *string   `json:"delivery_mode"`
+	IdleTimeoutMinutes *int      `json:"idle_timeout_minutes"`
+	GroupIDs           *[]string `json:"group_ids"`
+	CredentialMode     *string   `json:"credential_mode"`
+	RequiresApproval   *bool     `json:"requires_approval"`
+	MinApprovals       *int      `json:"min_approvals"`
+}
+
+// toPatch converts the request, resolving group ids.
+func (r deviceUpdateRequest) toPatch(meta appassets.ReqMeta) (appassets.DevicePatch, error) {
+	p := appassets.DevicePatch{
+		Name: r.Name, Description: r.Description, Vendor: r.Vendor, DeviceType: r.DeviceType,
+		Host: r.Host, Port: r.Port, Scheme: r.Scheme, VerifyTLS: r.VerifyTLS,
+		CustomHeaders: r.CustomHeaders, Tags: r.Tags, AllowUnmanaged: r.AllowUnmanaged,
+		RecordSessions: r.RecordSessions, RecordingKinds: r.RecordingKinds,
+		DeliveryMode: r.DeliveryMode, IdleTimeoutMinutes: r.IdleTimeoutMinutes,
+		CredentialMode: r.CredentialMode, RequiresApproval: r.RequiresApproval,
+		MinApprovals: r.MinApprovals, Meta: meta,
+	}
+	if r.GroupIDs != nil {
+		ids := make([]uuid.UUID, 0, len(*r.GroupIDs))
+		for _, raw := range *r.GroupIDs {
+			id, err := uuid.Parse(raw)
+			if err != nil {
+				return appassets.DevicePatch{}, err
+			}
+			ids = append(ids, id)
+		}
+		p.GroupIDs = &ids
+	}
+	return p, nil
+}
+
 type deviceRequest struct {
 	Name           string            `json:"name" binding:"required"`
 	Description    string            `json:"description"`
@@ -300,17 +358,17 @@ func (h *AssetsHandler) update(c *gin.Context) {
 		badRequest(c, "invalid device id")
 		return
 	}
-	var req deviceRequest
+	var req deviceUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		badRequest(c, "invalid device payload")
 		return
 	}
-	in, err := req.toInput(assetsMeta(c))
+	patch, err := req.toPatch(assetsMeta(c))
 	if err != nil {
 		badRequest(c, "invalid group id")
 		return
 	}
-	d, err := h.svc.UpdateDevice(c.Request.Context(), actor, id, in)
+	d, err := h.svc.UpdateDevice(c.Request.Context(), actor, id, patch)
 	if err != nil {
 		failAssets(c, err)
 		return

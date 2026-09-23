@@ -51,7 +51,7 @@ function DeviceGroups({ device, canEdit }: { device: Device; canEdit: boolean })
   });
 
   const save = useMutation({
-    mutationFn: async (ids: string[]) => api.patch(`/devices/${device.id}`, { ...toDeviceBody(device), group_ids: ids }),
+    mutationFn: async (ids: string[]) => api.patch(`/devices/${device.id}`, { group_ids: ids }),
     onSuccess: () => {
       toast.success("Groups updated");
       void qc.invalidateQueries({ queryKey: ["device", device.id] });
@@ -82,7 +82,6 @@ function DeviceRecording({ device }: { device: Device }) {
   const save = useMutation({
     mutationFn: async (on: boolean) =>
       api.patch(`/devices/${device.id}`, {
-        ...toDeviceBody(device),
         record_sessions: on,
         // Recording a web device only exists under isolation, so switching it on
         // switches the delivery mode with it. Sent as one request because the
@@ -105,7 +104,7 @@ function DeviceRecording({ device }: { device: Device }) {
   // recording itself in a state nobody asked for.
   const saveKinds = useMutation({
     mutationFn: async (kinds: RecordingKind[]) =>
-      api.patch(`/devices/${device.id}`, { ...toDeviceBody(device), recording_kinds: kinds }),
+      api.patch(`/devices/${device.id}`, { recording_kinds: kinds }),
     onSuccess: (_d, kinds) => {
       toast.success(`Now capturing ${kinds.map((k) => RECORDING_KIND_INFO[k].label.toLowerCase()).join(" and ")}`);
       void qc.invalidateQueries({ queryKey: ["device", device.id] });
@@ -144,7 +143,6 @@ function DeviceDelivery({ device, canEdit }: { device: Device; canEdit: boolean 
   const save = useMutation({
     mutationFn: async (mode: string) =>
       api.patch(`/devices/${device.id}`, {
-        ...toDeviceBody(device),
         delivery_mode: mode,
         record_sessions: mode === "proxy" ? false : device.record_sessions,
       }),
@@ -190,7 +188,7 @@ function DeviceIdleTimeout({ device, canEdit }: { device: Device; canEdit: boole
 
   const save = useMutation({
     mutationFn: async (mins: number) =>
-      api.patch(`/devices/${device.id}`, { ...toDeviceBody(device), idle_timeout_minutes: mins }),
+      api.patch(`/devices/${device.id}`, { idle_timeout_minutes: mins }),
     onSuccess: (_d, mins) => {
       toast.success(mins === 0 ? "Sessions will not be ended for being idle" : `Sessions end after ${mins} idle minutes`);
       void qc.invalidateQueries({ queryKey: ["device", device.id] });
@@ -235,20 +233,13 @@ function DeviceIdleTimeout({ device, canEdit }: { device: Device; canEdit: boole
 
 // PATCH /devices/:id replaces the whole device, so a group-only change still has
 // to send the rest of the device back unchanged.
-function toDeviceBody(d: Device) {
-  return {
-    name: d.name,
-    description: d.description,
-    host: d.host,
-    port: d.port,
-    scheme: d.scheme,
-    vendor: d.vendor,
-    device_type: d.device_type,
-    verify_tls: d.verify_tls,
-    tags: d.tags,
-    allow_unmanaged: d.allow_unmanaged,
-  };
-}
+/* toDeviceBody is gone.
+ *
+ * It resent the whole device on every edit, because PATCH used to replace what
+ * it was not sent — so changing one setting meant restating the other ten. It
+ * did not restate custom_headers, which is why toggling a device's recording
+ * deleted them. The endpoint is now a real partial update, so each edit sends
+ * only the field it changes. */
 
 
 // ---- editing the device itself --------------------------------------------
@@ -280,7 +271,6 @@ function EditDeviceModal({ device, onClose }: { device: Device; onClose: () => v
   const save = useMutation({
     mutationFn: async () =>
       api.patch(`/devices/${device.id}`, {
-        ...toDeviceBody(device),
         name: f.name.trim(),
         host: f.host.trim(),
         port: Number(f.port) || 0,
@@ -560,7 +550,7 @@ export function DeviceDetailPage() {
             icon={IconKey}
             subtitle="Which account this device authenticates as, and who has to say yes before you reach it"
           >
-            <DeviceAccessPolicy device={d} canEdit={has("device:write")} toBody={toDeviceBody} />
+            <DeviceAccessPolicy device={d} canEdit={has("device:write")} />
           </Panel>
 
           <Panel

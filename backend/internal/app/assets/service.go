@@ -42,6 +42,49 @@ func (s *Service) WithDefaultIdleTimeout(mins int) *Service {
 	return s
 }
 
+// DevicePatch is a PARTIAL device edit: every field is optional and a nil one
+// leaves the stored value alone.
+//
+// Separate from DeviceInput because PATCH and POST mean different things, and
+// sharing one struct made the route lie about which it was. DeviceInput's plain
+// values cannot express "not sent" — so an update assigned them unconditionally,
+// and any field a caller omitted was overwritten with its zero value. Two
+// consequences, both real:
+//
+//   - The API rejected an honest partial edit. PATCH {"port":8443} failed
+//     validation because name and host were marked required, so every client had
+//     to resend the whole device to change one number.
+//   - Whatever it did resend, it silently erased the rest. The console's own
+//     edits omit custom_headers, so toggling a device's recording deleted its
+//     headers — verified against a live deployment, {"X-Tenant":"acme"} became
+//     {} after one recording toggle.
+//
+// Pointers everywhere is what makes "omitted" and "set to empty" distinguishable,
+// which is the whole difference between a patch and a replacement.
+type DevicePatch struct {
+	Name           *string
+	Description    *string
+	Vendor         *string
+	DeviceType     *string
+	Host           *string
+	Port           *int
+	Scheme         *string
+	VerifyTLS      *bool
+	CustomHeaders  *map[string]string
+	Tags           *[]string
+	AllowUnmanaged *bool
+
+	RecordingKinds     *[]string
+	RecordSessions     *bool
+	DeliveryMode       *string
+	IdleTimeoutMinutes *int
+	CredentialMode     *string
+	RequiresApproval   *bool
+	MinApprovals       *int
+	GroupIDs           *[]uuid.UUID
+	Meta               ReqMeta
+}
+
 // DeviceInput describes a device create/update.
 type DeviceInput struct {
 	Name           string
@@ -201,9 +244,11 @@ func (s *Service) CreateDevice(ctx context.Context, actor iam.Claims, in DeviceI
 }
 
 // UpdateDevice mutates an existing device.
-func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UUID, in DeviceInput) (*assets.Device, error) {
-	if err := assets.ValidateCustomHeaders(in.CustomHeaders); err != nil {
-		return nil, err
+func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UUID, in DevicePatch) (*assets.Device, error) {
+	if in.CustomHeaders != nil {
+		if err := assets.ValidateCustomHeaders(*in.CustomHeaders); err != nil {
+			return nil, err
+		}
 	}
 	d, err := s.devices.GetByID(ctx, scopeOf(actor), id)
 	if err != nil {
@@ -225,7 +270,7 @@ func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UU
 	// recording off — dropping the transcript from a device that had one removes
 	// evidence just as effectively — so it is gated by the same owner check.
 	if in.RecordingKinds != nil {
-		next := assets.NormalizeRecordingKinds(schemeOf(in.Scheme, d.Scheme), *in.RecordingKinds)
+		next := assets.NormalizeRecordingKinds(schemeOf(derefOr(in.Scheme, ""), d.Scheme), *in.RecordingKinds)
 		if !sameStrings(next, d.RecordingKinds) {
 			if !d.CanSetRecording(actor.UserID, actor.IsSuperAdmin) {
 				s.recordAssetResult(ctx, actor, "device.recording_denied", "device", d.ID,
@@ -251,9 +296,17 @@ func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UU
 	if in.MinApprovals != nil {
 		d.MinApprovals = minApprovalsOrDefault(in.MinApprovals)
 	}
-	scheme, err := schemeOrDefault(in.Scheme)
-	if err != nil {
-		return nil, err
+	// The scheme this request SETTLES ON: the patched one when sent, the stored
+	// one otherwise. Everything judged below — delivery mode, recording kinds,
+	// the default port — has to be judged against that, not against whichever
+	// happened to be in the payload.
+	scheme := d.Scheme
+	if in.Scheme != nil {
+		var err error
+		scheme, err = schemeOrDefault(*in.Scheme)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// Resolved and judged against the values this request settles on, not the
 	// stored ones. Two reasons: a device switched from https to ssh in the same
@@ -265,10 +318,31 @@ func (s *Service) UpdateDevice(ctx context.Context, actor iam.Claims, id uuid.UU
 		return nil, err
 	}
 	d.DeliveryMode = mode
-	d.Name, d.Description, d.Vendor, d.DeviceType = in.Name, in.Description, in.Vendor, in.DeviceType
-	d.Host, d.Port, d.Scheme = in.Host, portOrDefault(in.Port, scheme), scheme
-	d.VerifyTLS, d.CustomHeaders, d.Tags = in.VerifyTLS, in.CustomHeaders, in.Tags
-	d.AllowUnmanaged = in.AllowUnmanaged
+	// Only what the caller actually sent. Assigning unconditionally is what made
+	// every omitted field a silent deletion.
+	d.Name = derefOr(in.Name, d.Name)
+	d.Description = derefOr(in.Description, d.Description)
+	d.Vendor = derefOr(in.Vendor, d.Vendor)
+	d.DeviceType = derefOr(in.DeviceType, d.DeviceType)
+	d.Host = derefOr(in.Host, d.Host)
+	d.Scheme = scheme
+	// The port follows the scheme when the caller sends neither, so switching a
+	// device from https to ssh without naming a port lands on 22 rather than
+	// keeping 443 — which is the one case where carrying the stored value over is
+	// the wrong answer.
+	if in.Port != nil {
+		d.Port = portOrDefault(*in.Port, scheme)
+	} else if in.Scheme != nil {
+		d.Port = portOrDefault(0, scheme)
+	}
+	d.VerifyTLS = derefOr(in.VerifyTLS, d.VerifyTLS)
+	if in.CustomHeaders != nil {
+		d.CustomHeaders = *in.CustomHeaders
+	}
+	if in.Tags != nil {
+		d.Tags = *in.Tags
+	}
+	d.AllowUnmanaged = derefOr(in.AllowUnmanaged, d.AllowUnmanaged)
 	// Re-settle the kinds against the scheme this request lands on. Switching an
 	// ssh device to https must not leave 'transcript' stored against a protocol
 	// that produces none — the CHECK would accept it and the console would show a
@@ -507,4 +581,12 @@ func portOrDefault(p int, scheme string) int {
 		return port
 	}
 	return 443
+}
+
+// derefOr returns *p when it was sent, and the stored value when it was not.
+func derefOr[T any](p *T, fallback T) T {
+	if p == nil {
+		return fallback
+	}
+	return *p
 }

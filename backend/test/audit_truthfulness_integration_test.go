@@ -129,8 +129,9 @@ func TestIntegration_RefusingToDisableRecordingIsAuditedAsDenied(t *testing.T) {
 		Email: string(strangerUser.Email),
 	}
 	off := false
-	if _, err := svc.UpdateDevice(ctx, stranger, dev.ID, appassets.DeviceInput{
-		Name: dev.Name, Host: dev.Host, Port: dev.Port, Scheme: dev.Scheme,
+	// A patch carrying only the thing being changed — which is the point: an edit
+	// no longer has to resend the device to touch one field.
+	if _, err := svc.UpdateDevice(ctx, stranger, dev.ID, appassets.DevicePatch{
 		RecordSessions: &off,
 	}); !errors.Is(err, domassets.ErrForbidden) {
 		t.Fatalf("switching recording off as a stranger = %v, want ErrForbidden", err)
