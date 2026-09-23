@@ -18,11 +18,28 @@ type Service struct {
 	devices assets.DeviceRepository
 	groups  assets.AssetGroupRepository
 	audit   audit.Recorder
+	// defaultIdle is what a new device inherits for "End session when idle".
+	defaultIdle int
 }
 
 // NewService constructs the assets service.
 func NewService(devices assets.DeviceRepository, groups assets.AssetGroupRepository, rec audit.Recorder) *Service {
-	return &Service{devices: devices, groups: groups, audit: rec}
+	return &Service{devices: devices, groups: groups, audit: rec, defaultIdle: defaultIdleTimeout}
+}
+
+// WithDefaultIdleTimeout sets what a NEW device inherits for "End session when
+// idle", in minutes. Existing devices keep whatever they were set to — this is
+// the value a device starts with, not a policy applied over the estate.
+//
+// Out-of-range values are ignored rather than clamped: the column constrains
+// 0..1440, and silently rewriting a deployment's stated intent into something
+// else is worse than keeping the built-in default and leaving the setting
+// visibly unapplied.
+func (s *Service) WithDefaultIdleTimeout(mins int) *Service {
+	if mins >= 0 && mins <= 1440 {
+		s.defaultIdle = mins
+	}
+	return s
 }
 
 // DeviceInput describes a device create/update.
@@ -77,15 +94,17 @@ type DeviceInput struct {
 	Meta     ReqMeta
 }
 
-// defaultIdleTimeout is how long a new device lets a session sit unused. An
-// hour is long enough not to interrupt real work and short enough that a walked-
-// away-from session is not still open at the end of the day.
+// defaultIdleTimeout is the fallback when a deployment expresses no preference:
+// an hour is long enough not to interrupt real work and short enough that a
+// walked-away-from session is not still open at the end of the day. It is
+// overridden by GUARDRAIL_DEFAULT_IDLE_TIMEOUT_MINUTES — see
+// Service.WithDefaultIdleTimeout.
 const defaultIdleTimeout = 60
 
 // idleOrDefault applies the device default when the caller says nothing.
-func idleOrDefault(v *int) int {
+func (s *Service) idleOrDefault(v *int) int {
 	if v == nil {
-		return defaultIdleTimeout
+		return s.defaultIdle
 	}
 	return *v
 }
@@ -156,7 +175,7 @@ func (s *Service) CreateDevice(ctx context.Context, actor iam.Claims, in DeviceI
 		// An hour of inactivity ends the session unless the registrant says
 		// otherwise. A default of 0 would mean "never", which is not a posture to
 		// arrive at by saying nothing.
-		IdleTimeoutMinutes: idleOrDefault(in.IdleTimeoutMinutes),
+		IdleTimeoutMinutes: s.idleOrDefault(in.IdleTimeoutMinutes),
 		// Access policy, settled at registration. All three default to today's
 		// behaviour when the caller says nothing: one shared login, no approval
 		// gate, one approval if the gate is later turned on.

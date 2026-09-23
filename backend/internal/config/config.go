@@ -68,6 +68,32 @@ type SessionConfig struct {
 	// no counter on it nobody ever has to ask.
 	EmergencyQuota  int
 	EmergencyWindow time.Duration
+
+	// DefaultIdleTimeoutMinutes is what a NEW device inherits for "End session
+	// when idle". It is not the live value for any existing device: that is
+	// devices.idle_timeout_minutes, set per device in the console, and this only
+	// decides what a device starts with when the caller says nothing.
+	//
+	// An hour is long enough not to interrupt real work and short enough that a
+	// walked-away-from session is not still open at the end of the day — but that
+	// is a judgement about one estate, not a law, and a deployment whose operators
+	// work in ten-minute bursts should be able to say so without editing Go.
+	//
+	// 0 means new devices never idle out, which is a choice a deployment may
+	// legitimately make and is different from having no opinion.
+	DefaultIdleTimeoutMinutes int
+	// SweepInterval is how often the reaper looks for sessions that have run past
+	// their window or gone idle. It is the granularity of NOTICING, not of the
+	// deadline itself: an expired session's ended_at is backdated to the moment it
+	// actually lapsed, so shortening this makes the console catch up sooner, not
+	// the session end sooner.
+	SweepInterval time.Duration
+	// ActivityInterval is how often a session in continuous use writes its
+	// last-activity stamp. Typing touches a session on every keystroke; persisting
+	// each one would be a database write per character, so at most one stamp is
+	// written per session per interval. The cost of raising it is that much
+	// imprecision in when an idle session is judged to have gone idle.
+	ActivityInterval time.Duration
 }
 
 // RecordingConfig controls where session recordings are stored and how long
@@ -409,7 +435,12 @@ func Load() (*Config, error) {
 			MaxWindow:        getDuration("GUARDRAIL_MAX_SESSION_WINDOW", 12*time.Hour),
 			ApprovalFallback: getDuration("GUARDRAIL_APPROVAL_WINDOW", time.Hour),
 			EmergencyQuota:   getInt("GUARDRAIL_EMERGENCY_QUOTA", 2),
-			EmergencyWindow:  getDuration("GUARDRAIL_EMERGENCY_QUOTA_WINDOW", 7*24*time.Hour),
+			// Minutes, to match the per-device field in the console rather than
+			// making an operator translate between two units for one setting.
+			DefaultIdleTimeoutMinutes: getInt("GUARDRAIL_DEFAULT_IDLE_TIMEOUT_MINUTES", 60),
+			SweepInterval:             getDuration("GUARDRAIL_SESSION_SWEEP_INTERVAL", 30*time.Second),
+			ActivityInterval:          getDuration("GUARDRAIL_ACTIVITY_INTERVAL", 30*time.Second),
+			EmergencyWindow:           getDuration("GUARDRAIL_EMERGENCY_QUOTA_WINDOW", 7*24*time.Hour),
 		},
 		Recording: RecordingConfig{
 			Dir:           getEnv("GUARDRAIL_RECORDING_DIR", "/var/lib/guardrail/recordings"),

@@ -98,7 +98,11 @@ func startWorkers(
 	ctx context.Context, log *zap.Logger, notifySvc *appnotify.Service,
 	broker *appaccess.Service, healthSvc *apphealth.Service,
 	vaultPurger *appvault.Service, credentialPurgeAfter time.Duration,
+	sweepInterval time.Duration,
 ) {
+	if sweepInterval <= 0 {
+		sweepInterval = 30 * time.Second
+	}
 	if healthSvc != nil {
 		go healthSvc.Run(ctx)
 	}
@@ -117,7 +121,9 @@ func startWorkers(
 		}
 	}()
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		// How often the reaper NOTICES, not how long a session gets: an expired
+		// session's ended_at is backdated to the moment it actually lapsed.
+		ticker := time.NewTicker(sweepInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -491,7 +497,8 @@ func run() error {
 	}, security.NewCookieSigner(cfg.Auth.JWTSigningKey))
 
 	// --- Assets + Vault modules (M4) ---
-	assetsSvc := appassets.NewService(postgres.NewDeviceRepo(pg), postgres.NewAssetGroupRepo(pg), auditRec)
+	assetsSvc := appassets.NewService(postgres.NewDeviceRepo(pg), postgres.NewAssetGroupRepo(pg), auditRec).
+		WithDefaultIdleTimeout(cfg.Session.DefaultIdleTimeoutMinutes)
 	// The binding signer proves that "this secret is for this device, for this
 	// person" was written by GuardRail. Derived from the same master key as the
 	// vault KEK under a separate HKDF label, so it is nothing extra to configure
@@ -605,7 +612,7 @@ func run() error {
 	// live at once and the mux routes each request to whichever holds the session.
 	// Both gateways report operator activity to the same tracker, so the idle
 	// reaper sees a busy session as busy whichever way it is being delivered.
-	activity := appaccess.NewActivityTracker(sessionRepo, nil, 30*time.Second)
+	activity := appaccess.NewActivityTracker(sessionRepo, nil, cfg.Session.ActivityInterval)
 
 	proxyGateway := proxy.NewHTTPGateway(deviceLookup, eventRepo, activity, cfg.Telemetry.ServiceName, cfg.HTTP.TunnelAuthority())
 	sessionServers := []v1.SessionServer{proxyGateway}
@@ -839,7 +846,8 @@ func run() error {
 	})
 
 	// Background workers: notification dispatcher, overdue-session reaper, health poller.
-	startWorkers(ctx, log, notifySvc, brokerSvc, healthSvc, vaultSvc, cfg.Security.CredentialPurgeAfter)
+	startWorkers(ctx, log, notifySvc, brokerSvc, healthSvc, vaultSvc, cfg.Security.CredentialPurgeAfter,
+		cfg.Session.SweepInterval)
 
 	// Cross-node terminate: when any node terminates a session it publishes a
 	// signal; every gateway node tears down its local state on receipt so the

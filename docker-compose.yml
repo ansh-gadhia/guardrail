@@ -375,6 +375,13 @@ services:
       # limit off, which makes the approval gate advisory.
       GUARDRAIL_EMERGENCY_QUOTA: ${GUARDRAIL_EMERGENCY_QUOTA:-2}
       GUARDRAIL_EMERGENCY_QUOTA_WINDOW: ${GUARDRAIL_EMERGENCY_QUOTA_WINDOW:-168h}
+      # Idle handling. The LIVE value for any device is devices.idle_timeout_minutes,
+      # edited in the console; these three are the deployment's defaults behind it:
+      # what a new device inherits, how often the reaper notices, and how often a
+      # session in continuous use writes its activity stamp. See .env.example.
+      GUARDRAIL_DEFAULT_IDLE_TIMEOUT_MINUTES: ${GUARDRAIL_DEFAULT_IDLE_TIMEOUT_MINUTES:-60}
+      GUARDRAIL_SESSION_SWEEP_INTERVAL: ${GUARDRAIL_SESSION_SWEEP_INTERVAL:-30s}
+      GUARDRAIL_ACTIVITY_INTERVAL: ${GUARDRAIL_ACTIVITY_INTERVAL:-30s}
       GUARDRAIL_SERVICE_NAME: ${GUARDRAIL_SERVICE_NAME:-guardrail-api}
       # These default to empty in Go, so forwarding empty is the same as unset.
       GUARDRAIL_FEDERATION_ORG_ID: ${GUARDRAIL_FEDERATION_ORG_ID:-}
