@@ -21,6 +21,15 @@ type createUserRequest struct {
 	Password     string   `json:"password" binding:"required"`
 	RoleIDs      []string `json:"role_ids"`
 	IsSuperAdmin bool     `json:"is_super_admin"`
+	// TeamIDs optionally puts the new person straight into teams. Optional
+	// because not every deployment uses them, and a required field for a concept
+	// an organisation has not adopted is an obstacle rather than a guardrail.
+	//
+	// It matters that it is offered HERE. A team is how somebody reaches devices
+	// they were not granted individually, so an account created without one is an
+	// account that can sign in and see nothing — and the place that was easiest
+	// to miss was the moment of creation, because nothing asked.
+	TeamIDs []string `json:"team_ids"`
 }
 
 func (h *Handler) createUser(c *gin.Context) {
@@ -35,6 +44,11 @@ func (h *Handler) createUser(c *gin.Context) {
 		badRequest(c, "invalid role id")
 		return
 	}
+	teamIDs, err := parseIDs(req.TeamIDs)
+	if err != nil {
+		badRequest(c, "invalid team id")
+		return
+	}
 	p, err := h.svc.CreateUser(c.Request.Context(), actor, appiam.CreateUserInput{
 		Email: req.Email, Username: req.Username, Password: req.Password,
 		RoleIDs: roleIDs, IsSuperAdmin: req.IsSuperAdmin, Meta: metaFrom(c),
@@ -42,6 +56,23 @@ func (h *Handler) createUser(c *gin.Context) {
 	if err != nil {
 		fail(c, err)
 		return
+	}
+	// Teams after the account exists, and reported if it fails rather than
+	// swallowed: the account is real either way, and an admin who asked for a
+	// team and silently got none finds out when somebody cannot reach a device.
+	if len(teamIDs) > 0 {
+		ids := make([]iam.ID, 0, len(teamIDs))
+		for _, id := range teamIDs {
+			ids = append(ids, iam.ID(id))
+		}
+		if err := h.svc.AddUserToTeams(c.Request.Context(), actor, p.UserID, ids, metaFrom(c)); err != nil {
+			c.JSON(http.StatusCreated, gin.H{
+				"user": toPrincipalDTO(*p),
+				"warning": "the account was created, but it could not be added to the team(s): " +
+					err.Error(),
+			})
+			return
+		}
 	}
 	c.JSON(http.StatusCreated, toPrincipalDTO(*p))
 }

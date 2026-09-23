@@ -5,6 +5,8 @@ import (
 
 	"github.com/guardrail/guardrail/internal/domain/audit"
 	"github.com/guardrail/guardrail/internal/domain/iam"
+
+	"github.com/google/uuid"
 )
 
 // Team use cases.
@@ -115,6 +117,50 @@ func (s *Service) SetTeamMembers(ctx context.Context, actor iam.Claims, id iam.I
 		return err
 	}
 	s.recordTeam(ctx, actor, "team.set_members", id, meta, map[string]any{"members": len(userIDs)})
+	return nil
+}
+
+// AddUserToTeams puts one person into each of the given teams, keeping whoever
+// is already in them.
+//
+// SetMembers REPLACES a team's membership, which is right for the team editor —
+// somebody looking at a list and deciding who is on it — and wrong for adding a
+// person: used directly it would empty the team and leave one member. So this
+// reads the current membership and adds to it.
+//
+// Teams that do not exist, or are out of the actor's scope, are reported rather
+// than skipped: being put in no team when the form said otherwise is the kind of
+// quiet failure that is discovered when somebody cannot reach a device.
+func (s *Service) AddUserToTeams(ctx context.Context, actor iam.Claims, userID iam.ID, teamIDs []iam.ID, meta ReqMeta) error {
+	if len(teamIDs) == 0 {
+		return nil
+	}
+	if s.teams == nil {
+		return ErrTeamsUnavailable
+	}
+	for _, tid := range dedupeIDs(teamIDs) {
+		members, err := s.teams.ListMembers(ctx, actor.Scope(), tid)
+		if err != nil {
+			return err
+		}
+		ids := make([]iam.ID, 0, len(members)+1)
+		already := false
+		for _, m := range members {
+			ids = append(ids, m.UserID)
+			if m.UserID == userID {
+				already = true
+			}
+		}
+		if already {
+			continue
+		}
+		ids = append(ids, userID)
+		if err := s.teams.SetMembers(ctx, actor.Scope(), tid, ids); err != nil {
+			return err
+		}
+		s.recordTeam(ctx, actor, "team.add_member", tid, meta,
+			map[string]any{"user_id": uuid.UUID(userID).String(), "members": len(ids)})
+	}
 	return nil
 }
 

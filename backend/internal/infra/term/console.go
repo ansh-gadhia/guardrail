@@ -269,11 +269,16 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
   var MAX_AUTO = 6;        // ~30s of backoff before we stop and ask
 
   function send(o){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
-  // A watcher must not resize the operator's terminal. Their own xterm still
-  // fits locally — the grid the device is drawing for simply may not match their
-  // window, which is the correct trade: the person doing the work owns the
-  // geometry.
-  function sendFit(){ if (READONLY) return; var g = fit(); if (g) send({ t:'r', cols:g.cols, rows:g.rows }); }
+  // fit() ALWAYS runs; only the send is withheld.
+  //
+  // They are two different things and conflating them is what made a watched
+  // terminal a small box in the corner of a large frame: fit() resizes the
+  // LOCAL xterm to its container, and send() tells the DEVICE to change its
+  // geometry. A watcher must not do the second — the person working owns the
+  // grid — but skipping the first left their terminal at the default 80x24
+  // regardless of how much room it had, which looks exactly like a feature that
+  // does not fill the screen, because it is one.
+  function sendFit(){ var g = fit(); if (g && !READONLY) send({ t:'r', cols:g.cols, rows:g.rows }); }
 
   function connect(){
     clearTimeout(timer);

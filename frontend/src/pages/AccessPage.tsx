@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
 import type { UserRow, Role, Permission, RoleDeviceAccess, AssetGroup } from "@/lib/types";
-import { authProviderLabel, federatedAccount } from "@/lib/types";
+import { authProviderLabel, federatedAccount, Team } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, ErrorNote, EmptyState, Modal, Field, StatCluster, Badge, Skeleton, Spinner, Tabs, Input, Button, cn } from "@/components/ui";
 import { IconUsers, IconPlus, IconTrash, IconShield, IconLock, IconCheck, IconMinus, IconSliders, IconAudit, IconDevices, IconFolder, IconGlobe, IconKey, IconAlert, IconClipboard } from "@/components/icons";
@@ -846,9 +846,36 @@ function CreateUserModal({
       return n;
     });
 
+  /* Teams, optionally, at the moment the account is made.
+     A role says what somebody may do; a team is how they reach the devices they
+     were not granted one by one. Creating an account without one produces
+     somebody who can sign in and see nothing, and the easiest place to miss it
+     was here — because nothing asked. */
+  const canReadTeams = useAuth((st) => st.has("team:read"));
+  const teams = useQuery<Team[]>({
+    queryKey: ["teams"],
+    queryFn: async () => (await api.get<{ data: Team[] }>("/teams")).data.data ?? [],
+    enabled: canReadTeams,
+  });
+  const [teamSel, setTeamSel] = useState<Set<string>>(new Set());
+  const toggleTeam = (id: string) =>
+    setTeamSel((s) => {
+      const n = new Set(s);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+
   const create = useMutation({
     mutationFn: async () =>
-      api.post("/users", { email, username, password, role_ids: [...sel] }),
+      api.post("/users", {
+        email,
+        username,
+        password,
+        role_ids: [...sel],
+        // Omitted entirely when nothing was picked, so a deployment that does not
+        // use teams sends exactly what it always did.
+        ...(teamSel.size > 0 ? { team_ids: [...teamSel] } : {}),
+      }),
     onSuccess: onCreated,
   });
 
@@ -895,6 +922,22 @@ function CreateUserModal({
       <Field label="Roles">
         <RoleChecklist roles={roles} selected={sel} toggle={toggle} />
       </Field>
+      {canReadTeams && (teams.data?.length ?? 0) > 0 && (
+        <Field
+          label="Teams"
+          hint="Optional. A team is how somebody reaches devices they were not granted individually — you can add them later from Teams."
+        >
+          <div className="max-h-40 space-y-1.5 overflow-y-auto rounded-lg border border-line bg-surface-2/40 p-2">
+            {(teams.data ?? []).map((t) => (
+              <label key={t.id} className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 hover:bg-surface-3/60">
+                <input type="checkbox" checked={teamSel.has(t.id)} onChange={() => toggleTeam(t.id)} />
+                <span className="font-medium">{t.name}</span>
+                {t.description && <span className="truncate text-xs text-faint">{t.description}</span>}
+              </label>
+            ))}
+          </div>
+        </Field>
+      )}
     </Modal>
   );
 }
