@@ -127,6 +127,10 @@ type guacSession struct {
 	// second one: `select $<connID>` attaches to an existing connection, which is
 	// the mechanism Guacamole's own screen sharing is built on.
 	connID string
+	// watchers counts supervisors currently joined to this desktop. A join has
+	// no fan-out registry to ask — guacd does the fan-out — so it is counted as
+	// each one arrives and leaves. Guarded by mu.
+	watchers int
 
 	mu       sync.Mutex
 	attached bool

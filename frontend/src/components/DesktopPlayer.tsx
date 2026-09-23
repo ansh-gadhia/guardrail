@@ -256,7 +256,10 @@ export function DesktopPlayer({
           pointer-events-none and would not block it anyway, but the ordering is
           what makes it clickable and visible. Only while connected: there is no
           clipboard stream to open otherwise. */}
-      {status === "connected" && (
+      {/* Never for a watcher. Pasting IS input — it opens a clipboard stream into
+          the session — and the gateway drops it for an observer anyway, so the
+          button could only ever do nothing while looking like it had worked. */}
+      {status === "connected" && !readOnly && (
         <button
           type="button"
           onClick={paste}

@@ -1,7 +1,10 @@
 package guacgw
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -90,6 +93,17 @@ func (g *Gateway) Observe(w http.ResponseWriter, r *http.Request, sid, orgID uui
 	}
 	defer func() { _ = join.Close() }()
 
+	// Counted only once the join has actually succeeded, so a watcher guacd
+	// refused never shows up on the operator's screen as somebody looking.
+	s.mu.Lock()
+	s.watchers++
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.watchers--
+		s.mu.Unlock()
+	}()
+
 	done := make(chan struct{}, 2)
 
 	// guacd -> supervisor. Framed on instruction boundaries for the same reason
@@ -117,14 +131,41 @@ func (g *Gateway) Observe(w http.ResponseWriter, r *http.Request, sid, orgID uui
 		}
 	}()
 
-	// Supervisor -> nowhere. Read and discarded: guacd would accept their input on
-	// a joined connection, and watching must not become driving. Reading is not
-	// optional — an unread peer stalls instead of closing, and a close frame would
-	// never be noticed.
+	// Supervisor -> guacd, FILTERED — not discarded.
+	//
+	// Discarding everything was the first version, and it looked right: a watcher
+	// has nothing to say. It lasted about fifteen seconds. guacd sends `sync` and
+	// requires every user of a connection to echo it; one that does not is
+	// "not responding" and is disconnected — guacd logged exactly that, and the
+	// console showed "The desktop could not be opened. Aborted." The tunnel's own
+	// keepalive was going unanswered too, and the client closes after 15s of that.
+	//
+	// So a watcher's messages are split like the operator's and then held to an
+	// allowlist: the protocol's own bookkeeping goes through, anything that could
+	// move, type into, resize or read the desktop does not. See splitWatcherMessage.
 	go func() {
 		defer func() { done <- struct{}{} }()
 		for {
-			if _, _, err := c.Read(ctx); err != nil {
+			_, data, err := c.Read(ctx)
+			if err != nil {
+				return
+			}
+			forward, replies, err := splitWatcherMessage(data)
+			if err != nil {
+				return
+			}
+			if len(replies) > 0 {
+				if err := c.Write(ctx, websocket.MessageText, replies); err != nil {
+					return
+				}
+			}
+			// Deliberately no Activity.Touch: a watcher's sync replies are not the
+			// operator working, and counting them would stop an abandoned session
+			// ever idling out for as long as somebody watched it.
+			if len(forward) == 0 {
+				continue
+			}
+			if _, err := join.Write(forward); err != nil {
 				return
 			}
 		}
@@ -181,4 +222,57 @@ func joinTarget(connID string) string {
 		return connID
 	}
 	return "$" + connID
+}
+
+// watcherOpcodes is everything a WATCHER may send on to guacd.
+//
+// An allowlist, because the failure modes are not symmetrical: an opcode missing
+// from here costs a watcher their view, which is loud and gets reported; an
+// opcode wrongly allowed puts a supervisor's hands on somebody else's desktop,
+// which is silent and is the one thing this path exists to prevent.
+//
+//	sync  echoes guacd's frame markers. Required: a user who never answers is
+//	      "not responding" and is disconnected.
+//	ack   acknowledges a stream guacd is sending TO this user — the images the
+//	      display is drawn from. Flow control for the watcher's own view.
+//	nop   keepalive, no effect.
+//
+// Deliberately absent: mouse, key, clipboard, size (which would resize the
+// OPERATOR's desktop to the watcher's window on a shared connection), put, file,
+// pipe, argv, audio, and disconnect — closing the socket is how a watcher leaves.
+var watcherOpcodes = map[string]bool{"sync": true, "ack": true, "nop": true}
+
+// splitWatcherMessage is splitClientMessage held to watcherOpcodes: tunnel pings
+// are answered, protocol bookkeeping is forwarded, and everything else is dropped.
+func splitWatcherMessage(data []byte) (forward, replies []byte, err error) {
+	all, replies, err := splitClientMessage(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	r := newReader(bytes.NewReader(all))
+	for {
+		in, rerr := r.ReadInstruction()
+		if rerr != nil {
+			if errors.Is(rerr, io.EOF) {
+				return forward, replies, nil
+			}
+			return nil, nil, rerr
+		}
+		if watcherOpcodes[in.Opcode] {
+			forward = append(forward, in.String()...)
+		}
+	}
+}
+
+// WatcherCount reports how many supervisors are joined to a live desktop.
+func (g *Gateway) WatcherCount(sid uuid.UUID) (int, bool) {
+	g.mu.RLock()
+	s := g.sessions[sid]
+	g.mu.RUnlock()
+	if s == nil {
+		return 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.watchers, true
 }
