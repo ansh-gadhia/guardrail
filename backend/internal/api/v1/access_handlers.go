@@ -2,6 +2,7 @@ package v1
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +38,8 @@ type SessionObserver interface {
 	// Observe streams the session to a supervisor. false => not this gateway's
 	// session, without touching the ResponseWriter.
 	Observe(w http.ResponseWriter, r *http.Request, sid, orgID uuid.UUID) bool
+	// ObserveConsole serves the page the supervisor watches in.
+	ObserveConsole(w http.ResponseWriter, r *http.Request, sid, orgID uuid.UUID) bool
 }
 
 // SessionMux dispatches a request to whichever gateway is holding the session.
@@ -84,6 +87,20 @@ func (m SessionMux) Observe(w http.ResponseWriter, r *http.Request, sid, orgID u
 			continue
 		}
 		if o.Observe(w, r, sid, orgID) {
+			return true
+		}
+	}
+	return false
+}
+
+// ObserveConsole serves the watch page from the owning gateway.
+func (m SessionMux) ObserveConsole(w http.ResponseWriter, r *http.Request, sid, orgID uuid.UUID) bool {
+	for _, s := range m {
+		o, ok := s.(SessionObserver)
+		if !ok {
+			continue
+		}
+		if o.ObserveConsole(w, r, sid, orgID) {
 			return true
 		}
 	}
@@ -140,6 +157,17 @@ type AccessHandler struct {
 	// suffix is what URLs are BUILT with (where it must).
 	tunnelPortSuffix string
 	grantKey         []byte
+
+	// observeSigner signs the short-lived grant a supervisor's browser presents
+	// when watching a session. An interface rather than the concrete signer so
+	// this layer keeps its hands off infra — the composition root injects it.
+	observeSigner GrantSigner
+}
+
+// GrantSigner signs and verifies a scoped, tamper-evident cookie value.
+type GrantSigner interface {
+	Sign(value string) string
+	Verify(signed string) (string, bool)
 }
 
 // NewAccessHandler constructs an AccessHandler. tun may be a zero TunnelConfig,
@@ -155,6 +183,13 @@ func NewAccessHandler(svc *appaccess.Service, gw SessionServer, secure bool, tun
 		h.tunnelPortSuffix = tun.PortSuffix
 		h.grantKey = tun.GrantKey
 	}
+	return h
+}
+
+// WithObserveSigner enables session watching. Without it the grant endpoint
+// reports the feature unconfigured rather than minting something unverifiable.
+func (h *AccessHandler) WithObserveSigner(s GrantSigner) *AccessHandler {
+	h.observeSigner = s
 	return h
 }
 
@@ -193,7 +228,14 @@ func (h *AccessHandler) Register(rg *gin.RouterGroup, authMW gin.HandlerFunc) {
 		// session:read: seeing that a session exists and watching the keystrokes in
 		// it are different powers, and most people who need the first should not
 		// have the second.
-		s.GET("/:id/observe", middleware.RequirePermission("session:observe"), h.observe)
+		//
+		// POST, not GET, and it mints a grant rather than streaming. A browser
+		// cannot put an Authorization header on a WebSocket or on an iframe's own
+		// GET, so the console page and its socket have to authenticate with a
+		// cookie — the same shape /proxy/<sid>/ already uses for the operator.
+		// Minting is the audited act; the stream that follows is not separately
+		// authorised, so it is scoped and short-lived.
+		s.POST("/:id/observe", middleware.RequirePermission("session:observe"), h.observeGrant)
 	}
 }
 
@@ -216,9 +258,24 @@ func (h *AccessHandler) capabilities(c *gin.Context) {
 // token (browser navigations don't carry bearer headers).
 func (h *AccessHandler) RegisterProxy(e *gin.Engine) {
 	e.Any("/proxy/:sid/*path", h.proxy)
+	// Watching lives outside /proxy/ deliberately. The two carry different
+	// cookies and different powers, and a path that can only ever watch cannot be
+	// talked into driving by a mistake in one handler.
+	e.GET("/observe/:sid/", h.observeConsole)
+	e.GET("/observe/:sid/__ws__", h.observeStream)
 }
 
 func proxyCookieName(sid string) string { return "guardrail_proxy_" + sid }
+
+func observeCookieName(sid string) string { return "guardrail_observe_" + sid }
+
+// observeGrantTTL bounds how long one "Watch" click stays usable.
+//
+// Short because the grant is the only thing standing between the cookie and the
+// stream: the permission was checked when it was minted, not on every frame. Long
+// enough that a supervisor watching a long change is not thrown out mid-command —
+// they reopen from the console, which re-checks and re-audits.
+const observeGrantTTL = 30 * time.Minute
 
 // connectBody is what the console sends when a device is approval-gated. Every
 // field is optional so an ungated device keeps connecting with an empty body,
@@ -555,12 +612,14 @@ func (h *AccessHandler) terminate(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// observe streams a live session to a supervisor, read-only.
+// observeGrant authorises one supervisor to watch one session and hands the
+// console a URL it can open.
 //
-// The authorisation and the audit happen in the service before the gateway is
-// touched, so a session that cannot be watched is refused with a status the
-// console can act on rather than a socket that opens and immediately closes.
-func (h *AccessHandler) observe(c *gin.Context) {
+// The permission check and the audit happen HERE, once, and the grant that comes
+// out is what the console page and its socket present afterwards. That split is
+// deliberate: a stream cannot re-run a permission check per frame, so the thing
+// that gets long-lived is scoped to one session, signed, and expires.
+func (h *AccessHandler) observeGrant(c *gin.Context) {
 	actor, _ := middleware.ClaimsFrom(c)
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -572,16 +631,88 @@ func (h *AccessHandler) observe(c *gin.Context) {
 		failAccess(c, err)
 		return
 	}
-	// h.gateway is a SessionServer; watching is an extra capability a gateway may
-	// or may not have. Asserting keeps the two interfaces separate rather than
-	// forcing every server to carry a method most of them cannot implement.
-	obs, ok := h.gateway.(SessionObserver)
-	if !ok || !obs.Observe(c.Writer, c.Request, id, sess.OrganizationID) {
-		// The session record says active but no gateway holds it. That is a
-		// reverse-proxy session (nothing live to stream — the timeline is how it is
-		// reviewed), or one whose gateway has already let go.
-		problem(c, http.StatusConflict, "Not Watchable",
-			"this session has no live stream to watch; open its recording or timeline instead")
+	if h.observeSigner == nil {
+		problem(c, http.StatusServiceUnavailable, "Unavailable", "session watching is not configured")
+		return
+	}
+	sid := id.String()
+	exp := time.Now().Add(observeGrantTTL)
+	// The actor is in the token so a leaked cookie still names who it was minted
+	// for, and the audit trail and the stream cannot disagree about that.
+	token := h.observeSigner.Sign(strings.Join([]string{
+		sid, sess.OrganizationID.String(), uuid.UUID(actor.UserID).String(), strconv.FormatInt(exp.Unix(), 10),
+	}, "|"))
+	c.SetCookie(observeCookieName(sid), token, int(time.Until(exp).Seconds()),
+		"/observe/"+sid, "", h.secure, true)
+	c.JSON(http.StatusOK, gin.H{
+		"console_url": "/observe/" + sid + "/",
+		"expires_at":  rfc3339UTC(exp),
+		// Named so the console can say whose keyboard this is before the stream
+		// even opens.
+		"user_id":  sess.UserID.String(),
+		"protocol": string(sess.Protocol),
+	})
+}
+
+// observeSession verifies a watch grant and returns what it authorises.
+func (h *AccessHandler) observeSession(c *gin.Context) (sid, orgID uuid.UUID, ok bool) {
+	sidStr := c.Param("sid")
+	parsed, err := uuid.Parse(sidStr)
+	if err != nil || h.observeSigner == nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+	raw, err := c.Cookie(observeCookieName(sidStr))
+	if err != nil || raw == "" {
+		return uuid.Nil, uuid.Nil, false
+	}
+	val, good := h.observeSigner.Verify(raw)
+	if !good {
+		return uuid.Nil, uuid.Nil, false
+	}
+	parts := strings.Split(val, "|")
+	if len(parts) != 4 || parts[0] != sidStr {
+		return uuid.Nil, uuid.Nil, false
+	}
+	// Checked here as well as by the cookie's Max-Age: a cookie's lifetime is the
+	// browser's opinion, and this one is ours.
+	unix, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil || time.Now().After(time.Unix(unix, 0)) {
+		return uuid.Nil, uuid.Nil, false
+	}
+	org, err := uuid.Parse(parts[1])
+	if err != nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+	return parsed, org, true
+}
+
+// observeConsole serves the read-only terminal a supervisor watches in.
+func (h *AccessHandler) observeConsole(c *gin.Context) {
+	sid, orgID, ok := h.observeSession(c)
+	if !ok {
+		problem(c, http.StatusUnauthorized, "Unauthorized", "no watch grant for this session")
+		return
+	}
+	obs, canObserve := h.gateway.(SessionObserver)
+	if !canObserve {
+		problem(c, http.StatusConflict, "Not Watchable", "this deployment cannot stream live sessions")
+		return
+	}
+	if !obs.ObserveConsole(c.Writer, c.Request, sid, orgID) {
+		problem(c, http.StatusGone, "Session Closed", "the session is no longer live")
+	}
+}
+
+// observeStream upgrades the supervisor's socket.
+func (h *AccessHandler) observeStream(c *gin.Context) {
+	sid, orgID, ok := h.observeSession(c)
+	if !ok {
+		problem(c, http.StatusUnauthorized, "Unauthorized", "no watch grant for this session")
+		return
+	}
+	obs, canObserve := h.gateway.(SessionObserver)
+	if !canObserve || !obs.Observe(c.Writer, c.Request, sid, orgID) {
+		problem(c, http.StatusGone, "Session Closed", "the session is no longer live")
 	}
 }
 

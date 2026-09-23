@@ -11,6 +11,7 @@ import { AccessPage } from "./pages/AccessPage";
 import { TeamsPage } from "./pages/TeamsPage";
 import { SessionsPage } from "./pages/SessionsPage";
 import { SessionViewPage } from "./pages/SessionViewPage";
+import { SessionWatchPage } from "@/pages/SessionWatchPage";
 import { RecordingsPage } from "./pages/RecordingsPage";
 import { AuditPage } from "./pages/AuditPage";
 import { AccessLogPage } from "./pages/AccessLogPage";
@@ -98,6 +99,11 @@ export default function App() {
         <Route path="/teams" element={<TeamsPage />} />
         <Route path="/sessions" element={<SessionsPage />} />
         <Route path="/sessions/:id/view" element={<SessionViewPage />} />
+        {/* Watching somebody else's session is its own route, not a mode of the
+            view above: that page carries Terminate, and a supervisor who opened a
+            colleague's session to look at it must not be one button away from
+            ending their work. */}
+        <Route path="/sessions/:id/watch" element={<SessionWatchPage />} />
         <Route path="/recordings" element={<RecordingsPage />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="/access-log" element={<AccessLogPage />} />

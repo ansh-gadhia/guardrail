@@ -805,7 +805,11 @@ func run() error {
 		PortSuffix: cfg.HTTP.PublicPortSuffix(),
 		Gateway:    proxyGateway,
 		GrantKey:   grantSum[:],
-	})
+	}).
+		// Signs the short-lived grant a supervisor's browser presents when watching
+		// a session. Derived from the same signing key as the other transaction
+		// cookies, so watching needs nothing extra configured.
+		WithObserveSigner(security.NewCookieSigner(cfg.Auth.JWTSigningKey))
 	if cfg.HTTP.TunnelDomain != "" {
 		// Say once, at startup, exactly what DNS has to answer. The address is
 		// detected rather than configured — nothing in this stack hardcodes an IP,

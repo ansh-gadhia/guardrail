@@ -136,3 +136,29 @@ func (g *Gateway) observable(sessionID, orgID uuid.UUID) *telnetSession {
 	}
 	return s
 }
+
+// ObserveConsole serves the page a supervisor watches in.
+//
+// The same terminal the operator sees, in read-only mode: keystrokes and resizes
+// are not sent, and it says so in a banner. Reusing the console rather than
+// building a second viewer is what keeps the two renderings honest — a watcher
+// is looking at the identical xterm, fed the identical bytes.
+func (g *Gateway) ObserveConsole(w http.ResponseWriter, _ *http.Request, sid, orgID uuid.UUID) bool {
+	s := g.observable(sid, orgID)
+	if s == nil {
+		return false
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Never cached: it is a live view of somebody's work, and a stale copy in a
+	// shared browser is exactly the wrong thing to leave behind.
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(term.Page(term.Options{
+		SessionID:   sid.String(),
+		Device:      s.deviceLabel,
+		Watermark:   s.watermark,
+		Protocol:    "Telnet",
+		ReadOnly:    true,
+		WatchedUser: s.sess.WatermarkOr(),
+	})))
+	return true
+}

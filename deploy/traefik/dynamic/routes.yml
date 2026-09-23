@@ -15,10 +15,11 @@
 # The ports are the containers' own, not anything published on the host.
 http:
   routers:
-    # The API owns /api and /proxy (brokered device sessions), plus the health
+    # The API owns /api, /proxy (brokered device sessions) and /observe (a
+    # supervisor watching one, read-only), plus the health
     # probes, which must answer from the API rather than the static console.
     api:
-      rule: "PathPrefix(`/api`) || PathPrefix(`/proxy`) || Path(`/healthz`) || Path(`/readyz`)"
+      rule: "PathPrefix(`/api`) || PathPrefix(`/proxy`) || PathPrefix(`/observe`) || Path(`/healthz`) || Path(`/readyz`)"
       priority: 10
       entryPoints: [websecure]
       service: api

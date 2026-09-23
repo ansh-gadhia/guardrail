@@ -42,6 +42,8 @@ export function SessionsPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const has = useAuth((s) => s.has);
+  const canObserve = has("session:observe");
+  const meId = useAuth((st) => st.principal?.user_id);
   const canTerminate = has("session:terminate");
 
   const { data, isLoading, isError } = useQuery<Session[]>({
@@ -107,6 +109,8 @@ export function SessionsPage() {
             const uemail = userEmail.get(s.user_id ?? "") ?? s.user_email ?? "";
             const client = parseUA(s.user_agent);
             const exp = expiresIn(s.granted_until);
+            // Your own session is one you can drive. Anyone else's, you watch.
+            const mine = !!meId && s.user_id === meId;
             return (
             <div
               key={s.id}
@@ -174,14 +178,32 @@ export function SessionsPage() {
                     <IconTrash size={15} /> Terminate
                   </button>
                 )}
-                {s.status === "active" && (
-                  <button
-                    className="btn-primary"
-                    onClick={() => navigate(`/sessions/${s.id}/view?name=${encodeURIComponent(dname || "session")}`)}
-                  >
-                    <IconPlug size={15} /> Open
-                  </button>
-                )}
+                {s.status === "active" &&
+                  (mine ? (
+                    <button
+                      className="btn-primary"
+                      onClick={() => navigate(`/sessions/${s.id}/view?name=${encodeURIComponent(dname || "session")}`)}
+                    >
+                      <IconPlug size={15} /> Open
+                    </button>
+                  ) : canObserve ? (
+                    /* Somebody else's session. "Open" used to navigate to the
+                       proxy, which is scoped to whoever connected — so it showed a
+                       401 body instead of their work. Watching is a different
+                       power, and the button now says which one you are getting. */
+                    <button
+                      className="btn-primary"
+                      title={`Watch ${uemail || "this session"} live, read-only. They are not interrupted.`}
+                      onClick={() =>
+                        navigate(
+                          `/sessions/${s.id}/watch?name=${encodeURIComponent(dname || "session")}` +
+                            `&who=${encodeURIComponent(uemail || "")}`,
+                        )
+                      }
+                    >
+                      <IconMonitor size={15} /> Watch
+                    </button>
+                  ) : null)}
               </div>
             </div>
             );

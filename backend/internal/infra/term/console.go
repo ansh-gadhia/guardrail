@@ -55,6 +55,20 @@ type Options struct {
 	// Protocol names the transport in the page title and reconnect copy, e.g.
 	// "SSH" or "Telnet".
 	Protocol string
+	// ReadOnly renders the session for somebody WATCHING it rather than driving
+	// it: keystrokes are not sent, resizes are not sent, and the page says so.
+	//
+	// Not sending is the whole point. A supervisor's terminal that quietly
+	// transmitted would put a second keyboard on one PTY, interleaving two
+	// people's input into a transcript that attributes all of it to whoever
+	// opened the session. The gateway discards observer input as well — this is
+	// the near side of the same rule, so a viewer never sees their own typing
+	// echo locally and think it landed.
+	ReadOnly bool
+	// WatchedUser is who is being watched, named in the read-only banner. A
+	// supervisor should not have to cross-reference an id to know whose keyboard
+	// they are looking at.
+	WatchedUser string
 }
 
 // Page returns the self-contained terminal served at a session root.
@@ -77,7 +91,17 @@ func Page(o Options) string {
 		"__PROTO__", jsString(proto),
 		"__PROTO_TEXT__", htmlEscape(proto),
 		"__CLOSE_DEVICE_GONE__", itoa(CloseDeviceGone),
+		"__READONLY__", boolJS(o.ReadOnly),
+		"__WATCHED_USER__", jsString(o.WatchedUser),
 	).Replace(consoleTmpl)
+}
+
+// boolJS renders a Go bool as a JS literal.
+func boolJS(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 // jsString renders a Go string as a JS literal. json.Marshal escapes the
@@ -118,6 +142,16 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
 <style>
  html,body{margin:0;height:100%;background:#0b1220;overflow:hidden}
  #term{position:fixed;inset:0;padding:6px 8px 8px}
+ /* The read-only banner is pinned and unmissable on purpose. Somebody watching a
+    colleague should never be in doubt about which of the two they are doing, and
+    a supervisor who believes they are driving will try to type into a terminal
+    that is deliberately ignoring them. */
+ #ro{position:fixed;top:0;left:0;right:0;z-index:30;display:flex;align-items:center;
+     gap:8px;padding:5px 10px;background:#1e293b;border-bottom:1px solid #334155;
+     color:#cbd5e1;font:12px/1.4 ui-sans-serif,system-ui,sans-serif}
+ #ro #rodot{width:7px;height:7px;border-radius:50%;background:#38bdf8;flex:none;
+            box-shadow:0 0 0 3px rgba(56,189,248,.18)}
+ body.ro #term{top:27px;padding-top:4px}
  #status{position:fixed;top:8px;left:50%;transform:translateX(-50%);color:#9fb0c8;
    font:13px system-ui;background:rgba(15,23,42,.92);padding:6px 12px;border-radius:6px;z-index:5;
    display:flex;align-items:center;gap:10px;box-shadow:0 1px 12px rgba(0,0,0,.4)}
@@ -133,6 +167,7 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
 <div id="term"></div>
 <div id="wm"></div>
 <div id="status"><span id="msg">connecting…</span><button id="again" hidden>Reconnect</button></div>
+<div id="ro" hidden><span id="rodot"></span><span id="rotext"></span></div>
 <script>__XTERM_JS__</script>
 <script>
 (function(){
@@ -206,6 +241,18 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
   // evidence of nothing.
   function notice(text){ term.write('\r\n\x1b[38;5;245m*** ' + text + ' ***\x1b[0m\r\n'); }
 
+  var READONLY = __READONLY__;
+  var WATCHED_USER = __WATCHED_USER__;
+
+  if (READONLY) {
+    document.body.classList.add('ro');
+    document.getElementById('rotext').textContent =
+      WATCHED_USER ? ('Watching ' + WATCHED_USER + ' \u2014 read-only. Your keystrokes are not sent.')
+                   : 'Watching a live session \u2014 read-only. Your keystrokes are not sent.';
+    document.getElementById('ro').hidden = false;
+    document.title = 'Watching \u2014 GuardRail __PROTO_TEXT__ Session';
+  }
+
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   var base = location.pathname.replace(/\/$/, '');
   var url = proto + '//' + location.host + base + '/__ws__';
@@ -219,7 +266,11 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
   var MAX_AUTO = 6;        // ~30s of backoff before we stop and ask
 
   function send(o){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
-  function sendFit(){ var g = fit(); if (g) send({ t:'r', cols:g.cols, rows:g.rows }); }
+  // A watcher must not resize the operator's terminal. Their own xterm still
+  // fits locally — the grid the device is drawing for simply may not match their
+  // window, which is the correct trade: the person doing the work owns the
+  // geometry.
+  function sendFit(){ if (READONLY) return; var g = fit(); if (g) send({ t:'r', cols:g.cols, rows:g.rows }); }
 
   function connect(){
     clearTimeout(timer);
@@ -288,6 +339,10 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
   });
 
   term.onData(function(d){
+    // A watcher sends nothing. The gateway discards observer input too; this is
+    // the near side of the same rule, so keystrokes do not echo locally and read
+    // as though they reached the device.
+    if (READONLY) return;
     if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t:'i', d:d }));
   });
 
