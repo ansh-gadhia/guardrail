@@ -262,7 +262,7 @@ function QueueTab() {
 // "Allow all time" is deliberately labelled with what it actually does: it is
 // not an answer to this request, it is a standing grant that will still be there
 // in six months.
-function DecideModal({
+export function DecideModal({
   request,
   onClose,
   onDone,

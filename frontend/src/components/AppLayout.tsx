@@ -6,6 +6,7 @@ import { useTheme } from "@/store/theme";
 import { useVersion } from "@/hooks/useVersion";
 import { useBranding } from "@/hooks/useBranding";
 import { api } from "@/lib/api";
+import { ApprovalAlert } from "@/components/ApprovalAlert";
 import type { AccessRequest, Session } from "@/lib/types";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { CommandPalette, type Command } from "./CommandPalette";
@@ -106,10 +107,30 @@ export function AppLayout() {
     queryKey: ["access-requests", "pending"],
     queryFn: async () =>
       (await api.get<{ requests: AccessRequest[] }>("/access-requests?pending=true")).data.requests ?? [],
-    refetchInterval: 30000,
+    // Five seconds, and in the background too.
+    //
+    // It was thirty, and React Query stops polling entirely when a tab is not
+    // focused — so an approver working in another tab learned about a request
+    // only when they happened to click back, and somebody could wait minutes on
+    // a person who would have said yes at once. A person waiting on an approval
+    // is the case this whole screen exists for; the query is one small read.
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
     enabled: !!principal && (principal.is_super_admin || has("approval:decide")),
   });
   const approvalCount = pendingApprovals.data?.length ?? 0;
+
+  // A background tab has no badge anybody can see. The title is the one thing
+  // that shows in the tab strip, so it carries the count while there is one.
+  useEffect(() => {
+    // The title the page had before any count was added — so a deployment's own
+    // branding survives, and the prefix is only ever ours to add and remove.
+    const base = document.title.replace(/^\(\d+\) Approval needed · /, "");
+    document.title = approvalCount > 0 ? `(${approvalCount}) Approval needed · ${base}` : base;
+    return () => {
+      document.title = base;
+    };
+  }, [approvalCount]);
 
   const commands: Command[] = useMemo(() => {
     const navCmds: Command[] = nav.map((n) => ({
@@ -166,7 +187,15 @@ export function AppLayout() {
                       )
                     }
                   >
-                    <Icon size={17} />
+                    <span className="relative">
+                      <Icon size={17} />
+                      {/* Collapsed, there is no room for the count — but "somebody is
+                          waiting on you" must not disappear just because the sidebar
+                          got narrower. */}
+                      {collapsed && n.to === "/approvals" && approvalCount > 0 && (
+                        <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-warn ring-2 ring-surface-1" />
+                      )}
+                    </span>
                     {!collapsed && <span className="flex-1">{n.label}</span>}
                     {!collapsed && n.to === "/sessions" && liveCount > 0 && <Badge tone="success">{liveCount}</Badge>}
                     {!collapsed && n.to === "/approvals" && approvalCount > 0 && <Badge tone="warn">{approvalCount}</Badge>}
@@ -293,6 +322,8 @@ export function AppLayout() {
         <main key={location.pathname} className="page-enter isolate mx-auto w-full max-w-7xl flex-1 overflow-auto px-4 pb-12 pt-6 sm:px-5">
           <Outlet />
         </main>
+        {/* Wherever the approver is, a request that just arrived comes to them. */}
+        <ApprovalAlert pending={pendingApprovals.data} />
         <Footer />
       </div>
 
