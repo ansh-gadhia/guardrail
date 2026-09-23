@@ -53,6 +53,28 @@ const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-
 // load any resource.
 const apiCSP = "default-src 'none'; frame-ancestors 'none'"
 
+// observeCSP governs the read-only session viewers a supervisor watches in.
+//
+// These are GuardRail's own pages — the xterm console and the canvas viewer —
+// and they are entirely self-contained: the terminal embeds xterm's script and
+// stylesheet inline, and the canvas decodes JPEG frames straight from the socket
+// with createImageBitmap. Nothing is fetched, so everything is denied by default
+// and only what the pages genuinely use is allowed.
+//
+// The two differences from the console's own policy are the point:
+//
+//	'unsafe-inline' for scripts, because the pages ARE inline scripts. Under
+//	script-src 'self' they were served, framed, and then did nothing at all.
+//
+//	frame-ancestors 'self', because the console frames them. Under 'none' the
+//	browser refused the frame outright and reported it as the host refusing to
+//	connect, which reads like a network fault and is not one. 'self' keeps the
+//	protection that matters: only this origin may frame a live session, so no
+//	other site can embed somebody's terminal.
+const observeCSP = "default-src 'none'; script-src 'unsafe-inline'; " +
+	"style-src 'unsafe-inline'; img-src data: blob:; font-src data:; " +
+	"connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+
 // SecurityHeaders sets conservative, secure-by-default response headers. The CSP
 // is chosen per route class: strict for the JSON API, a same-origin policy for
 // the served SPA, and no GuardRail-imposed CSP/framing rules for the device proxy
@@ -111,6 +133,15 @@ func SecurityHeaders(tunnelDomain string) gin.HandlerFunc {
 			// device does not receive it either — the proxy director rewrites
 			// Referer/Origin to the device's own origin before forwarding.
 			h.Set("Referrer-Policy", "same-origin")
+		case p == "/observe" || strings.HasPrefix(p, "/observe/"):
+			// A supervisor watching somebody else's session, in a page this server
+			// wrote. Framed by the console, so it cannot take the default DENY —
+			// but it is not a device page either, so it does not get the proxy
+			// class's "let the upstream decide" treatment. It gets a policy of its
+			// own, tight enough to be worth having.
+			h.Set("X-Frame-Options", "SAMEORIGIN")
+			h.Set("Cross-Origin-Resource-Policy", "same-origin")
+			h.Set("Content-Security-Policy", observeCSP)
 		case isAPIPath(p):
 			h.Set("X-Frame-Options", "DENY")
 			h.Set("Cross-Origin-Opener-Policy", "same-origin")

@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -180,5 +181,58 @@ func TestSecurityHeadersKeepsConsolePolicyOffTunnelHost(t *testing.T) {
 	}
 	if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
 		t.Errorf("X-Frame-Options = %q, want DENY", got)
+	}
+}
+
+// The watch viewers are framed by the console, so they must not carry the
+// default DENY.
+//
+// Under it the browser refused the frame and reported it as the HOST refusing to
+// connect — "10.200.10.57 refused to connect" — which reads as a network fault
+// and sends you looking at firewalls and ports. It was a response header all
+// along.
+func TestSecurityHeadersLetTheConsoleFrameTheWatchViewer(t *testing.T) {
+	r := testEngine()
+	r.Use(SecurityHeaders(""))
+	r.GET("/observe/:sid/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/observe/abc-123/", nil))
+
+	if got := w.Header().Get("X-Frame-Options"); got == "DENY" {
+		t.Error("X-Frame-Options is DENY on a watch viewer; the console cannot frame it " +
+			"and the browser reports it as the host refusing to connect")
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("frame-ancestors 'none' on a watch viewer refuses the console's frame: %q", csp)
+	}
+	if !strings.Contains(csp, "frame-ancestors 'self'") {
+		t.Errorf("frame-ancestors should be 'self' so only this origin may frame a live session: %q", csp)
+	}
+	// The pages ARE inline scripts. Under script-src 'self' they are framed and
+	// then do nothing, which is harder to diagnose than being refused outright.
+	if !strings.Contains(csp, "script-src 'unsafe-inline'") {
+		t.Errorf("the watch viewers are inline scripts; this CSP would stop them running: %q", csp)
+	}
+	// And the socket the viewer reads from has to be reachable.
+	if !strings.Contains(csp, "connect-src 'self'") {
+		t.Errorf("connect-src must allow the session WebSocket: %q", csp)
+	}
+}
+
+// Nothing else gains the ability to be framed.
+func TestSecurityHeadersStillDenyFramingEverywhereElse(t *testing.T) {
+	r := testEngine()
+	r.Use(SecurityHeaders(""))
+	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+	r.GET("/api/v1/sessions", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for _, p := range []string{"/", "/api/v1/sessions"} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, p, nil))
+		if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("X-Frame-Options on %s = %q, want DENY", p, got)
+		}
 	}
 }
