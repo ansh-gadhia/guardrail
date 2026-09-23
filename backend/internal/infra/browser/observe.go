@@ -113,3 +113,14 @@ func (g *Gateway) observable(sessionID, orgID uuid.UUID) *bSession {
 	}
 	return bs
 }
+
+// WatcherCount reports how many people are watching a live isolated session.
+func (g *Gateway) WatcherCount(sid uuid.UUID) (int, bool) {
+	g.mu.RLock()
+	bs := g.sessions[sid]
+	g.mu.RUnlock()
+	if bs == nil || bs.obs == nil {
+		return 0, false
+	}
+	return bs.obs.Count(), true
+}

@@ -40,6 +40,9 @@ type SessionObserver interface {
 	Observe(w http.ResponseWriter, r *http.Request, sid, orgID uuid.UUID) bool
 	// ObserveConsole serves the page the supervisor watches in.
 	ObserveConsole(w http.ResponseWriter, r *http.Request, sid, orgID uuid.UUID) bool
+	// WatcherCount is how many people are watching right now. false => not this
+	// gateway's session.
+	WatcherCount(sid uuid.UUID) (int, bool)
 }
 
 // SessionMux dispatches a request to whichever gateway is holding the session.
@@ -91,6 +94,18 @@ func (m SessionMux) Observe(w http.ResponseWriter, r *http.Request, sid, orgID u
 		}
 	}
 	return false
+}
+
+// WatcherCount asks whichever gateway holds the session how many are watching.
+func (m SessionMux) WatcherCount(sid uuid.UUID) (int, bool) {
+	for _, s := range m {
+		if o, ok := s.(SessionObserver); ok {
+			if n, found := o.WatcherCount(sid); found {
+				return n, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // ObserveConsole serves the watch page from the owning gateway.
@@ -462,7 +477,21 @@ func (h *AccessHandler) get(c *gin.Context) {
 		failAccess(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, sessionDTO(s))
+	dto := sessionDTO(s)
+	// How many people are watching right now. Put on the session read because
+	// that is what the operator's own view already polls, so they learn within a
+	// few seconds that somebody has started looking — without a second request,
+	// and without a push channel the rest of the view does not need.
+	//
+	// A count and never a name. The person working is owed knowing THAT they are
+	// watched; who is watching is in the audit trail for whoever is entitled to
+	// read it.
+	if obs, ok := h.gateway.(SessionObserver); ok {
+		if n, found := obs.WatcherCount(s.ID); found {
+			dto["watchers"] = n
+		}
+	}
+	c.JSON(http.StatusOK, dto)
 }
 
 func (h *AccessHandler) events(c *gin.Context) {

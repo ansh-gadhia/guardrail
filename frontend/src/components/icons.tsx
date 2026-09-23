@@ -96,6 +96,10 @@ export const IconColumns = (p: IconProps) => (
 export const IconRows = (p: IconProps) => (
   <svg {...base(p)}><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9.5h18M3 14.5h18" /></svg>
 );
+// The live-view eye: somebody is watching this.
+export const IconEye = (p: IconProps) => (
+  <svg {...base(p)}><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></svg>
+);
 export const IconMonitor = (p: IconProps) => (
   <svg {...base(p)}><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></svg>
 );

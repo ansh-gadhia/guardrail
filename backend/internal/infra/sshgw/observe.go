@@ -149,3 +149,15 @@ func (g *Gateway) ObserveConsole(w http.ResponseWriter, _ *http.Request, sid, or
 	})))
 	return true
 }
+
+// WatcherCount reports how many people are watching a live session, for the
+// operator's own view. false when the session is not this gateway's.
+func (g *Gateway) WatcherCount(sid uuid.UUID) (int, bool) {
+	g.mu.RLock()
+	s := g.sessions[sid]
+	g.mu.RUnlock()
+	if s == nil || s.obs == nil {
+		return 0, false
+	}
+	return s.obs.Count(), true
+}

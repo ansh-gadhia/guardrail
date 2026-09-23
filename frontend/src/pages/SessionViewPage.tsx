@@ -4,7 +4,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, getAccessToken } from "@/lib/api";
 import { Button, Badge, cn } from "@/components/ui";
 import { toast } from "@/components/Toast";
-import { IconTrash, IconMaximize, IconMinimize, IconRefresh, IconExternal } from "@/components/icons";
+import { IconTrash, IconMaximize, IconMinimize, IconRefresh, IconExternal, IconEye } from "@/components/icons";
 import { DesktopPlayer } from "@/components/DesktopPlayer";
 
 // SessionViewPage embeds the brokered device UI in a same-origin iframe. The
@@ -37,11 +37,18 @@ export function SessionViewPage() {
   // else terminated it, or its window expired — the proxy is already refusing
   // requests server-side, so drop a blocking overlay instead of showing a dead
   // (or silently 410-ing) iframe.
-  const status = useQuery<{ status: string; protocol: string; watermark?: string }>({
+  const status = useQuery<{ status: string; protocol: string; watermark?: string; watchers?: number }>({
     queryKey: ["session", id],
     queryFn: async () =>
-      (await api.get<{ status: string; protocol: string; watermark?: string }>(`/sessions/${id}`)).data,
+      (await api.get<{ status: string; protocol: string; watermark?: string; watchers?: number }>(`/sessions/${id}`))
+        .data,
     refetchInterval: 4000,
+    // Keep polling when this tab is not the focused one. React Query pauses by
+    // default, and that silently froze both things this poll exists for: the
+    // "session ended" overlay, and the count of people watching. Somebody who
+    // alt-tabs to read documentation mid-session is still in the session, and is
+    // still owed knowing that it ended — or that somebody started watching.
+    refetchIntervalInBackground: true,
     enabled: !!id,
     retry: false,
   });
@@ -160,6 +167,20 @@ export function SessionViewPage() {
           <div className="flex items-center gap-2">
             <h1 className="truncate font-display text-lg font-semibold tracking-tight text-fg">{name}</h1>
             {ended ? <Badge tone="danger">ended</Badge> : <Badge tone="success" dot>live</Badge>}
+            {/* Who can see you. A live stream's viewer count, for the same reason:
+                somebody working in a privileged session is owed knowing they are
+                being watched, and a number in the corner they can glance at is
+                the honest way to tell them. A count, never a name — who is
+                watching is in the audit trail. */}
+            {!ended && (status.data?.watchers ?? 0) > 0 && (
+              <span
+                className="flex items-center gap-1 rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent"
+                title={`${status.data?.watchers} ${status.data?.watchers === 1 ? "person is" : "people are"} watching this session live, read-only`}
+              >
+                <IconEye size={13} />
+                {status.data?.watchers}
+              </span>
+            )}
           </div>
           <p className="font-mono text-xs text-faint">session {id.slice(0, 8)}…</p>
         </div>

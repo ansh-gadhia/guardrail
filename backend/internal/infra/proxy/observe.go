@@ -137,3 +137,14 @@ func (g *HTTPGateway) observable(sessionID, orgID uuid.UUID) *sessionCtx {
 	}
 	return sc
 }
+
+// WatcherCount reports how many people are watching a proxied session's activity.
+func (g *HTTPGateway) WatcherCount(sid uuid.UUID) (int, bool) {
+	g.mu.RLock()
+	sc, ok := g.sessions[sid]
+	g.mu.RUnlock()
+	if !ok || sc.obs == nil {
+		return 0, false
+	}
+	return sc.obs.Count(), true
+}

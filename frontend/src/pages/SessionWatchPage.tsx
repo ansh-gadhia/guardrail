@@ -50,6 +50,9 @@ export function SessionWatchPage() {
     queryKey: ["session", id],
     queryFn: async () => (await api.get<{ status: string; protocol: string }>(`/sessions/${id}`)).data,
     refetchInterval: 4000,
+    // As on the operator's own view: a watcher who switches tabs must still be
+    // told when the session they are watching ends.
+    refetchIntervalInBackground: true,
     enabled: !!id,
     retry: false,
   });
