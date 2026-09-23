@@ -122,6 +122,12 @@ type guacSession struct {
 	recordingName string
 	recording     *access.Recording
 
+	// connID is guacd's own identifier for this connection, from its `ready`
+	// reply. It is what lets a supervisor JOIN the session rather than open a
+	// second one: `select $<connID>` attaches to an existing connection, which is
+	// the mechanism Guacamole's own screen sharing is built on.
+	connID string
+
 	mu       sync.Mutex
 	attached bool
 	closed   bool
@@ -301,6 +307,9 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		return access.LiveSession{}, err
 	}
 	sess.conn = conn
+	// Kept so a supervisor can join this connection instead of opening a second
+	// one against the same desktop.
+	sess.connID = conn.ID
 
 	g.mu.Lock()
 	g.sessions[s.ID] = sess

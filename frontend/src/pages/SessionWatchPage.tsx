@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { Badge } from "@/components/ui";
 import { toast } from "@/components/Toast";
 import { IconMonitor, IconMaximize, IconMinimize, IconRefresh } from "@/components/icons";
+import { DesktopPlayer } from "@/components/DesktopPlayer";
 
 /* SessionWatchPage is for looking at somebody else's live session.
  *
@@ -34,7 +35,8 @@ export function SessionWatchPage() {
   // and re-audits, which is why the Reconnect button mints a new one rather than
   // reusing this.
   const grant = useMutation({
-    mutationFn: async () => (await api.post<{ console_url: string }>(`/sessions/${id}/observe`, {})).data,
+    mutationFn: async () =>
+      (await api.post<{ console_url: string; protocol: string }>(`/sessions/${id}/observe`, {})).data,
     onError: () => toast.error("Could not start watching this session"),
   });
   const start = grant.mutate;
@@ -52,6 +54,11 @@ export function SessionWatchPage() {
     retry: false,
   });
   const ended = !!status.data && status.data.status !== "active";
+  // Which renderer. Taken from the grant when it is there and the session record
+  // otherwise, so the choice is made from what the server said rather than from
+  // a guess at the device.
+  const proto = grant.data?.protocol || status.data?.protocol;
+  const isDesktop = proto === "rdp" || proto === "vnc";
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -119,15 +126,24 @@ export function SessionWatchPage() {
             </div>
           </div>
         ) : grant.data ? (
-          <iframe
-            key={frameKey}
-            title={`Watching ${name}`}
-            src={grant.data.console_url}
-            className="h-full w-full border-0"
-            /* No allow-forms and no allow-popups: this frame only renders a
-               terminal somebody else is typing into. */
-            sandbox="allow-scripts allow-same-origin"
-          />
+          isDesktop ? (
+            /* A desktop is drawing instructions decoded onto a canvas by this
+               app, so there is no server page to frame — the same renderer the
+               operator uses, with its input unbound. Framing the gateway's JSON
+               description of the session instead is exactly how "Open" used to
+               show a raw response body. */
+            <DesktopPlayer key={frameKey} sessionId={id} readOnly watermark={who ? `watching · ${who}` : undefined} />
+          ) : (
+            <iframe
+              key={frameKey}
+              title={`Watching ${name}`}
+              src={grant.data.console_url}
+              className="h-full w-full border-0"
+              /* No allow-forms and no allow-popups: this frame only renders
+                 output somebody else is producing. */
+              sandbox="allow-scripts allow-same-origin"
+            />
+          )
         ) : (
           <div className="grid h-full place-items-center p-6 text-center text-sm text-muted">
             {grant.isPending ? "Starting the stream…" : "Could not start watching this session."}

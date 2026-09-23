@@ -13,10 +13,29 @@ import (
 // select; the canvas is then CSS-scaled to fit the viewport. No device markup
 // ever reaches this page — only pixels.
 func consolePage(sid string, w, h int64) string {
+	return canvasPage(sid, w, h, false)
+}
+
+// observePage is the same viewer for somebody WATCHING the session.
+//
+// The same page rather than a second one, deliberately: a supervisor should be
+// looking at exactly what the operator is looking at, and two renderers drift.
+// What changes is that nothing is sent — no mouse, no keyboard, no paste, no
+// dialog answers — and the page says so.
+func observePage(sid string, w, h int64) string {
+	return canvasPage(sid, w, h, true)
+}
+
+func canvasPage(sid string, w, h int64, readOnly bool) string {
+	ro := "false"
+	if readOnly {
+		ro = "true"
+	}
 	return strings.NewReplacer(
 		"__SID__", sid,
 		"__DEV_W__", strconv.FormatInt(w, 10),
 		"__DEV_H__", strconv.FormatInt(h, 10),
+		"__READONLY__", ro,
 	).Replace(consoleTmpl)
 }
 
@@ -26,6 +45,14 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
 <style>
  html,body{margin:0;height:100%;background:#0b1220;overflow:hidden}
  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+ /* Pinned and unmissable: a supervisor who believes they are driving will click
+    into a device that is deliberately ignoring them. */
+ #robar{position:fixed;top:0;left:0;right:0;z-index:40;display:flex;align-items:center;
+        gap:8px;padding:5px 10px;background:#1e293b;border-bottom:1px solid #334155;
+        color:#cbd5e1;font:12px/1.4 ui-sans-serif,system-ui,sans-serif}
+ #robar #rodot{width:7px;height:7px;border-radius:50%;background:#38bdf8;flex:none;
+               box-shadow:0 0 0 3px rgba(56,189,248,.18)}
+ body.ro #wrap{top:27px}
  #screen{background:#000;max-width:100%;max-height:100%;box-shadow:0 0 40px rgba(0,0,0,.6);cursor:default;outline:none}
  #status{position:fixed;top:8px;left:50%;transform:translateX(-50%);color:#9fb0c8;
    font:13px system-ui;background:rgba(15,23,42,.9);padding:6px 12px;border-radius:6px;z-index:5}
@@ -46,6 +73,7 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
    background:#1e293b;color:#e2e8f0}
  #dlgok{background:#0ea5e9;border-color:#0ea5e9;color:#04202e;font-weight:600}
 </style></head><body>
+<div id="robar" hidden><span id="rodot"></span><span id="rotext">Watching — read-only. Nothing you type or click is sent.</span></div>
 <div id="wrap"><canvas id="screen" width="__DEV_W__" height="__DEV_H__" tabindex="0"></canvas></div>
 <div id="status">Connecting to session…</div>
 <button id="paste" type="button" title="Paste your clipboard into the device (Ctrl+V goes to your own browser, not the device)">Paste clipboard</button>
@@ -97,7 +125,14 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
    pending=ev.data; // discard any earlier undrawn frame; only the newest matters
    schedule();
  };
- function send(o){ if(ws.readyState===1) ws.send(JSON.stringify(o)); }
+ var READONLY=__READONLY__;
+ if(READONLY){ document.body.classList.add('ro'); document.getElementById('robar').hidden=false;
+               document.title='Watching — GuardRail isolated session'; }
+ /* One guard covers mouse, keyboard, paste AND dialog answers, because every one
+    of them goes through send(). A watcher transmits nothing: the gateway discards
+    their input anyway, and not sending it is what stops the page acting locally
+    as though it had landed. */
+ function send(o){ if(READONLY) return; if(ws.readyState===1) ws.send(JSON.stringify(o)); }
 
  /* Device dialogs. The device's alert/confirm/prompt runs in the browser on the
     server, so the operator would never see it — and until it is answered the

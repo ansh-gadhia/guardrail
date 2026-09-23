@@ -25,6 +25,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/guardrail/guardrail/internal/domain/access"
+
+	"github.com/guardrail/guardrail/internal/infra/term"
 )
 
 // sessionCtx holds the live proxy state for one session (in-memory only).
@@ -43,6 +45,18 @@ type sessionCtx struct {
 	// auth is the injected Authorization value, derived once and erasable. The
 	// credential itself is deliberately NOT held: see authheader.go.
 	auth *authHeader
+
+	// orgID scopes this session. Held so a supervisor's watch can be checked
+	// against the tenant without a database round trip per attach.
+	orgID uuid.UUID
+	// obs is the set of supervisors watching this session's activity.
+	//
+	// A reverse-proxied session has no stream to mirror: it is discrete HTTP
+	// requests, not a terminal's bytes or a desktop's frames. What CAN be watched
+	// live is what the operator is reaching, so the request line is broadcast as
+	// it is recorded — which is the same thing the playback timeline shows
+	// afterwards, delivered as it happens.
+	obs *term.Observers
 }
 
 // HTTPGateway implements access.Gateway for http/https targets.
@@ -175,6 +189,7 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 	g.sessions[s.ID] = &sessionCtx{
 		target: target, proxy: rp, tunnelProxy: tp,
 		token: token, headers: ep.CustomHeaders, expiresAt: until, auth: auth,
+		orgID: s.OrganizationID, obs: term.NewObservers(),
 	}
 	g.mu.Unlock()
 
@@ -283,6 +298,8 @@ func (g *HTTPGateway) Serve(w http.ResponseWriter, req *http.Request, sessionID 
 	if g.events != nil {
 		_ = g.events.RecordEvent(req.Context(), sessionID, "url_change", timelineData(req.Method, upstreamPath))
 	}
+	// And to anyone watching, as it happens rather than on playback.
+	sc.watch(req.Method, upstreamPath)
 
 	// Rewrite to the upstream-relative path and proxy.
 	proxied := req.Clone(req.Context())
@@ -336,6 +353,7 @@ func (g *HTTPGateway) ServeTunnel(w http.ResponseWriter, req *http.Request, sess
 	}
 	if g.events != nil {
 		_ = g.events.RecordEvent(req.Context(), sessionID, "url_change", timelineData(req.Method, req.URL.RequestURI()))
+		sc.watch(req.Method, req.URL.RequestURI())
 	}
 	sc.tunnelProxy.ServeHTTP(w, req)
 	return true

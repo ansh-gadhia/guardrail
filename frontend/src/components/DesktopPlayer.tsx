@@ -44,10 +44,17 @@ export function DesktopPlayer({
   sessionId,
   watermark,
   onEnded,
+  /* readOnly renders somebody else's desktop for WATCHING. No mouse, no
+     keyboard, no clipboard: guacd will accept input on a joined connection —
+     that is what makes Guacamole's own sharing collaborative — so the restraint
+     has to be on both sides. The gateway discards it; this is why the browser
+     never sends it, so a supervisor's clicks do not appear to do nothing. */
+  readOnly = false,
 }: {
   sessionId: string;
   watermark?: string;
   onEnded?: () => void;
+  readOnly?: boolean;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   // Held so the paste control can open a clipboard stream on the live client
@@ -63,7 +70,11 @@ export function DesktopPlayer({
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     // The same sentinel path the gateway mounts the socket on, under the session
     // prefix so the cookie is sent.
-    const url = `${scheme}://${window.location.host}/proxy/${sessionId}/__ws__`;
+    // Watching goes through /observe/<sid>/, which carries the supervisor's own
+    // scoped grant. /proxy/<sid>/ is the operator's and would 401 here.
+    const url = readOnly
+      ? `${scheme}://${window.location.host}/observe/${sessionId}/__ws__`
+      : `${scheme}://${window.location.host}/proxy/${sessionId}/__ws__`;
 
     const tunnel = new Guacamole.WebSocketTunnel(url);
     const client = new Guacamole.Client(tunnel);
@@ -108,7 +119,12 @@ export function DesktopPlayer({
     // draws its own. Skipping it leaves two cursors on screen, one of them
     // always slightly behind.
     const mouse = new Guacamole.Mouse(display.getElement());
-    mouse.onEach(["mousedown", "mouseup", "mousemove"], () => {
+    // A watcher binds neither mouse nor keyboard. Nothing else in this effect
+    // reaches the device, so display-only is exactly what is left — and the
+    // cleanup below still runs, because reset() and null-assignment on unbound
+    // handlers are no-ops.
+    if (!readOnly)
+      mouse.onEach(["mousedown", "mouseup", "mousemove"], () => {
       display.showCursor(false);
       // The second argument is not optional in practice, it just looks it.
       // Guacamole.Mouse reports where the pointer is on the *page*, in CSS
@@ -125,8 +141,10 @@ export function DesktopPlayer({
     // focus on its own, and requiring a click before the keyboard works is the
     // kind of papercut that gets reported as "typing doesn't work".
     const keyboard = new Guacamole.Keyboard(document);
-    keyboard.onkeydown = (sym: number) => client.sendKeyEvent(1, sym);
-    keyboard.onkeyup = (sym: number) => client.sendKeyEvent(0, sym);
+    if (!readOnly) {
+      keyboard.onkeydown = (sym: number) => client.sendKeyEvent(1, sym);
+      keyboard.onkeyup = (sym: number) => client.sendKeyEvent(0, sym);
+    }
 
     // Follow the container rather than scaling a fixed canvas: a 1280x800 desktop
     // stretched over a 4K screen is unreadable, and unreadable evidence is not
@@ -191,7 +209,7 @@ export function DesktopPlayer({
       if (display.getElement().parentNode === mount) mount.removeChild(display.getElement());
       clientRef.current = null;
     };
-  }, [sessionId, onEnded]);
+  }, [sessionId, onEnded, readOnly]);
 
   // Bridge the operator's clipboard into the session. The browser will not let a
   // remote canvas read the system clipboard on its own — nothing types into a

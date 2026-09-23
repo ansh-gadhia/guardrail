@@ -121,6 +121,15 @@ type bSession struct {
 	w, h    int64
 	expires time.Time
 	orgID   uuid.UUID
+	// obs is the set of read-only supervisors watching this session, and the most
+	// recent frame a newly-arrived one is shown first.
+	//
+	// Separate from `frames` because that is a single-consumer queue: a second
+	// reader on it would STEAL frames from the operator, so the display would
+	// flicker between the two. Watching has to be a fan-out, not a second
+	// consumer.
+	obs *frameObservers
+
 	// rec captures frames for playback. Nil when recording is not configured.
 	rec *recorder
 	// recording is the DB row the captured artifacts belong to.
@@ -149,6 +158,12 @@ type bSession struct {
 // Safe because there is exactly one producer (the per-target screencast
 // callback runs serially); the drain-then-send needs no retry loop.
 func pushFrame(bs *bSession, data []byte) {
+	// Supervisors first, and unconditionally: their fan-out is a broadcast, not a
+	// queue, so it neither competes with the operator's frame below nor is skipped
+	// by the drop-oldest path when the operator's own viewer is behind.
+	if bs.obs != nil {
+		bs.obs.Broadcast(data)
+	}
 	select {
 	case bs.frames <- data:
 		return
@@ -375,6 +390,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 	}
 	bs := &bSession{
 		tabCtx: tabCtx, cancel: cancel, token: randomToken(),
+		obs: newFrameObservers(),
 		// A shallow buffer on purpose. The client now coalesces to the newest
 		// frame per repaint, so queueing more here only lets a hitch replay stale
 		// frames before the fresh one; two slots give the writer a little pipelining
@@ -573,6 +589,11 @@ func (g *Gateway) End(_ context.Context, sessionID uuid.UUID) error {
 	g.mu.Unlock()
 	if bs == nil {
 		return nil
+	}
+	// Drop the supervisors with it, rather than leaving them on a frozen frame
+	// with no indication the session is over.
+	if bs.obs != nil {
+		bs.obs.CloseAll()
 	}
 	if bs.rec != nil && bs.recording != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
