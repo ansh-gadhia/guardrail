@@ -490,6 +490,25 @@ func (s *Service) Terminate(ctx context.Context, actor iam.Claims, sessionID uui
 	if err != nil {
 		return err
 	}
+	// Ending somebody ELSE's session is a supervisory act and is checked as one.
+	//
+	// session:terminate on its own is not enough, and treating it as enough is
+	// how an operator came to be able to cut an administrator off mid-command.
+	// The permission exists so that people can end their own work — every role
+	// that can connect has it — and org scope was the only other thing standing
+	// in the way, which means "anyone in the tenant" could end anyone's session.
+	//
+	// The rank that may is the same one that may watch: this product already
+	// decides who outranks whom, for approvals, and a session is exactly the kind
+	// of thing that hierarchy exists to govern.
+	if !CanActOnAnotherUsersSession(actor, sess.UserID) {
+		s.recordAuditDetail(ctx, actor, "session.end", sess, meta, audit.ResultDenied,
+			map[string]any{
+				"reason":       "not your session, and your role does not outrank its owner",
+				"session_user": sess.UserID.String(),
+			})
+		return access.ErrForbidden
+	}
 	if err := s.sessions.UpdateStatus(ctx, scopeOf(actor), sessionID, access.StatusEnded, reason, s.clock.Now()); err != nil {
 		return err
 	}
@@ -1304,4 +1323,27 @@ func (c *policyCache) forget(orgID uuid.UUID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.entries, orgID)
+}
+
+// SupervisorRank is the approval rank at which somebody may act on another
+// person's session — watch it, or end it.
+//
+// 50 is Organization Admin in the shipped role set. It is the same number the
+// approval gate uses to decide who may approve whose access request, and
+// deliberately so: the question "may this person overrule that one" already has
+// an answer in this product, and a session is not a different question.
+const SupervisorRank = 50
+
+// CanActOnAnotherUsersSession reports whether the actor may act on a session
+// belonging to owner.
+//
+// Your own session is always yours to end. Somebody else's needs rank: a super
+// admin, or a role that outranks an operator. Permission alone is not the test —
+// session:terminate is held by everyone who can connect, because everyone who
+// can connect must be able to stop.
+func CanActOnAnotherUsersSession(actor iam.Claims, owner uuid.UUID) bool {
+	if uuid.UUID(actor.UserID) == owner {
+		return true
+	}
+	return actor.IsSuperAdmin || actor.ApprovalLevel >= SupervisorRank
 }

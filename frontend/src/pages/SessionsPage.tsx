@@ -29,6 +29,11 @@ function parseUA(ua?: string): string {
   else if (/linux/i.test(ua)) os = "Linux";
   return os ? `${b} · ${os}` : b;
 }
+/* The rank at which somebody may act on another person's session. It matches
+   app/access.SupervisorRank, and the same number the approval gate uses to
+   decide who may overrule whom — a session is not a different question. */
+const SUPERVISOR_RANK = 50;
+
 function expiresIn(iso?: string): string {
   if (!iso) return "";
   const diff = new Date(iso).getTime() - Date.now();
@@ -44,7 +49,14 @@ export function SessionsPage() {
   const has = useAuth((s) => s.has);
   const canObserve = has("session:observe");
   const meId = useAuth((st) => st.principal?.user_id);
-  const canTerminate = has("session:terminate");
+  const hasTerminate = has("session:terminate");
+  const isSuper = useAuth((st) => st.principal?.is_super_admin) ?? false;
+  const myRank = useAuth((st) => st.principal?.approval_level) ?? 0;
+  /* Ending somebody else's session needs rank, not just the permission —
+     session:terminate is held by everyone who can connect, because everyone who
+     can connect must be able to stop. The server enforces it; offering a button
+     that is going to be refused is its own kind of wrong. */
+  const canEndOthers = isSuper || myRank >= SUPERVISOR_RANK;
 
   const { data, isLoading, isError } = useQuery<Session[]>({
     queryKey: ["sessions", "active"],
@@ -167,7 +179,7 @@ export function SessionsPage() {
               </div>
 
               <div className="mt-4 flex items-center justify-end gap-2 border-t border-line pt-3">
-                {canTerminate && (
+                {hasTerminate && (mine || canEndOthers) && (
                   <button
                     className="btn-subtle text-faint hover:text-danger"
                     disabled={terminate.isPending}
