@@ -59,6 +59,20 @@ export function ClientWordmark({ name, className }: { name: string; className?: 
 }
 
 /**
+ * wordmarkSize picks the client name's size from its length. A short name is
+ * the mark and holds full weight; a long one steps down so it sits in two or
+ * three even lines instead of filling the rail. Beneath a logo the name is the
+ * logo's caption and is smaller throughout.
+ */
+function wordmarkSize(name: string, withLogo: boolean, compact: boolean): string {
+  const n = name.length;
+  if (withLogo) return n <= 24 ? "text-[11px] leading-tight opacity-90" : "text-[10px] leading-tight opacity-90";
+  if (n <= 16) return compact ? "text-sm" : "text-base";
+  if (n <= 32) return compact ? "text-[13px] leading-tight" : "text-sm leading-tight";
+  return compact ? "text-xs leading-tight" : "text-[13px] leading-tight";
+}
+
+/**
  * BrandSeal is the block under the product wordmark: the client's identity when
  * one is configured, and the vendor mark when none is.
  *
@@ -109,12 +123,7 @@ export function BrandSeal({
             {name && (
               <ClientWordmark
                 name={name}
-                className={cn(
-                  "seal-logo relative",
-                  // Beneath a logo the name is a caption for it, so it steps down a
-                  // size; on its own it IS the mark and holds the full weight.
-                  logo ? "text-[11px] opacity-90" : compact ? "text-sm" : "text-base",
-                )}
+                className={cn("seal-logo relative", wordmarkSize(name, !!logo, !!compact))}
               />
             )}
           </>

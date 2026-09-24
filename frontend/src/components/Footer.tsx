@@ -48,7 +48,9 @@ export function Footer() {
                 />
               )}
               {client.client_name.trim() && (
-                <span className="max-w-[160px] truncate font-medium text-muted">{client.client_name}</span>
+                <span className="max-w-[160px] truncate font-medium text-muted" title={client.client_name}>
+                    {client.client_name}
+                  </span>
               )}
             </span>
           </>

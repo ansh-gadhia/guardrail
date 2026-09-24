@@ -394,10 +394,21 @@
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    white-space: nowrap;
-    max-width: 100%;
+    /* A client's name is whatever they are called, and some are long. It used to
+       be held to one line and cut off with an ellipsis — "Virtual Galaxy Infotech
+       Priv…" — which reads as a fault in the product, not as their name. It now
+       wraps, centred, over as many as three lines, balanced so the lines come
+       out even rather than one long line and a stranded word; a word too long
+       for the rail breaks instead of overflowing it. */
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
     overflow: hidden;
-    text-overflow: ellipsis;
+    max-width: 100%;
+    text-align: center;
+    text-wrap: balance;
+    overflow-wrap: anywhere;
+    padding-bottom: 0.08em; /* descenders survive the gradient clip */
     transition: filter 0.3s, transform 0.3s;
   }
   .group:hover .client-wordmark {

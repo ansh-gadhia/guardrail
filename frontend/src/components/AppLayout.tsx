@@ -165,7 +165,13 @@ export function AppLayout() {
 
   const initials = (principal?.email ?? "?").slice(0, 2).toUpperCase();
 
-  const SidebarInner = ({ collapsed }: { collapsed: boolean }) => (
+  // Called as a function, NOT rendered as <SidebarInner />. Declared here, a
+  // component is a new type on every render of this layout, so React threw the
+  // whole sidebar away and mounted a fresh one each time — and with the live
+  // counts refreshing every few seconds, that was every few seconds: the brand
+  // seal replayed its entrance from invisible, the nav lost its scroll and
+  // hover. A function call is reconciled like any other markup.
+  const sidebarInner = (collapsed: boolean) => (
     <>
       <div className={cn("flex items-center gap-2.5 px-5 pb-3 pt-5", collapsed && "justify-center px-0 pb-5")}>
         <BrandMark className="h-9 w-9 shrink-0 drop-shadow-sm" />
@@ -229,7 +235,10 @@ export function AppLayout() {
       </nav>
       <div className="border-t border-line p-3">
         <div className={cn("mt-1 flex items-center px-2 text-2xs text-faint", collapsed ? "justify-center" : "justify-between")}>
-          {!collapsed && <span className="truncate">{branding.data?.configured ? branding.data.client_name || "GuardRail" : "GuardRail"}</span>}
+          {/* The product's name, always. The client's is shown in full in the
+              seal at the top of the rail; truncated here beside the version it
+              read as a fault, and said nothing the seal had not. */}
+          {!collapsed && <span className="truncate">GuardRail</span>}
           <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono">v{version.data?.version ?? "…"}</span>
         </div>
       </div>
@@ -243,7 +252,7 @@ export function AppLayout() {
 
       {/* Desktop sidebar */}
       <aside className={cn("hidden shrink-0 flex-col border-r border-line bg-surface/70 backdrop-blur transition-[width] duration-200 lg:flex", collapsed ? "w-16" : "w-64")}>
-        <SidebarInner collapsed={collapsed} />
+        {sidebarInner(collapsed)}
       </aside>
 
       {/* Mobile drawer */}
@@ -252,7 +261,7 @@ export function AppLayout() {
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-fadein" onClick={() => setMobileOpen(false)} />
           <aside className="animate-drawer-in relative flex h-full w-64 flex-col border-r border-line bg-surface">
             <button className="absolute right-3 top-4 rounded-lg p-1 text-faint hover:text-fg" onClick={() => setMobileOpen(false)} aria-label="Close menu"><IconX size={18} /></button>
-            <SidebarInner collapsed={false} />
+            {sidebarInner(false)}
           </aside>
         </div>
       )}
