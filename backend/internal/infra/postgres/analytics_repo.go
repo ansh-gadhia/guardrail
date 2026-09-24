@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -184,6 +185,15 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 		args = append(args, val)
 		where = append(where, fmt.Sprintf(clause, len(args)))
 	}
+	if f.Group != "" {
+		include, exclude, _ := analytics.GroupPatterns(f.Group)
+		if len(include) > 0 {
+			add("action LIKE ANY($%d::text[])", include)
+		}
+		if len(exclude) > 0 {
+			add("NOT (action LIKE ANY($%d::text[]))", exclude)
+		}
+	}
 	if f.Action != "" {
 		add("action ILIKE '%%' || $%d || '%%'", f.Action)
 	}
@@ -226,7 +236,7 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 	// error, not a NULL.
 	query := fmt.Sprintf(`
 		WITH e AS MATERIALIZED (
-			SELECT ts, actor_email, action, category, target_type, target_id, ip,
+			SELECT ts, actor_email, actor_id, action, category, target_type, target_id, ip,
 			       user_agent, result, detail, id, session_id,
 			       CASE WHEN target_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 			            THEN target_id::uuid END AS tid
@@ -238,8 +248,11 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 		SELECT e.ts, COALESCE(e.actor_email,''), e.action, e.category,
 		       COALESCE(e.target_type,''), COALESCE(e.target_id,''),
 		       COALESCE(host(e.ip),''), COALESCE(e.user_agent,''), e.result, e.detail,
-		       COALESCE(d.name, u.email::text, c.name, sn.device_name, ro.name, g.name, '') AS target_label,
-		       COALESCE(e.session_id::text, '') AS session_id
+		       COALESCE(d.name, u.email::text, c.name, sn.device_name, ro.name, g.name, tm.name, '') AS target_label,
+		       COALESCE(e.session_id::text, '') AS session_id,
+		       COALESCE(e.actor_id::text, ''),
+		       (e.target_type = 'user' AND e.tid IS NOT NULL AND e.tid = e.actor_id) AS target_is_actor,
+		       COALESCE(ss.protocol, sn.protocol, ''), COALESCE(ss.device_name, sn.device_name, '')
 		  FROM e
 		  LEFT JOIN devices         d  ON e.target_type = 'device'     AND d.id  = e.tid
 		  LEFT JOIN users           u  ON e.target_type = 'user'       AND u.id  = e.tid
@@ -247,6 +260,10 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 		  LEFT JOIN access_sessions sn ON e.target_type = 'session'    AND sn.id = e.tid
 		  LEFT JOIN roles           ro ON e.target_type = 'role'       AND ro.id = e.tid
 		  LEFT JOIN asset_groups    g  ON e.target_type = 'group'      AND g.id  = e.tid
+		  LEFT JOIN teams           tm ON e.target_type = 'team'       AND tm.id = e.tid
+		  -- The session the event happened inside: its protocol and machine are
+		  -- what turn "credential.use" into "signed in to db-prod-01 over SSH".
+		  LEFT JOIN access_sessions ss ON ss.id = e.session_id
 		 ORDER BY e.ts DESC, e.id DESC`, whereSQL, len(args))
 
 	out := []analytics.AuditRow{}
@@ -261,7 +278,8 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 			var detail []byte
 			if err := rows.Scan(&a.Timestamp, &a.ActorEmail, &a.Action, &a.Category,
 				&a.TargetType, &a.TargetID, &a.IP, &a.UserAgent, &a.Result, &detail,
-				&a.TargetLabel, &a.SessionID); err != nil {
+				&a.TargetLabel, &a.SessionID, &a.ActorID, &a.TargetIsActor,
+				&a.Protocol, &a.SessionDevice); err != nil {
 				return fmt.Errorf("analytics: scan audit: %w", err)
 			}
 			if len(detail) > 0 {
@@ -269,7 +287,59 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 			}
 			out = append(out, a)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return resolveRefs(ctx, tx, out)
 	})
 	return out, err
+}
+
+// refKeys are the detail fields that name a user or an API token by id, on
+// events whose target column holds something else or nothing: the member added
+// to a team, the person whose session was watched, whose sign-in was ended.
+var refKeys = []string{"target_user", "observed_user_id", "user_id", "token_id"}
+
+var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// resolveRefs looks those ids up — all of them, in two queries — so the events
+// can say who and what by name. Deleted rows are included: the event happened
+// to them all the same.
+func resolveRefs(ctx context.Context, tx pgx.Tx, rows []analytics.AuditRow) error {
+	seen := map[string]bool{}
+	var ids []string
+	for _, r := range rows {
+		for _, k := range refKeys {
+			if s, ok := r.Detail[k].(string); ok && uuidRE.MatchString(s) && !seen[s] {
+				seen[s] = true
+				ids = append(ids, s)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	names := map[string]string{}
+	q, err := tx.Query(ctx, `
+		SELECT id::text, email::text FROM users WHERE id = ANY($1::uuid[])
+		UNION ALL
+		SELECT id::text, name FROM api_tokens WHERE id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return fmt.Errorf("analytics: resolve audit refs: %w", err)
+	}
+	defer q.Close()
+	for q.Next() {
+		var id, name string
+		if err := q.Scan(&id, &name); err != nil {
+			return err
+		}
+		names[id] = name
+	}
+	if err := q.Err(); err != nil {
+		return err
+	}
+	for i := range rows {
+		rows[i].Refs = names
+	}
+	return nil
 }

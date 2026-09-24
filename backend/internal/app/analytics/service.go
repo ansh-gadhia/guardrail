@@ -48,6 +48,13 @@ type ActivityItem struct {
 	Actor     string    `json:"actor"`
 	Action    string    `json:"action"`
 	Result    string    `json:"result"`
+	// The event in words, as the audit log shows it (see describe.go).
+	Title         string `json:"title,omitempty"`
+	Note          string `json:"note,omitempty"`
+	Group         string `json:"group,omitempty"`
+	Target        string `json:"target,omitempty"`
+	TargetKind    string `json:"target_kind,omitempty"`
+	TargetIsActor bool   `json:"target_is_actor,omitempty"`
 }
 
 // SearchResults groups global-search hits by entity type.
@@ -65,6 +72,9 @@ type Hit struct {
 
 // AuditFilter narrows an audit query.
 type AuditFilter struct {
+	// Group is one of Groups' keys: a family of actions, as the console
+	// filters by them. Empty means every action.
+	Group      string
 	Action     string
 	Actor      string
 	Result     string
@@ -100,6 +110,19 @@ type AuditRow struct {
 	// reason, a device name, an approval decision). Shape varies by action; the
 	// delivery layer passes it through verbatim for inspection.
 	Detail map[string]any
+
+	// Read alongside the event by the store, for describing it.
+	ActorID       string
+	TargetIsActor bool              // the target is the account that acted
+	Protocol      string            // of the session the event happened in
+	SessionDevice string            // that session's device, by name
+	Refs          map[string]string // ids named in Detail, resolved to names
+
+	// What happened, in words (see describe.go).
+	Title      string
+	Group      string
+	Note       string
+	TargetKind string
 }
 
 // Store is the read port implemented by the persistence layer.
@@ -116,8 +139,32 @@ type Service struct{ store Store }
 func NewService(store Store) *Service { return &Service{store: store} }
 
 // Dashboard returns the dashboard summary for the actor's tenant.
+//
+// Its activity feed is the audit log's newest events, described the same way
+// the audit page describes them — the dashboard used to show the raw codes
+// ("auth.login · someone") the audit page no longer does. If describing them
+// fails the plain feed stands; a dashboard is no place to fail over wording.
 func (s *Service) Dashboard(ctx context.Context, actor iam.Claims) (Summary, error) {
-	return s.store.Dashboard(ctx, scopeOf(actor))
+	sum, err := s.store.Dashboard(ctx, scopeOf(actor))
+	if err != nil {
+		return sum, err
+	}
+	rows, err := s.store.ListAudit(ctx, scopeOf(actor), AuditFilter{Limit: len(sum.RecentActivity)})
+	if err != nil || len(rows) == 0 {
+		return sum, nil //nolint:nilerr // the undescribed feed is still a feed
+	}
+	items := make([]ActivityItem, 0, len(rows))
+	for i := range rows {
+		r := &rows[i]
+		present(r)
+		items = append(items, ActivityItem{
+			Timestamp: r.Timestamp, Actor: r.ActorEmail, Action: r.Action, Result: r.Result,
+			Title: r.Title, Note: r.Note, Group: r.Group,
+			Target: r.TargetLabel, TargetKind: r.TargetKind, TargetIsActor: r.TargetIsActor,
+		})
+	}
+	sum.RecentActivity = items
+	return sum, nil
 }
 
 // Search runs a global search across users, devices, and sessions.
@@ -128,9 +175,18 @@ func (s *Service) Search(ctx context.Context, actor iam.Claims, q string, limit 
 	return s.store.Search(ctx, scopeOf(actor), q, limit)
 }
 
-// ListAudit returns audit rows matching the filter.
+// ListAudit returns audit rows matching the filter, each described in words.
 func (s *Service) ListAudit(ctx context.Context, actor iam.Claims, f AuditFilter) ([]AuditRow, error) {
-	return s.store.ListAudit(ctx, scopeOf(actor), f)
+	if f.Group != "" {
+		if _, _, ok := GroupPatterns(f.Group); !ok {
+			return nil, fmt.Errorf("%w: unknown group %q", iam.ErrInvalidInput, f.Group)
+		}
+	}
+	rows, err := s.store.ListAudit(ctx, scopeOf(actor), f)
+	for i := range rows {
+		present(&rows[i])
+	}
+	return rows, err
 }
 
 // ReportType enumerates supported reports.
@@ -158,11 +214,15 @@ func (s *Service) GenerateCSV(ctx context.Context, actor iam.Claims, t ReportTyp
 
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"timestamp", "actor", "action", "category", "target_type", "target_id", "target", "ip", "result"})
-	for _, r := range rows {
+	// The machine columns first, where existing consumers expect them; the
+	// words after, so the file reads without a lookup table beside it.
+	_ = w.Write([]string{"timestamp", "actor", "action", "category", "target_type", "target_id", "target", "ip", "result", "event", "details"})
+	for i := range rows {
+		r := &rows[i]
+		present(r)
 		_ = w.Write([]string{
 			r.Timestamp.UTC().Format(time.RFC3339), r.ActorEmail, r.Action, r.Category,
-			r.TargetType, r.TargetID, r.TargetLabel, r.IP, r.Result,
+			r.TargetType, r.TargetID, r.TargetLabel, r.IP, r.Result, r.Title, r.Note,
 		})
 	}
 	w.Flush()

@@ -115,6 +115,7 @@ func (h *AnalyticsHandler) search(c *gin.Context) {
 func (h *AnalyticsHandler) audit(c *gin.Context) {
 	actor, _ := middleware.ClaimsFrom(c)
 	f := analytics.AuditFilter{
+		Group:      c.Query("group"),
 		Action:     c.Query("action"),
 		Actor:      c.Query("actor"),
 		Result:     c.Query("result"),
@@ -143,6 +144,11 @@ func (h *AnalyticsHandler) audit(c *gin.Context) {
 			"session_id": r.SessionID,
 			"ip":         r.IP,
 			"user_agent": r.UserAgent, "result": r.Result, "detail": r.Detail,
+			// The event in words, for people (see analytics/describe.go). The
+			// machine fields above stay for the drawer, the export and scripts.
+			"title": r.Title, "group": r.Group, "note": r.Note,
+			"target_kind": r.TargetKind, "target_is_actor": r.TargetIsActor,
+			"protocol": r.Protocol,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"data": out})

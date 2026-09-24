@@ -493,7 +493,18 @@ export interface DashboardSummary {
   users: number;
   failed_logins_24h: number;
   top_devices: { device_id: string; name: string; sessions: number }[];
-  recent_activity: { ts: string; actor: string; action: string; result: string }[];
+  recent_activity: {
+    ts: string;
+    actor: string;
+    action: string;
+    result: string;
+    // The event in words, as the audit log words it.
+    title?: string;
+    note?: string;
+    target?: string;
+    target_kind?: string;
+    target_is_actor?: boolean;
+  }[];
 }
 
 export interface AuditRow {
@@ -520,6 +531,18 @@ export interface AuditRow {
   result: string;
   // Structured payload recorded with the event; shape varies by action.
   detail?: Record<string, unknown> | null;
+  /** What happened, in words — "Opened an SSH session". Written by the server,
+   *  so the CSV export says the same thing. */
+  title?: string;
+  /** The family it belongs to, as the page filters by it (see AUDIT_GROUPS). */
+  group?: string;
+  /** The one or two facts worth reading: who it was for, why it failed. */
+  note?: string;
+  /** What the target is, for a person: "Device", "API token", "Setting". */
+  target_kind?: string;
+  /** The target is the account that acted — signing in, changing a password. */
+  target_is_actor?: boolean;
+  protocol?: string;
 }
 
 export interface SearchResults {

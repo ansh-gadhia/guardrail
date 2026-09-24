@@ -229,7 +229,7 @@ function SignalChip({
 }
 
 /* ---- Activity rail — the signature timeline -------------------------------- */
-function ActivityRail({ activity }: { activity: { ts: string; actor: string; action: string; result: string }[] }) {
+function ActivityRail({ activity }: { activity: DashboardSummary["recent_activity"] }) {
   const dot = (r: string) => {
     const v = r?.toLowerCase();
     if (v === "success") return "bg-success";
@@ -248,11 +248,12 @@ function ActivityRail({ activity }: { activity: { ts: string; actor: string; act
               dot(a.result),
             )}
           />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-sm">
-              <span className="font-mono text-xs text-fg">{a.action}</span>
-              <span className="text-faint"> · {a.actor || "system"}</span>
+          <div className="min-w-0 flex-1 leading-tight">
+            <div className="truncate text-sm text-fg">
+              {a.title || a.action}
+              {a.target && !a.target_is_actor && <span className="text-muted"> — {a.target}</span>}
             </div>
+            <div className="truncate text-2xs text-faint">{a.actor || "GuardRail"}</div>
           </div>
           <time className="shrink-0 font-mono text-2xs tabular-nums text-faint">{plausibleDate(a.ts)?.toLocaleTimeString() ?? "—"}</time>
           <StatusBadge value={a.result} />

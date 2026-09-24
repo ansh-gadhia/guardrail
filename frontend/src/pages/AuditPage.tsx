@@ -19,6 +19,8 @@ import {
   IconShield,
   IconFolder,
   IconFilm,
+  IconLock,
+  IconSettings,
 } from "@/components/icons";
 import { toast } from "@/components/Toast";
 import { ChainVerdict, VerifyChainButton, useChainVerification } from "@/components/AuditIntegrity";
@@ -50,8 +52,24 @@ const NODE: Record<string, string> = {
   failure: "bg-danger",
 };
 
+/* ---- Groups -----------------------------------------------------------------
+   The families the log is filtered by. The server decides which family an event
+   belongs to (analytics/describe.go) and filters by the same key, so choosing
+   one here can never hide an event labelled with it. */
+const AUDIT_GROUPS: { key: string; label: string; icon: ComponentType<{ size?: number; className?: string }> }[] = [
+  { key: "signin", label: "Sign-in", icon: IconLock },
+  { key: "access", label: "Access requests", icon: IconCheck },
+  { key: "sessions", label: "Sessions", icon: IconSessions },
+  { key: "recordings", label: "Recordings", icon: IconFilm },
+  { key: "devices", label: "Devices & credentials", icon: IconDevices },
+  { key: "people", label: "People & teams", icon: IconUsers },
+  { key: "settings", label: "Settings", icon: IconSettings },
+  { key: "system", label: "System", icon: IconAudit },
+];
+const GROUP = Object.fromEntries(AUDIT_GROUPS.map((g) => [g.key, g]));
+
 export function AuditPage() {
-  const [action, setAction] = useState("");
+  const [group, setGroup] = useState("");
   const [result, setResult] = useState("");
   const [selected, setSelected] = useState<Row | null>(null);
   // Verification lives here as well as on the organization page, because this is
@@ -60,9 +78,9 @@ export function AuditPage() {
   const { report, verify } = useChainVerification();
 
   const { data, isLoading, isError } = useQuery<AuditRow[]>({
-    queryKey: ["audit", action, result],
+    queryKey: ["audit", group, result],
     queryFn: async () =>
-      (await api.get<{ data: AuditRow[] }>("/audit", { params: { action, result, limit: 100 } })).data.data,
+      (await api.get<{ data: AuditRow[] }>("/audit", { params: { group, result, limit: 200 } })).data.data,
   });
 
   const rows = useMemo<Row[]>(() => (data ?? []).map((r, i) => ({ ...r, _k: `${i}-${r.ts}` })), [data]);
@@ -87,35 +105,35 @@ export function AuditPage() {
       key: "ts",
       header: "Time",
       value: (r) => r.ts,
-      cell: (r) => (
-        <span className="flex items-center gap-2.5">
-          <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", NODE[r.result] ?? "bg-line-strong")} />
-          <span className="whitespace-nowrap text-xs tabular-nums text-faint">{fmtAbs(r.ts)}</span>
-        </span>
-      ),
+      cell: (r) => {
+        const dt = plausibleDate(r.ts);
+        return (
+          <span className="flex items-start gap-2.5" title={dt ? dt.toLocaleString() : undefined}>
+            <span className={cn("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", NODE[r.result] ?? "bg-line-strong")} />
+            <span className="leading-tight">
+              <span className="block whitespace-nowrap text-xs tabular-nums text-fg">{dt ? fmtWhen(dt) : "—"}</span>
+              <span className="block whitespace-nowrap text-2xs text-faint">{dt ? timeAgo(dt) : ""}</span>
+            </span>
+          </span>
+        );
+      },
     },
     {
-      key: "action",
-      header: "Action",
-      value: (r) => r.action,
-      cell: (r) => <ActionName action={r.action} />,
-    },
-    {
-      key: "category",
-      header: "Category",
-      value: (r) => r.category,
-      cell: (r) => <span className="text-xs text-muted">{r.category || "—"}</span>,
-      defaultHidden: true,
+      key: "event",
+      header: "Event",
+      // Searchable by what it says, not by its code.
+      value: (r) => `${r.title ?? r.action} ${r.note ?? ""}`,
+      cell: (r) => <EventCell row={r} />,
     },
     {
       key: "actor",
-      header: "Actor",
-      value: (r) => r.actor || "system",
-      cell: (r) => <span className="text-sm text-fg">{r.actor || "system"}</span>,
+      header: "Who",
+      value: (r) => r.actor || "GuardRail",
+      cell: (r) => <ActorCell actor={r.actor} />,
     },
     {
       key: "target",
-      header: "Target",
+      header: "On",
       value: (r) => targetSortValue(r),
       cell: (r) => <TargetCell row={r} />,
     },
@@ -127,13 +145,18 @@ export function AuditPage() {
         r.ip ? (
           <span className="inline-flex items-center gap-1.5">
             <IconGlobe size={13} className="text-faint" />
-            <span className="rounded-md border border-line bg-surface-2/60 px-1.5 py-0.5 font-mono text-2xs text-fg">
-              {r.ip}
-            </span>
+            <span className="font-mono text-2xs text-muted">{r.ip}</span>
           </span>
         ) : (
           <span className="text-2xs text-faint">—</span>
         ),
+    },
+    {
+      key: "action",
+      header: "Event code",
+      value: (r) => r.action,
+      cell: (r) => <ActionName action={r.action} />,
+      defaultHidden: true,
     },
     {
       key: "result",
@@ -181,10 +204,10 @@ export function AuditPage() {
       )}
       {isError && <ErrorNote message="Failed to load audit log" />}
 
-      {data && data.length === 0 && (action || result) && (
+      {data && data.length === 0 && (group || result) && (
         <EmptyState icon={IconAudit} title="No events" message="No audit events match your filters." />
       )}
-      {data && data.length === 0 && !action && !result && (
+      {data && data.length === 0 && !group && !result && (
         <EmptyState icon={IconAudit} title="No events yet" message="Privileged actions will appear here as they happen." />
       )}
 
@@ -201,17 +224,19 @@ export function AuditPage() {
           onRowClick={setSelected}
           toolbar={
             <>
-              <input
-                className="input max-w-[13rem]"
-                placeholder="Action (e.g. auth.login)"
-                value={action}
-                onChange={(e) => setAction(e.target.value)}
-              />
+              <Select className="max-w-[13rem]" value={group} onChange={(e) => setGroup(e.target.value)}>
+                <option value="">All activity</option>
+                {AUDIT_GROUPS.map((g) => (
+                  <option key={g.key} value={g.key}>
+                    {g.label}
+                  </option>
+                ))}
+              </Select>
               <Select className="max-w-[10rem]" value={result} onChange={(e) => setResult(e.target.value)}>
-                <option value="">All results</option>
-                <option value="success">Success</option>
-                <option value="failure">Failure</option>
-                <option value="denied">Denied</option>
+                <option value="">Any result</option>
+                <option value="success">Succeeded</option>
+                <option value="failure">Failed</option>
+                <option value="denied">Refused</option>
                 <option value="pending">Pending</option>
               </Select>
             </>
@@ -239,58 +264,116 @@ function ActionName({ action }: { action: string }) {
   );
 }
 
-/* ---- Target -----------------------------------------------------------------
-   The target used to render as `device:baaf24df` — a type and eight hex
-   characters, which tells a reviewer nothing without going and looking it up
-   somewhere else. The server now resolves it to the name that same reviewer
-   would recognise, and this renders the name with a glyph for its kind.
-
-   Four states, all of them real, none of them an unexplained blank:
-     resolved   the name, with a kind glyph
-     purged     the subject is gone — the short id in mono, so it can still be
-                matched against a backup or an export
-     self       the target IS the actor (signing in, changing your own password).
-                Saying "self" is information; an em-dash reads as missing data,
-                which is what made the column look broken.
-     none       the action genuinely acts on no single record. */
-const TARGET_ICON: Record<string, ComponentType<{ size?: number; className?: string }>> = {
-  device: IconDevices,
-  user: IconUsers,
-  credential: IconKey,
-  session: IconSessions,
-  role: IconShield,
-  group: IconFolder,
+/* ---- Event ----------------------------------------------------------------------
+   What happened, as the server words it, with the one fact worth reading under
+   it. The tile names the family at a glance; it stays quiet for the ordinary
+   and takes the outcome's colour when something failed, was refused, or is
+   waiting — so the rows that need a second look are the ones that stand out. */
+const TILE: Record<string, string> = {
+  failure: "bg-danger/10 text-danger ring-danger/20",
+  denied: "bg-danger/10 text-danger ring-danger/20",
+  pending: "bg-warn/10 text-warn ring-warn/25",
 };
 
-function TargetCell({ row }: { row: Row }) {
-  const { target_type: type, target_id: id, target_label: label } = row;
-
-  if (!type || !id) return <span className="text-2xs text-faint">—</span>;
-  if (isSelf(row)) return <span className="text-xs italic text-faint">self</span>;
-
-  const Icon = TARGET_ICON[type];
+function EventCell({ row }: { row: Row }) {
+  const Icon = GROUP[row.group ?? ""]?.icon ?? IconAudit;
   return (
-    <span className="flex min-w-0 items-center gap-1.5">
-      {Icon && <Icon size={13} className="shrink-0 text-faint" />}
-      {label ? (
-        <span className="truncate text-sm text-fg">{label}</span>
-      ) : (
-        <span className="truncate font-mono text-2xs text-faint" title={`${type} ${id}`}>
-          {id.slice(0, 8)}
-        </span>
-      )}
+    <span className="flex min-w-0 items-start gap-2.5">
+      <span
+        className={cn(
+          "mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg ring-1 ring-inset",
+          TILE[row.result] ?? "bg-surface-2 text-muted ring-line",
+        )}
+      >
+        <Icon size={14} />
+      </span>
+      <span className="min-w-0 max-w-[18rem] leading-tight">
+        <span className="block truncate text-sm font-medium text-fg">{row.title || row.action}</span>
+        {row.note && (
+          <span className="mt-0.5 block truncate text-xs text-muted" title={row.note}>
+            {row.note}
+          </span>
+        )}
+      </span>
     </span>
   );
 }
 
-/** A self-directed action: the thing acted on is the account doing the acting. */
-function isSelf(row: AuditRow): boolean {
-  return row.target_type === "user" && !!row.actor && row.target_label === row.actor;
+/* Who did it. Things GuardRail did by itself — purging a recording on schedule,
+   injecting a credential — are GuardRail's, and say so, rather than "system". */
+function ActorCell({ actor }: { actor: string }) {
+  if (!actor) {
+    return (
+      <span className="flex items-center gap-2">
+        <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-accent-soft text-accent">
+          <IconShield size={12} />
+        </span>
+        <span className="text-sm text-muted">GuardRail</span>
+      </span>
+    );
+  }
+  return (
+    <span className="flex min-w-0 max-w-[12rem] items-center gap-2">
+      <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-surface-2 text-2xs font-semibold uppercase text-muted ring-1 ring-inset ring-line">
+        {actor.slice(0, 2)}
+      </span>
+      <span className="truncate text-sm text-fg" title={actor}>
+        {actor}
+      </span>
+    </span>
+  );
+}
+
+/* ---- Target -----------------------------------------------------------------
+   What the event was done to, by name, with what kind of thing it is under it —
+   "MyUbuntuServerDLP / Device". Four states, none of them an unexplained blank:
+     named      the name and its kind
+     own        the target is the account that acted (signing in, changing a
+                password) — said in words, not left as the actor's email twice
+     gone       it has been deleted since; its short id stays, for matching
+                against a backup or an export
+     none       the event acts on no single record */
+const TARGET_ICON: Record<string, ComponentType<{ size?: number; className?: string }>> = {
+  Device: IconDevices,
+  User: IconUsers,
+  Credential: IconKey,
+  Session: IconSessions,
+  Recording: IconFilm,
+  Role: IconShield,
+  "Device group": IconFolder,
+  Team: IconUsers,
+  "API token": IconKey,
+  Setting: IconSettings,
+};
+
+function TargetCell({ row }: { row: Row }) {
+  const kind = row.target_kind || "";
+  if (row.target_is_actor) return <span className="text-xs text-faint">Own account</span>;
+  if (!kind && !row.target_label) return <span className="text-2xs text-faint">—</span>;
+
+  const Icon = TARGET_ICON[kind];
+  return (
+    <span className="flex min-w-0 max-w-[11.5rem] items-start gap-2">
+      {Icon && <Icon size={14} className="mt-0.5 shrink-0 text-faint" />}
+      <span className="min-w-0 leading-tight">
+        {row.target_label ? (
+          <span className="block truncate text-sm text-fg" title={row.target_label}>
+            {row.target_label}
+          </span>
+        ) : (
+          <span className="block truncate text-xs italic text-faint" title={row.target_id ? `${row.target_type} ${row.target_id}` : undefined}>
+            No longer exists{row.target_id ? ` (${row.target_id.slice(0, 8)})` : ""}
+          </span>
+        )}
+        {kind && <span className="block text-2xs text-faint">{kind}</span>}
+      </span>
+    </span>
+  );
 }
 
 function targetSortValue(row: Row): string {
-  if (isSelf(row)) return "self";
-  return row.target_label || (row.target_type ? `${row.target_type}:${row.target_id}` : "");
+  if (row.target_is_actor) return "own account";
+  return row.target_label || row.target_kind || "";
 }
 
 /* ---- Event detail drawer ---------------------------------------------------
@@ -300,10 +383,16 @@ function targetSortValue(row: Row): string {
 function AuditDetailDrawer({ event, onClose }: { event: Row; onClose: () => void }) {
   const dt = plausibleDate(event.ts);
   const detailEntries = Object.entries(event.detail ?? {});
-  const TargetIcon = TARGET_ICON[event.target_type];
+  const TargetIcon = TARGET_ICON[event.target_kind ?? ""];
 
   return (
-    <Drawer title={event.action} subtitle={event.category || "event"} icon={IconAudit} onClose={onClose} width="max-w-lg">
+    <Drawer
+      title={event.title || event.action}
+      subtitle={GROUP[event.group ?? ""]?.label ?? "Event"}
+      icon={GROUP[event.group ?? ""]?.icon ?? IconAudit}
+      onClose={onClose}
+      width="max-w-lg"
+    >
       <div className="space-y-5">
         <div className="flex items-center gap-2">
           <StatusBadge value={event.result} />
@@ -315,15 +404,13 @@ function AuditDetailDrawer({ event, onClose }: { event: Row; onClose: () => void
             <div className="text-sm text-fg">{dt ? dt.toLocaleString() : "unknown"}</div>
             {dt && <div className="font-mono text-2xs text-faint">{dt.toISOString()}</div>}
           </DRow>
-          <DRow label="Actor">{event.actor || "system"}</DRow>
-          <DRow label="Action">
-            <span className="font-mono text-xs text-fg">{event.action}</span>
-          </DRow>
-          <DRow label="Target">
-            {!event.target_type || !event.target_id ? (
-              <span className="text-xs text-faint">
-                This action acts on no single record, so it has no target.
-              </span>
+          <DRow label="Who">{event.actor || "GuardRail, by itself"}</DRow>
+          {event.note && <DRow label="What">{event.note}</DRow>}
+          <DRow label="On">
+            {event.target_is_actor ? (
+              <span className="text-sm text-fg">Their own account</span>
+            ) : !event.target_kind && !event.target_label ? (
+              <span className="text-xs text-faint">This event acts on no single record.</span>
             ) : (
               <div className="space-y-1.5">
                 <div className="flex items-center gap-1.5">
@@ -331,9 +418,9 @@ function AuditDetailDrawer({ event, onClose }: { event: Row; onClose: () => void
                   <span className="min-w-0 truncate text-sm text-fg">
                     {event.target_label || <span className="text-faint">no longer exists</span>}
                   </span>
-                  {isSelf(event) && <span className="shrink-0 text-2xs italic text-faint">· the actor's own account</span>}
+                  {event.target_kind && <span className="shrink-0 text-2xs text-faint">{event.target_kind}</span>}
                 </div>
-                <CopyableID label={event.target_type} value={event.target_id} />
+                {event.target_id && <CopyableID label={event.target_type || "id"} value={event.target_id} />}
               </div>
             )}
           </DRow>
@@ -359,6 +446,9 @@ function AuditDetailDrawer({ event, onClose }: { event: Row; onClose: () => void
           </DRow>
           <DRow label="Client">
             <span className="break-all font-mono text-2xs text-muted">{event.user_agent || "—"}</span>
+          </DRow>
+          <DRow label="Event code">
+            <ActionName action={event.action} />
           </DRow>
         </dl>
 
@@ -423,9 +513,18 @@ function DRow({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function fmtAbs(iso?: string): string {
-  const d = plausibleDate(iso);
-  return d ? d.toLocaleString() : "—";
+// fmtWhen is a date a person reads at a glance: the day only when it is not
+// today, and the year only when it is not this one.
+function fmtWhen(d: Date): string {
+  const now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (d.toDateString() === now.toDateString()) return `Today, ${time}`;
+  const day = d.toLocaleDateString([], {
+    day: "numeric",
+    month: "short",
+    ...(d.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}),
+  });
+  return `${day}, ${time}`;
 }
 
 function timeAgo(dt: Date): string {
