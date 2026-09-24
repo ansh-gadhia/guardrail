@@ -122,7 +122,7 @@ export function SessionWatchPage() {
       <div
         ref={stageRef}
         className={
-          "relative min-h-0 flex-1 overflow-hidden border border-line bg-surface-1 shadow-sm " +
+          "relative min-h-0 flex-1 overflow-hidden border border-line bg-surface shadow-sm " +
           // Fullscreen is edge to edge: a rounded card floating on a black screen
           // is not what anyone means by it.
           (full ? "rounded-none border-0" : "rounded-xl")

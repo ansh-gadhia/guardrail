@@ -226,55 +226,87 @@
     to { background-position: 200% 50%; }
   }
 
-  /* ---- Footer fuse: the sign-in, drawn along the footer's top edge ---------
-     The lit length is what is left of this sign-in against the longest one may
-     last, and the head is "now". It is a measurement, not an ornament, so it
-     never loops: it draws in once when the console opens and afterwards moves
-     only as the time does. Amber when the sign-in is about to end, for either
-     reason. --left is set inline, 0..1. */
-  .fuse,
-  .fuse-head {
-    --fuse-ink: var(--grad-to);
+  /* ---- Footer beam ----------------------------------------------------------
+     A 2px beam along the footer's top edge in the product's colours (teal,
+     cyan) and the vendor mark's (green, red), flowing. Under it the same
+     gradient, blurred, bleeds a soft light into the strip; over it a spark runs
+     the length of the rule every few seconds. CSS only: the reduced-motion rule
+     below holds all three still. */
+  .footer-beam,
+  .footer-glow {
     position: absolute;
-    pointer-events: none;
-  }
-  .fuse {
     left: 0;
-    top: -1px;
+    right: 0;
+    top: 0;
+    pointer-events: none;
+    background-image: linear-gradient(
+      90deg,
+      rgb(var(--grad-from)) 0%,
+      rgb(var(--grad-to)) 16%,
+      #7bc043 33%,
+      #ff3b30 50%,
+      rgb(var(--grad-from)) 66%,
+      rgb(var(--grad-to)) 83%,
+      rgb(var(--grad-from)) 100%
+    );
+    background-size: 200% 100%;
+    animation: footer-flow 9s linear infinite;
+  }
+  .footer-beam {
     height: 2px;
-    width: calc(var(--left) * 100%);
-    border-radius: 0 2px 2px 0;
-    background: linear-gradient(90deg, rgb(var(--grad-from) / 0.15), rgb(var(--grad-from) / 0.7) 55%, rgb(var(--fuse-ink)));
-    transition: width 1.2s cubic-bezier(0.16, 1, 0.3, 1), background 0.4s;
-    animation: fuse-draw 1.4s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
-  .fuse-head {
-    top: -4px;
-    /* Held inside the edges, so a full sign-in cannot push it past the right. */
-    left: clamp(4px, calc(var(--left) * 100%), calc(100% - 4px));
-    width: 8px;
-    height: 8px;
-    margin-left: -4px;
+  .footer-glow {
+    height: 14px;
+    filter: blur(9px);
+    opacity: 0.6;
+  }
+  :root:not(.dark) .footer-glow {
+    opacity: 0.35;
+  }
+  .footer-spark {
+    position: absolute;
+    top: -1px;
+    left: 0;
+    width: 200px;
+    height: 4px;
+    pointer-events: none;
     border-radius: 9999px;
-    background: rgb(var(--fuse-ink));
-    box-shadow:
-      0 0 0 3px rgb(var(--fuse-ink) / 0.16),
-      0 0 14px 3px rgb(var(--fuse-ink) / 0.55);
-    transition: left 1.2s cubic-bezier(0.16, 1, 0.3, 1), background 0.4s, box-shadow 0.4s;
-    animation: fuse-head-draw 1.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+    background: radial-gradient(closest-side, #fff, rgb(255 255 255 / 0.55) 40%, transparent);
+    box-shadow: 0 0 16px 4px rgb(var(--grad-to) / 0.65);
+    opacity: 0;
+    animation: footer-spark 7s cubic-bezier(0.45, 0, 0.25, 1) 1.5s infinite;
   }
-  .fuse[data-tone="warn"],
-  .fuse-head[data-tone="warn"] {
-    --fuse-ink: var(--warn);
+  @keyframes footer-spark {
+    0% { transform: translateX(-220px); opacity: 0; }
+    6% { opacity: 1; }
+    40% { opacity: 1; }
+    46% { transform: translateX(calc(100vw + 20px)); opacity: 0; }
+    100% { transform: translateX(calc(100vw + 20px)); opacity: 0; }
   }
-  .fuse[data-tone="warn"] {
-    background: linear-gradient(90deg, rgb(var(--warn) / 0.2), rgb(var(--warn)));
+  /* The tagline catches the same light: a bright band sweeps across it. */
+  @keyframes footer-text {
+    to { background-position: -200% 0; }
   }
-  @keyframes fuse-draw {
-    from { width: 0; }
+  .footer-shimmer {
+    background: linear-gradient(
+      90deg,
+      rgb(var(--muted)) 0%,
+      rgb(var(--muted)) 36%,
+      rgb(var(--accent)) 46%,
+      rgb(var(--fg)) 50%,
+      rgb(var(--accent)) 54%,
+      rgb(var(--muted)) 64%,
+      rgb(var(--muted)) 100%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: footer-text 6s linear infinite;
   }
-  @keyframes fuse-head-draw {
-    from { left: 0; opacity: 0; }
+  .footer-node {
+    background: rgb(var(--accent) / 0.7);
+    box-shadow: 0 0 6px rgb(var(--accent) / 0.7);
   }
 
   /* ---- Sidebar brand seal: the company mark, framed under the product wordmark.

@@ -12,6 +12,7 @@ import { Breadcrumbs } from "./Breadcrumbs";
 import { CommandPalette, type Command } from "./CommandPalette";
 import { BrandMark, BrandSeal } from "./brand";
 import { Footer } from "./Footer";
+import { SignOutNotice, clock } from "./SignOutNotice";
 import { Menu, MenuItem, Badge, cn } from "./ui";
 import {
   IconDashboard, IconDevices, IconSessions, IconSliders, IconAudit, IconShield,
@@ -45,7 +46,7 @@ const NAV: NavItem[] = [
 const COLLAPSE_KEY = "guardrail-sidebar-collapsed";
 
 export function AppLayout() {
-  const { principal, logout } = useAuth();
+  const { principal, signIn, logout } = useAuth();
   const has = useAuth((s) => s.has);
   const version = useVersion();
   const navigate = useNavigate();
@@ -307,6 +308,11 @@ export function AppLayout() {
                   <div className="border-b border-line px-3 py-2.5">
                     <div className="truncate text-sm font-medium text-fg">{principal?.email}</div>
                     <div className="truncate text-2xs text-faint">{principal?.is_super_admin ? "Super Admin" : principal?.roles.join(", ") || "No roles"}</div>
+                    {signIn && (
+                      <div className="mt-1.5 text-2xs tabular-nums text-faint">
+                        Signed in until {clock(signIn.endsAt)}
+                      </div>
+                    )}
                   </div>
                   <div className="p-1">
                     <MenuItem icon={IconShield} onClick={() => { close(); navigate("/security"); }}>Account settings</MenuItem>
@@ -324,6 +330,7 @@ export function AppLayout() {
         </main>
         {/* Wherever the approver is, a request that just arrived comes to them. */}
         <ApprovalAlert pending={pendingApprovals.data} />
+        <SignOutNotice />
         <Footer />
       </div>
 

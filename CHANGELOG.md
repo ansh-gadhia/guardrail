@@ -33,12 +33,27 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   this ships keeps their existing session until it idles out or reaches the new
   cap, which is at most 12 hours.
 
-- **The footer shows how long your sign-in has left.** A line along its top
-  edge burns down over the sign-in, beside "Signed in until 6:42 PM" and the
-  idle rule. It turns amber in the last half hour, and counts down the final
-  two minutes before an idle sign-out, so moving the mouse visibly keeps you
-  in. The vendor and client credit now sit on the right at full colour. The
-  footer is the height of the sidebar's foot, so one rule runs across the app.
+- **The console warns before it signs you out, and the footer is a beam
+  again.** In the last two minutes before an idle sign-out a notice counts
+  down, with a button to stay signed in; in the last ten minutes of the 12-hour
+  sign-in it says when it ends, so work can be saved. Neither shows otherwise.
+  The account menu says when the sign-in ends. The footer's top edge is a
+  flowing beam in GuardRail's teal and cyan and the green and red of the
+  Virtual Galaxy mark, with a soft glow and a spark that runs its length; the
+  credit is at full colour, and the footer is the height of the sidebar's foot,
+  so one rule runs across the app.
+
+- **The audit log says what happened, in words.** Every event reads as a
+  sentence — "Opened an SSH session" on MyUbuntuServerDLP, "Signed in to
+  MyUbuntuServerDLP as soc, over SSH", "Approved access for …", "Recording
+  removed by retention, kept until 24 Sep 2026" — with who did it, what it was
+  done to by name and kind, and the one fact worth reading. Sign-ins say "Own
+  account" instead of repeating the email; things GuardRail did by itself say
+  GuardRail; a deleted target says so. Events are filtered by family (sign-in,
+  access requests, sessions, recordings, devices and credentials, people and
+  teams, settings). The event code, ids and raw details stay in each event's
+  drawer. The CSV export gains `event` and `details` columns with the same
+  words, after the existing ones. The dashboard's activity feed uses them too.
 
 - **The sign-in page shows GuardRail at work.** Its dark panel is now a live
   schematic: people, the vault behind its gate, and privileged systems, with
@@ -48,6 +63,16 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   the gate turns red, or it holds on amber for a second factor. On a phone the
   emblem's dial answers the same way. The form warns when Caps Lock is on.
   With reduced motion the scene is drawn still and the steps are written out.
+
+### Fixed
+
+- **The access log listed sign-ins that had already ended.** It showed every
+  sign-in whose token had not expired, and tokens issued before the idle limit
+  carried thirty days — so a browser closed weeks ago still appeared "active",
+  though the server would refuse it. It now lists what the server would honour.
+- **The approval pop-up had no background.** It named a colour the theme does
+  not define, so it was drawn transparent over the page; the live-session
+  watch frame had the same fault.
 
 ## [1.5.0] - 2026-09-11
 

@@ -47,7 +47,7 @@ export function ApprovalAlert({ pending }: { pending: AccessRequest[] | undefine
           <div
             key={r.id}
             role="alert"
-            className="animate-in rounded-xl border border-warn/40 bg-surface-1 p-3 shadow-lg ring-1 ring-warn/20"
+            className="animate-slideup rounded-xl border border-warn/40 bg-surface p-3 shadow-lg ring-1 ring-warn/20"
           >
             <div className="flex items-start gap-2.5">
               <span className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-warn/15 text-warn">
