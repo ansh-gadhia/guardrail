@@ -12,6 +12,48 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-09-24
+
+### Security
+
+- **Nobody can manage somebody ranked at or above them.** An Organization
+  Admin could change a Super Admin's role — demote them — and it was recorded
+  as an ordinary success; the only rules were "only a Super Admin grants Super
+  Admin" and "nobody touches the installation account". Now every action on
+  another person — their role, password, account, teams, sign-ins, and handing
+  their role to the SIEM — needs the actor to outrank them: a Super Admin
+  outranks everybody, anybody else only people whose role is ranked strictly
+  below their own. And nobody hands out a role ranked at or above their own,
+  so an Organization Admin manages Operators, Auditors and Read-only users,
+  while only a Super Admin makes Organization Admins. Password resets are the
+  one exception: they also reach people of your own rank, so Organization
+  Admins can still help each other back in — but never anybody ranked above,
+  so a Super Admin's password stays out of reach. Refusals return 403 with the
+  reason and are recorded ("Refused by the role hierarchy"). Access Control
+  says "Same rank as you" (with Reset password still offered) or "Ranked above
+  you" in place of the controls, and the role picker greys out roles above the
+  viewer's rank.
+
+### Changed
+
+- **A role change says what it changed.** The audit event records the role by
+  name before and after — "Operator → Organization Admin" — instead of
+  "1 role now".
+- **The installer shows image pulls the way `docker pull` does.** Each image
+  the deployment runs is pulled in turn under a numbered header, with docker's
+  own per-layer progress, digest and status, instead of compose's condensed
+  view that folded each service to one line.
+
+### Fixed
+
+- **A long client name was cut off in the sidebar.** It now wraps, centred and
+  balanced, over up to three lines, and steps down in size as it grows; the
+  sidebar foot shows "GuardRail" rather than a truncated client name.
+- **The sidebar was rebuilt every few seconds.** It was declared as a component
+  inside the layout's render, so each refresh of the live counts threw it away
+  and mounted a new one: the brand seal replayed its entrance from invisible
+  and the navigation lost its scroll.
+
 ## [1.6.0] - 2026-09-24
 
 ### Changed
