@@ -42,10 +42,6 @@ func TestHierarchy_NobodyManagesTheirEqualOrSuperior(t *testing.T) {
 			"change their role": func() error {
 				return h.svc.AssignRoles(ctx, actor, target.ID, []iam.ID{roleID(RoleReadOnly)}, ReqMeta{})
 			},
-			"reset their password": func() error {
-				_, err := h.svc.ResetPassword(ctx, actor, target.ID, "", ReqMeta{})
-				return err
-			},
 			"remove their account": func() error { return h.svc.DeleteUser(ctx, actor, target.ID, ReqMeta{}) },
 		} {
 			if err := try(); !errors.Is(err, iam.ErrPermissionDenied) {
@@ -53,8 +49,16 @@ func TestHierarchy_NobodyManagesTheirEqualOrSuperior(t *testing.T) {
 			}
 		}
 	}
-	if n := len(h.audit.find("user.protected_denied", "outranked")); n != 6 {
-		t.Errorf("recorded %d refusals, want 6 — every refused attempt is on the record", n)
+	// Password resets reach an equal — Organization Admins help each other
+	// back in — but never anybody ranked above.
+	if _, err := h.svc.ResetPassword(ctx, actor, peer.ID, "", ReqMeta{}); err != nil {
+		t.Errorf("an Organization Admin could not reset a fellow Organization Admin's password: %v", err)
+	}
+	if _, err := h.svc.ResetPassword(ctx, actor, super.ID, "", ReqMeta{}); !errors.Is(err, iam.ErrPermissionDenied) {
+		t.Errorf("an Organization Admin could reset a Super Admin's password: %v", err)
+	}
+	if n := len(h.audit.find("user.protected_denied", "outranked")); n != 5 {
+		t.Errorf("recorded %d refusals, want 5 — every refused attempt is on the record", n)
 	}
 	defer func() {
 		// Two promotions and one creation past the ceiling, each on the record.

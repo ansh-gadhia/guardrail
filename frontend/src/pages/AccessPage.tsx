@@ -109,6 +109,10 @@ export function AccessPage() {
                 // Whether the hierarchy lets the viewer manage this person at
                 // all. The server refuses otherwise; this just says so first.
                 const outranked = !isSelf && !me?.is_super_admin && rankOf(me) <= rankOf(u);
+                // Password resets are the one thing that reaches an equal:
+                // Organization Admins help each other back in. Never anybody
+                // ranked above (iam/users.go, guardRankOrPeer).
+                const peer = outranked && rankOf(me) === rankOf(u);
                 // Named here for the same reason isSelf is: it decides a badge
                 // AND which controls below are truthful.
                 const provider = authProviderLabel(u.auth_provider);
@@ -155,12 +159,31 @@ export function AccessPage() {
                     {canWrite && (
                       <div className="mt-4 flex items-center justify-end gap-2 border-t border-line pt-3">
                         {outranked && !u.is_bootstrap_admin ? (
-                          <span
-                            className="mr-auto flex items-center gap-1.5 text-xs text-faint"
-                            title="Their role is ranked at or above yours. Only somebody ranked higher can change their role, reset their password, change their teams or remove them."
-                          >
-                            <IconLock size={13} /> Ranked at or above you
-                          </span>
+                          <>
+                            <span
+                              className="mr-auto flex items-center gap-1.5 text-xs text-faint"
+                              title={
+                                peer
+                                  ? "Same rank as you. Only somebody ranked higher can change their role, change their teams or remove them — but you can reset their password if they are locked out."
+                                  : "Ranked above you. Only somebody ranked at least as high can change their role, reset their password, change their teams or remove them."
+                              }
+                            >
+                              <IconLock size={13} /> {peer ? "Same rank as you" : "Ranked above you"}
+                            </span>
+                            {peer &&
+                              (federated ? (
+                                <span
+                                  className="flex items-center gap-1.5 text-xs text-faint"
+                                  title={`${provider} holds this person's credential. GuardRail never had a password for this account, so there is nothing here to reset — change it where they sign in.`}
+                                >
+                                  <IconKey size={13} /> Password held by {provider}
+                                </span>
+                              ) : (
+                                <button className="btn-subtle" onClick={() => setResetFor(u)}>
+                                  Reset password
+                                </button>
+                              ))}
+                          </>
                         ) : u.is_bootstrap_admin ? (
                           /* Say WHY rather than hiding the controls. A missing button
                              sends somebody hunting for a permission they already have;
@@ -218,7 +241,7 @@ export function AccessPage() {
                             isSelf
                               ? "You cannot remove the account you are signed in as. Sign in as another super admin to remove this one."
                               : outranked
-                                ? "Their role is ranked at or above yours, so only somebody ranked higher can remove them."
+                                ? `${peer ? "Same rank as you" : "Ranked above you"}, so only somebody ranked higher can remove them.`
                                 : u.is_bootstrap_admin
                                 ? "Remove the installation account"
                                 : "Remove user"

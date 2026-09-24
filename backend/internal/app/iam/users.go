@@ -202,16 +202,41 @@ func (s *Service) guardSuperAdminGrant(ctx context.Context, actor iam.Claims, ro
 //
 // Acting on your own account is not managing somebody else, and is left to the
 // other rules (you cannot promote yourself: see guardGrantRank).
+//
+// One exception, on purpose: a password reset reaches people of your own rank
+// as well (guardRankOrPeer). Organization Admins help each other back in when
+// one is locked out; that is helping, not managing, and the reset password is
+// temporary and must be replaced at next sign-in. It still never reaches
+// anybody ranked above — a Super Admin's password stays out of reach.
 
 // guardRank refuses an action on another person the actor does not outrank,
 // and records the attempt. It returns the target, loaded, for the caller.
 func (s *Service) guardRank(ctx context.Context, actor iam.Claims, targetID iam.ID, what string) (*iam.User, error) {
+	return s.guardRankAt(ctx, actor, targetID, what, false)
+}
+
+// guardRankOrPeer is guardRank that also lets people of the actor's own rank
+// through. Used for password resets only; see the note above.
+func (s *Service) guardRankOrPeer(ctx context.Context, actor iam.Claims, targetID iam.ID, what string) (*iam.User, error) {
+	return s.guardRankAt(ctx, actor, targetID, what, true)
+}
+
+func (s *Service) guardRankAt(ctx context.Context, actor iam.Claims, targetID iam.ID, what string, peers bool) (*iam.User, error) {
 	target, err := s.users.GetByID(ctx, actor.Scope(), targetID)
 	if err != nil {
 		return nil, err
 	}
-	if targetID == actor.UserID || actor.IsSuperAdmin || actor.Level() > target.Level() {
+	if targetID == actor.UserID || actor.IsSuperAdmin || actor.Level() > target.Level() ||
+		(peers && actor.Level() == target.Level()) {
 		return target, nil
+	}
+	if peers {
+		s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "user.protected_denied",
+			Category: audit.CategoryUser, ActorID: &actor.UserID, ActorEmail: actor.Email,
+			TargetType: "user", TargetID: targetID.String(), Result: audit.ResultDenied,
+			Detail: map[string]any{"attempted": what, "target": target.Email.String(), "reason": "outranked"}})
+		return nil, fmt.Errorf("%w: %s is ranked above you, so only somebody ranked at least as high can %s",
+			iam.ErrPermissionDenied, target.Email, what)
 	}
 	s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "user.protected_denied",
 		Category: audit.CategoryUser, ActorID: &actor.UserID, ActorEmail: actor.Email,
@@ -362,10 +387,10 @@ func (s *Service) ResetPassword(ctx context.Context, actor iam.Claims, userID ia
 	if target.IsBootstrapAdmin() {
 		return nil, s.guardBootstrapAdmin(ctx, actor, userID, "password reset")
 	}
-	// Was: only a super admin's password was out of reach. A peer's is too — an
-	// Organization Admin resetting another's is taking over an account of their
-	// own rank.
-	if _, err := s.guardRank(ctx, actor, userID, "reset their password"); err != nil {
+	// Anybody ranked above is out of reach — a Super Admin's password, above
+	// all. People of the actor's own rank are not: Organization Admins reset
+	// each other's passwords when one is locked out (see guardRankOrPeer).
+	if _, err := s.guardRankOrPeer(ctx, actor, userID, "reset their password"); err != nil {
 		return nil, err
 	}
 	// Federated accounts have no local password to reset; saying so beats
