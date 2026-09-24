@@ -12,6 +12,8 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-24
+
 ### Changed
 
 - **Closing the browser signs you out of the console.** The refresh cookie
