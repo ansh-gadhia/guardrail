@@ -15,7 +15,7 @@ export interface Column<T> {
   defaultHidden?: boolean;
 }
 
-type SortDir = "asc" | "desc";
+export type SortDir = "asc" | "desc";
 
 /**
  * ServerMode hands paging, searching and sorting to the server.

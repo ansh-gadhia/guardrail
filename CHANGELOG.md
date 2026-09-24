@@ -70,6 +70,19 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   sign-in whose token had not expired, and tokens issued before the idle limit
   carried thirty days — so a browser closed weeks ago still appeared "active",
   though the server would refuse it. It now lists what the server would honour.
+- **One sign-out was recorded twice, and credited to GuardRail.** A tab waking
+  after the idle limit had two parts of the page end the sign-in at once, and
+  the server recorded every sign-out request, even for a sign-in that had just
+  ended. The browser now sends one, the server records only the one that
+  actually ended a live sign-in, and it names the person. An idle sign-out from
+  the browser reads "Signed out after inactivity", like the server's own.
+- **The audit log and sign-in attempts stopped at the newest events.** The
+  audit log showed the newest 200 and sign-in attempts the newest 50, with no
+  way further back; "Failed" only filtered those 50. Both now page through the
+  whole history on the server — "3,776–3,791 of 3,791", back to the first
+  event — and the audit log's search covers all of it, by person, machine, IP
+  or event code. Events stored without a time by an early build say "Not
+  recorded".
 - **The approval pop-up had no background.** It named a colour the theme does
   not define, so it was drawn transparent over the page; the live-session
   watch frame had the same fault.

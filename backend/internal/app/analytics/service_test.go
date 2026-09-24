@@ -15,6 +15,7 @@ type fakeStore struct {
 	summary Summary
 	search  SearchResults
 	rows    []AuditRow
+	total   int
 	gotF    AuditFilter
 }
 
@@ -25,6 +26,29 @@ func (f *fakeStore) Search(ctx context.Context, s Scope, q string, limit int) (S
 func (f *fakeStore) ListAudit(ctx context.Context, s Scope, filter AuditFilter) ([]AuditRow, error) {
 	f.gotF = filter
 	return f.rows, nil
+}
+
+func (f *fakeStore) CountAudit(ctx context.Context, s Scope, filter AuditFilter) (int, error) {
+	return f.total, nil
+}
+
+// The log pages back to its first event: a page comes with how many there are
+// in all, not only however many one request returned.
+func TestListAudit_ReturnsThePageAndTheTotal(t *testing.T) {
+	store := &fakeStore{rows: []AuditRow{{Action: "auth.login", Result: "success", ActorEmail: "a@x.io"}}, total: 3412}
+	rows, total, err := NewService(store).ListAudit(context.Background(), actor(), AuditFilter{Limit: 25, Offset: 3400})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3412 || len(rows) != 1 || store.gotF.Offset != 3400 {
+		t.Fatalf("total %d, %d rows, offset passed %d", total, len(rows), store.gotF.Offset)
+	}
+	if rows[0].Title != "Signed in" {
+		t.Fatalf("page not described: %q", rows[0].Title)
+	}
+	if _, _, err := NewService(store).ListAudit(context.Background(), actor(), AuditFilter{Group: "nope"}); err == nil {
+		t.Fatal("an unknown group was accepted")
+	}
 }
 
 func actor() iam.Claims {

@@ -1,11 +1,12 @@
-import { useMemo, useState, type ComponentType, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useDebounced } from "@/hooks/useDebounced";
 import { api } from "@/lib/api";
 import { plausibleDate } from "@/lib/dates";
-import type { AuditRow } from "@/lib/types";
+import type { AuditRow, Paged } from "@/lib/types";
 import { PageHero, ErrorNote, EmptyState, StatusBadge, Select, Button, Skeleton, Drawer, cn } from "@/components/ui";
-import { DataTable, type Column } from "@/components/DataTable";
+import { DataTable, type Column, type SortDir } from "@/components/DataTable";
 import {
   IconAudit,
   IconDownload,
@@ -77,13 +78,34 @@ export function AuditPage() {
   // looking at" is a question you have while looking at it.
   const { report, verify } = useChainVerification();
 
-  const { data, isLoading, isError } = useQuery<AuditRow[]>({
-    queryKey: ["audit", group, result],
-    queryFn: async () =>
-      (await api.get<{ data: AuditRow[] }>("/audit", { params: { group, result, limit: 200 } })).data.data,
-  });
+  // The server pages the log, so the last page is the first event ever
+  // recorded — it used to stop at whatever the newest 200 happened to be.
+  // Search runs there too, across the whole log, by person, machine, IP or
+  // event code.
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
+  const [query, setQuery] = useState("");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const search = useDebounced(query.trim(), 300);
+  useEffect(() => setPage(0), [search, group, result, sortDir, pageSize]);
 
-  const rows = useMemo<Row[]>(() => (data ?? []).map((r, i) => ({ ...r, _k: `${i}-${r.ts}` })), [data]);
+  const listParams = useMemo(
+    () => ({ group, result, q: search, dir: sortDir, limit: pageSize, offset: page * pageSize }),
+    [group, result, search, sortDir, pageSize, page],
+  );
+  const { data: pageData, isLoading, isError, isFetching } = useQuery<Paged<AuditRow>>({
+    queryKey: ["audit", "page", listParams],
+    queryFn: async () => (await api.get<Paged<AuditRow>>("/audit", { params: listParams })).data,
+    placeholderData: keepPreviousData,
+  });
+  const data = pageData?.data;
+  const total = pageData?.total ?? 0;
+  const filtered = !!(group || result || search);
+
+  const rows = useMemo<Row[]>(
+    () => (data ?? []).map((r, i) => ({ ...r, _k: `${page}-${i}-${r.ts}` })),
+    [data, page],
+  );
 
   const downloadReport = async (type: "audit" | "access") => {
     try {
@@ -108,11 +130,22 @@ export function AuditPage() {
       cell: (r) => {
         const dt = plausibleDate(r.ts);
         return (
-          <span className="flex items-start gap-2.5" title={dt ? dt.toLocaleString() : undefined}>
+          <span
+            className="flex items-start gap-2.5"
+            // Events written before July 2026 by an early build carry no time at
+            // all; they are real, and chained, so they are shown as they are.
+            title={dt ? dt.toLocaleString() : "This event was stored without a time by an early version of GuardRail."}
+          >
             <span className={cn("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", NODE[r.result] ?? "bg-line-strong")} />
             <span className="leading-tight">
-              <span className="block whitespace-nowrap text-xs tabular-nums text-fg">{dt ? fmtWhen(dt) : "—"}</span>
-              <span className="block whitespace-nowrap text-2xs text-faint">{dt ? timeAgo(dt) : ""}</span>
+              {dt ? (
+                <>
+                  <span className="block whitespace-nowrap text-xs tabular-nums text-fg">{fmtWhen(dt)}</span>
+                  <span className="block whitespace-nowrap text-2xs text-faint">{timeAgo(dt)}</span>
+                </>
+              ) : (
+                <span className="block whitespace-nowrap text-xs italic text-faint">Not recorded</span>
+              )}
             </span>
           </span>
         );
@@ -120,6 +153,7 @@ export function AuditPage() {
     },
     {
       key: "event",
+      sortable: false,
       header: "Event",
       // Searchable by what it says, not by its code.
       value: (r) => `${r.title ?? r.action} ${r.note ?? ""}`,
@@ -127,18 +161,21 @@ export function AuditPage() {
     },
     {
       key: "actor",
+      sortable: false,
       header: "Who",
       value: (r) => r.actor || "GuardRail",
       cell: (r) => <ActorCell actor={r.actor} />,
     },
     {
       key: "target",
+      sortable: false,
       header: "On",
       value: (r) => targetSortValue(r),
       cell: (r) => <TargetCell row={r} />,
     },
     {
       key: "ip",
+      sortable: false,
       header: "Source IP",
       value: (r) => r.ip,
       cell: (r) =>
@@ -153,6 +190,7 @@ export function AuditPage() {
     },
     {
       key: "action",
+      sortable: false,
       header: "Event code",
       value: (r) => r.action,
       cell: (r) => <ActionName action={r.action} />,
@@ -160,6 +198,7 @@ export function AuditPage() {
     },
     {
       key: "result",
+      sortable: false,
       header: "Result",
       value: (r) => r.result,
       cell: (r) => <StatusBadge value={r.result} />,
@@ -204,24 +243,41 @@ export function AuditPage() {
       )}
       {isError && <ErrorNote message="Failed to load audit log" />}
 
-      {data && data.length === 0 && (group || result) && (
-        <EmptyState icon={IconAudit} title="No events" message="No audit events match your filters." />
-      )}
-      {data && data.length === 0 && !group && !result && (
+      {data && total === 0 && !filtered && (
         <EmptyState icon={IconAudit} title="No events yet" message="Privileged actions will appear here as they happen." />
       )}
 
-      {data && data.length > 0 && (
+      {data && (total > 0 || filtered) && (
         <DataTable
           columns={columns}
           rows={rows}
           rowKey={(r) => r._k}
           rowClassName={(r) => RAIL[r.result] ?? "border-l-2 border-l-transparent"}
-          searchPlaceholder="Search events…"
-          pageSize={15}
+          searchPlaceholder="Search by person, machine, IP or event code…"
           exportName="guardrail-audit"
-          emptyMessage="No events match your search."
+          emptyMessage={search ? `No events match “${search}”.` : "No audit events match these filters."}
           onRowClick={setSelected}
+          server={{
+            total,
+            page,
+            onPageChange: setPage,
+            pageSize,
+            onPageSizeChange: setPageSize,
+            query,
+            onQueryChange: setQuery,
+            sortKey: "ts",
+            sortDir,
+            onSortChange: (_k, d) => setSortDir(d),
+            loading: isFetching,
+            // The whole filtered log, not the page on screen; capped so one click
+            // cannot ask for an unbounded response.
+            fetchAll: async () => {
+              const { data } = await api.get<Paged<AuditRow>>("/audit", {
+                params: { ...listParams, limit: 5000, offset: 0 },
+              });
+              return data.data.map((r, i) => ({ ...r, _k: `all-${i}` }));
+            },
+          }}
           toolbar={
             <>
               <Select className="max-w-[13rem]" value={group} onChange={(e) => setGroup(e.target.value)}>

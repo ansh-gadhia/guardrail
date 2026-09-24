@@ -172,13 +172,9 @@ func (r *AnalyticsRepo) Search(ctx context.Context, s analytics.Scope, q string,
 	return out, err
 }
 
-// ListAudit returns audit rows matching the filter, newest first.
-func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f analytics.AuditFilter) ([]analytics.AuditRow, error) {
-	limit := f.Limit
-	if limit <= 0 || limit > 10000 {
-		limit = 200
-	}
-
+// auditWhere builds the WHERE clause both ListAudit and CountAudit use, so a
+// page and the total it is a page of can never be counting different things.
+func auditWhere(f analytics.AuditFilter) (string, []any) {
 	var where []string
 	var args []any
 	add := func(clause string, val any) {
@@ -194,13 +190,30 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 			add("NOT (action LIKE ANY($%d::text[]))", exclude)
 		}
 	}
+	if f.Search != "" {
+		// By name as well as by code: somebody looking for what happened on a
+		// machine types the machine's name, not its id.
+		add(`(actor_email ILIKE '%%' || $%[1]d || '%%'
+			OR action ILIKE '%%' || $%[1]d || '%%'
+			OR host(ip) ILIKE '%%' || $%[1]d || '%%'
+			OR target_id IN (SELECT id::text FROM devices     WHERE name  ILIKE '%%' || $%[1]d || '%%'
+			           UNION SELECT id::text FROM users       WHERE email ILIKE '%%' || $%[1]d || '%%'
+			           UNION SELECT id::text FROM credentials WHERE name  ILIKE '%%' || $%[1]d || '%%'
+			           UNION SELECT id::text FROM teams       WHERE name  ILIKE '%%' || $%[1]d || '%%')
+			OR session_id IN (SELECT id FROM access_sessions WHERE device_name ILIKE '%%' || $%[1]d || '%%'))`, f.Search)
+	}
 	if f.Action != "" {
 		add("action ILIKE '%%' || $%d || '%%'", f.Action)
 	}
 	if f.Actor != "" {
 		add("actor_email ILIKE '%%' || $%d || '%%'", f.Actor)
 	}
-	if f.Result != "" {
+	switch f.Result {
+	case "":
+	case "unsuccessful":
+		// Everything that did not go through: failures and refusals alike.
+		where = append(where, "result <> 'success'")
+	default:
 		add("result = $%d", f.Result)
 	}
 	if f.TargetType != "" {
@@ -215,11 +228,39 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 	if f.To != nil {
 		add("ts <= $%d", *f.To)
 	}
-	whereSQL := ""
-	if len(where) > 0 {
-		whereSQL = "WHERE " + strings.Join(where, " AND ")
+	if len(where) == 0 {
+		return "", args
 	}
-	args = append(args, limit)
+	return "WHERE " + strings.Join(where, " AND "), args
+}
+
+// CountAudit counts the audit rows matching the filter, ignoring its paging.
+func (r *AnalyticsRepo) CountAudit(ctx context.Context, s analytics.Scope, f analytics.AuditFilter) (int, error) {
+	whereSQL, args := auditWhere(f)
+	var n int
+	err := r.scoped(ctx, s, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, "SELECT count(*) FROM audit_events "+whereSQL, args...).Scan(&n)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("analytics: count audit: %w", err)
+	}
+	return n, nil
+}
+
+// ListAudit returns one page of audit rows matching the filter, newest first
+// unless the filter asks for oldest first.
+func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f analytics.AuditFilter) ([]analytics.AuditRow, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 10000 {
+		limit = 200
+	}
+	offset := max(f.Offset, 0)
+	dir := "DESC"
+	if f.Ascending {
+		dir = "ASC"
+	}
+	whereSQL, args := auditWhere(f)
+	args = append(args, limit, offset)
 	// The target is stored as a bare UUID, which is unreadable on a screen: a
 	// reviewer reading "device:baaf24df" has to go and look it up somewhere else
 	// before the row means anything. Resolve it to the name the same reviewer
@@ -241,9 +282,9 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 			       CASE WHEN target_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 			            THEN target_id::uuid END AS tid
 			  FROM audit_events
-			  %s
-			 ORDER BY ts DESC, id DESC
-			 LIMIT $%d
+			  %[1]s
+			 ORDER BY ts %[2]s, id %[2]s
+			 LIMIT $%[3]d OFFSET $%[4]d
 		)
 		SELECT e.ts, COALESCE(e.actor_email,''), e.action, e.category,
 		       COALESCE(e.target_type,''), COALESCE(e.target_id,''),
@@ -264,7 +305,7 @@ func (r *AnalyticsRepo) ListAudit(ctx context.Context, s analytics.Scope, f anal
 		  -- The session the event happened inside: its protocol and machine are
 		  -- what turn "credential.use" into "signed in to db-prod-01 over SSH".
 		  LEFT JOIN access_sessions ss ON ss.id = e.session_id
-		 ORDER BY e.ts DESC, e.id DESC`, whereSQL, len(args))
+		 ORDER BY e.ts %[2]s, e.id %[2]s`, whereSQL, dir, len(args)-1, len(args))
 
 	out := []analytics.AuditRow{}
 	err := r.scoped(ctx, s, func(tx pgx.Tx) error {

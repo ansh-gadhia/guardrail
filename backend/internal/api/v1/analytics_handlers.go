@@ -115,7 +115,11 @@ func (h *AnalyticsHandler) search(c *gin.Context) {
 func (h *AnalyticsHandler) audit(c *gin.Context) {
 	actor, _ := middleware.ClaimsFrom(c)
 	f := analytics.AuditFilter{
-		Group:      c.Query("group"),
+		Group:  c.Query("group"),
+		Search: c.Query("q"),
+		Offset: queryOffset(c),
+		// Time is the only order a log has; any other column name is ignored.
+		Ascending:  c.Query("dir") == "asc",
 		Action:     c.Query("action"),
 		Actor:      c.Query("actor"),
 		Result:     c.Query("result"),
@@ -129,7 +133,7 @@ func (h *AnalyticsHandler) audit(c *gin.Context) {
 	if to := parseTime(c.Query("to")); to != nil {
 		f.To = to
 	}
-	rows, err := h.svc.ListAudit(c.Request.Context(), actor, f)
+	rows, total, err := h.svc.ListAudit(c.Request.Context(), actor, f)
 	if err != nil {
 		fail(c, err)
 		return
@@ -151,7 +155,7 @@ func (h *AnalyticsHandler) audit(c *gin.Context) {
 			"protocol": r.Protocol,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"data": out})
+	c.JSON(http.StatusOK, gin.H{"data": out, "total": total, "limit": len(out), "offset": f.Offset})
 }
 
 type reportRequest struct {

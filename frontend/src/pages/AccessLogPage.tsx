@@ -1,13 +1,23 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, problemDetail } from "@/lib/api";
 import { plausibleDate } from "@/lib/dates";
-import type { LoginSession, DashboardSummary } from "@/lib/types";
+import type { LoginSession, DashboardSummary, Paged } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { PageHero, StatCluster, Panel, Badge, Button, ErrorNote, EmptyState, Skeleton, cn } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { toast } from "@/components/Toast";
-import { IconActivity, IconMonitor, IconGlobe, IconClock, IconLogout, IconCheck, IconAlert } from "@/components/icons";
+import {
+  IconActivity,
+  IconMonitor,
+  IconGlobe,
+  IconClock,
+  IconLogout,
+  IconCheck,
+  IconAlert,
+  IconChevronLeft,
+  IconChevronRight,
+} from "@/components/icons";
 
 /* ---- time + client helpers -------------------------------------------------
    Everything here works on the UTC instant the API sends and renders in the
@@ -161,11 +171,54 @@ function describeAttempt(r: AuditRow): AttemptView {
   return { tone: "danger", badge: "failed", detail: REASONS[reason] ?? reason ?? "sign-in failed", icon: "alert" };
 }
 
+const ATTEMPTS_PER_PAGE = 20;
+
+/* Newer / older through the whole sign-in history, with where you are in it. */
+function Pager({
+  page,
+  perPage,
+  total,
+  busy,
+  onPage,
+}: {
+  page: number;
+  perPage: number;
+  total: number;
+  busy: boolean;
+  onPage: (p: number) => void;
+}) {
+  const last = Math.max(0, Math.ceil(total / perPage) - 1);
+  const from = total === 0 ? 0 : page * perPage + 1;
+  const to = Math.min(total, (page + 1) * perPage);
+  return (
+    <div className="mt-2 flex items-center justify-between gap-3 border-t border-line pt-3 text-xs text-muted">
+      <span className={cn("tabular-nums", busy && "opacity-60")}>
+        {from.toLocaleString()}–{to.toLocaleString()} of {total.toLocaleString()}
+      </span>
+      <span className="flex items-center gap-1.5">
+        <button type="button" className="btn-ghost h-8 px-2.5 text-xs" disabled={page === 0} onClick={() => onPage(0)}>
+          Newest
+        </button>
+        <button type="button" className="btn-ghost h-8 px-2.5 text-xs" disabled={page === 0} onClick={() => onPage(page - 1)}>
+          <IconChevronLeft size={14} /> Newer
+        </button>
+        <button type="button" className="btn-ghost h-8 px-2.5 text-xs" disabled={page >= last} onClick={() => onPage(page + 1)}>
+          Older <IconChevronRight size={14} />
+        </button>
+        <button type="button" className="btn-ghost h-8 px-2.5 text-xs" disabled={page >= last} onClick={() => onPage(last)}>
+          Oldest
+        </button>
+      </span>
+    </div>
+  );
+}
+
 export function AccessLogPage() {
   const qc = useQueryClient();
   const principal = useAuth((s) => s.principal);
   const has = useAuth((s) => s.has);
   const [attemptFilter, setAttemptFilter] = useState<"all" | "failed">("all");
+  const [attemptPage, setAttemptPage] = useState(0);
 
   const sessions = useQuery<LoginSession[]>({
     queryKey: ["auth", "sessions"],
@@ -178,13 +231,25 @@ export function AccessLogPage() {
     queryFn: async () => (await api.get<DashboardSummary>("/dashboard/summary")).data,
   });
 
-  // Recent sign-in history is the audit feed filtered to login events. Only
-  // fetched when the operator can read the audit log.
-  const recent = useQuery<AuditRow[]>({
-    queryKey: ["auth", "signin-attempts"],
+  // Sign-in history is the audit feed filtered to login events, paged by the
+  // server all the way back to the first attempt. It used to be the newest 50
+  // and nothing more — and "Failed" only filtered those 50, so an older failure
+  // was simply not there. Only fetched when the operator can read the audit log.
+  const recent = useQuery<Paged<AuditRow>>({
+    queryKey: ["auth", "signin-attempts", attemptFilter, attemptPage],
     queryFn: async () =>
-      (await api.get<{ data: AuditRow[] }>("/audit", { params: { action: "auth.login", limit: 50 } })).data.data,
+      (
+        await api.get<Paged<AuditRow>>("/audit", {
+          params: {
+            action: "auth.login",
+            result: attemptFilter === "failed" ? "unsuccessful" : "",
+            limit: ATTEMPTS_PER_PAGE,
+            offset: attemptPage * ATTEMPTS_PER_PAGE,
+          },
+        })
+      ).data,
     enabled: has("log:read"),
+    placeholderData: keepPreviousData,
     refetchInterval: 20_000,
   });
 
@@ -379,7 +444,10 @@ export function AccessLogPage() {
               {(["all", "failed"] as const).map((f) => (
                 <button
                   key={f}
-                  onClick={() => setAttemptFilter(f)}
+                  onClick={() => {
+                    setAttemptFilter(f);
+                    setAttemptPage(0);
+                  }}
                   className={cn(
                     "rounded-md px-2.5 py-1 font-medium capitalize transition",
                     attemptFilter === f ? "bg-surface text-accent shadow-xs ring-1 ring-line" : "text-muted hover:text-fg",
@@ -408,9 +476,8 @@ export function AccessLogPage() {
             <Skeleton className="h-40" />
           ) : (
             (() => {
-              const items = (recent.data ?? []).filter(
-                (r) => attemptFilter === "all" || (r.result || "").toLowerCase() !== "success",
-              );
+              const items = recent.data?.data ?? [];
+              const total = recent.data?.total ?? 0;
               if (items.length === 0)
                 return (
                   <EmptyState
@@ -418,47 +485,56 @@ export function AccessLogPage() {
                   />
                 );
               return (
-                <ol className="divide-y divide-line">
-                  {items.map((r, i) => {
-                    const a = describeAttempt(r);
-                    const Icon = a.icon === "check" ? IconCheck : a.icon === "pending" ? IconClock : IconAlert;
-                    return (
-                      <li key={i} className="flex items-center gap-3 py-2.5">
-                        <span className={cn("grid h-6 w-6 shrink-0 place-items-center rounded-full", CIRCLE[a.tone])}>
-                          <Icon size={13} />
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <span className="truncate text-sm text-fg">{r.actor || "unknown account"}</span>
-                            {a.stage && a.tone !== "success" && (
-                              <span className="shrink-0 rounded border border-line px-1 py-px font-mono text-[10px] uppercase leading-none tracking-wide text-faint">
-                                {a.stage === "mfa" ? "2FA" : "Password"}
-                              </span>
-                            )}
+                <>
+                  <ol className="divide-y divide-line">
+                    {items.map((r, i) => {
+                      const a = describeAttempt(r);
+                      const Icon = a.icon === "check" ? IconCheck : a.icon === "pending" ? IconClock : IconAlert;
+                      return (
+                        <li key={i} className="flex items-center gap-3 py-2.5">
+                          <span className={cn("grid h-6 w-6 shrink-0 place-items-center rounded-full", CIRCLE[a.tone])}>
+                            <Icon size={13} />
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate text-sm text-fg">{r.actor || "unknown account"}</span>
+                              {a.stage && a.tone !== "success" && (
+                                <span className="shrink-0 rounded border border-line px-1 py-px font-mono text-[10px] uppercase leading-none tracking-wide text-faint">
+                                  {a.stage === "mfa" ? "2FA" : "Password"}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-2xs text-faint">{a.detail}</div>
                           </div>
-                          <div className="text-2xs text-faint">{a.detail}</div>
-                        </div>
-                        <span className="hidden font-mono text-xs text-faint sm:inline">{r.ip || "—"}</span>
-                        <Badge tone={a.tone}>{a.badge}</Badge>
-                        {/* dateTime carries the machine-readable instant; the two
-                            rendered lines are for people. A sign-in attempt is the
-                            thing most likely to be quoted in an incident report,
-                            so the date has to be here and not only on hover. */}
-                        {/* spans, not divs: <time> takes phrasing content only,
-                            and a <div> inside it is invalid markup React will
-                            warn about on every render. */}
-                        <time
-                          dateTime={r.ts}
-                          title={absExact(r.ts)}
-                          className="w-32 shrink-0 text-right leading-tight tabular-nums"
-                        >
-                          <span className="block whitespace-nowrap text-2xs text-muted">{absLocal(r.ts)}</span>
-                          <span className="block font-mono text-2xs text-faint">{relTime(r.ts)}</span>
-                        </time>
-                      </li>
-                    );
-                  })}
-                </ol>
+                          <span className="hidden font-mono text-xs text-faint sm:inline">{r.ip || "—"}</span>
+                          <Badge tone={a.tone}>{a.badge}</Badge>
+                          {/* dateTime carries the machine-readable instant; the two
+                              rendered lines are for people. A sign-in attempt is the
+                              thing most likely to be quoted in an incident report,
+                              so the date has to be here and not only on hover. */}
+                          {/* spans, not divs: <time> takes phrasing content only,
+                              and a <div> inside it is invalid markup React will
+                              warn about on every render. */}
+                          <time
+                            dateTime={r.ts}
+                            title={absExact(r.ts)}
+                            className="w-32 shrink-0 text-right leading-tight tabular-nums"
+                          >
+                            <span className="block whitespace-nowrap text-2xs text-muted">{absLocal(r.ts)}</span>
+                            <span className="block font-mono text-2xs text-faint">{relTime(r.ts)}</span>
+                          </time>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  <Pager
+                    page={attemptPage}
+                    perPage={ATTEMPTS_PER_PAGE}
+                    total={total}
+                    busy={recent.isFetching}
+                    onPage={setAttemptPage}
+                  />
+                </>
               );
             })()
           )}

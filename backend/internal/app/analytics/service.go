@@ -74,7 +74,10 @@ type Hit struct {
 type AuditFilter struct {
 	// Group is one of Groups' keys: a family of actions, as the console
 	// filters by them. Empty means every action.
-	Group      string
+	Group string
+	// Search matches the person, the event code, the source address, and what
+	// the event was done to by name — a machine, an account, a credential.
+	Search     string
 	Action     string
 	Actor      string
 	Result     string
@@ -83,6 +86,9 @@ type AuditFilter struct {
 	From       *time.Time
 	To         *time.Time
 	Limit      int
+	Offset     int
+	// Oldest first instead of newest first.
+	Ascending bool
 }
 
 // AuditRow is a projected audit event for listing/reporting.
@@ -130,6 +136,8 @@ type Store interface {
 	Dashboard(ctx context.Context, s Scope) (Summary, error)
 	Search(ctx context.Context, s Scope, q string, limit int) (SearchResults, error)
 	ListAudit(ctx context.Context, s Scope, f AuditFilter) ([]AuditRow, error)
+	// CountAudit is how many events match f, ignoring its paging.
+	CountAudit(ctx context.Context, s Scope, f AuditFilter) (int, error)
 }
 
 // Service implements the analytics use cases.
@@ -175,18 +183,24 @@ func (s *Service) Search(ctx context.Context, actor iam.Claims, q string, limit 
 	return s.store.Search(ctx, scopeOf(actor), q, limit)
 }
 
-// ListAudit returns audit rows matching the filter, each described in words.
-func (s *Service) ListAudit(ctx context.Context, actor iam.Claims, f AuditFilter) ([]AuditRow, error) {
+// ListAudit returns one page of audit rows matching the filter, each described
+// in words, and how many match in all — so the console can page back to the
+// very first event rather than stopping at whatever one request returned.
+func (s *Service) ListAudit(ctx context.Context, actor iam.Claims, f AuditFilter) ([]AuditRow, int, error) {
 	if f.Group != "" {
 		if _, _, ok := GroupPatterns(f.Group); !ok {
-			return nil, fmt.Errorf("%w: unknown group %q", iam.ErrInvalidInput, f.Group)
+			return nil, 0, fmt.Errorf("%w: unknown group %q", iam.ErrInvalidInput, f.Group)
 		}
 	}
 	rows, err := s.store.ListAudit(ctx, scopeOf(actor), f)
+	if err != nil {
+		return nil, 0, err
+	}
 	for i := range rows {
 		present(&rows[i])
 	}
-	return rows, err
+	total, err := s.store.CountAudit(ctx, scopeOf(actor), f)
+	return rows, total, err
 }
 
 // ReportType enumerates supported reports.

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useDebounced } from "@/hooks/useDebounced";
 import { useSearchParams } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -14,16 +15,6 @@ import { SessionDetail, HeldCell } from "@/components/SessionDetail";
 
 /** Column keys the server can sort on (see access.SessionSortColumns). */
 const SERVER_SORTABLE = new Set(["user", "device", "protocol", "status", "started", "duration", "ip"]);
-
-/** Debounces a value so typing in the search box does not fire a query per keystroke. */
-function useDebounced<T>(value: T, ms: number): T {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
-}
 
 export function RecordingsPage() {
   // Which session is open lives in the URL, not in component state, so it can be
