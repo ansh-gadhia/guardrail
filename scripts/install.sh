@@ -272,6 +272,42 @@ stream() {
     return "$rc"
 }
 
+# pull_images pulls every image the deployment runs, one at a time, the way
+# `docker pull` shows it: which image, then each layer by id with its own
+# "Downloading [====>    ] 12.3MB/45MB" bar, "Pull complete", and the digest
+# and status at the end.
+#
+# It was `docker compose pull`, which draws its own condensed tree instead and
+# folds each service to a single "✔ api Pulled" line the moment it finishes —
+# so an operator watching an update could not see which images were being
+# fetched, from where, or at what tag. Named in full here, numbered, so the
+# pull reads as a list of exactly what this version runs.
+#
+# The image list comes from compose itself (config --images, with this
+# deployment's profiles), so it is always what `up` is about to start, digest
+# pins included. If compose cannot produce it, the old compose pull runs
+# instead: better an unfamiliar progress display than no pull.
+pull_images() { # pull_images [--profile P ...]
+    local -a imgs=() failed=()
+    mapfile -t imgs < <(docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@" \
+        config --images 2>/dev/null | sort -u)
+    if [ "${#imgs[@]}" -eq 0 ]; then
+        docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@" pull
+        return
+    fi
+    local i=0 img
+    for img in "${imgs[@]}"; do
+        i=$((i + 1))
+        printf '\n  %s %s\n' "${B}[${i}/${#imgs[@]}]${R}" "${B}${img}${R}"
+        docker pull "$img" || failed+=("$img")
+    done
+    printf '\n'
+    if [ "${#failed[@]}" -gt 0 ]; then
+        printf '  %s could not pull: %s\n' "${YLW}!${R}" "${failed[*]}"
+        return 1
+    fi
+}
+
 # The size the server says the body will be, or 0 when it will not say.
 #
 # Asked for up front with a HEAD rather than read out of --dump-header while the
@@ -1787,11 +1823,11 @@ start_stack() {
     step "Starting ${APP_NAME}"
     # Neither --quiet nor behind the spinner. This is the step that moves
     # hundreds of megabytes, and docker's own per-layer bars — sizes, percentages
-    # and rates, for every image at once — are the only real progress report
-    # available for it. Hiding them behind a spinner is what made a first install
-    # look hung for four minutes on a slow link.
+    # and rates — are the only real progress report available for it. Hiding
+    # them behind a spinner is what made a first install look hung for four
+    # minutes on a slow link. One image at a time, by name: see pull_images.
     stream "pulling images (${VERSION})" \
-        docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "${prof[@]}" pull \
+        pull_images "${prof[@]}" \
         || warn "could not pull ${B}:${VERSION}${R} — starting with whatever is already on this host. If the stack does not come up, that tag has not been published yet; pick another with GUARDRAIL_VERSION=."
     # Brings up the one-shot migrate and seed containers too: `api` declares them
     # as service_completed_successfully dependencies, and compose re-runs a
