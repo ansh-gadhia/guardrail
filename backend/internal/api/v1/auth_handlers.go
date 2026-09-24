@@ -155,10 +155,15 @@ func (h *Handler) refresh(c *gin.Context) {
 	secretJSON(c, http.StatusOK, newTokenResponse(pair))
 }
 
-// logout revokes the presented refresh-token family.
+// logout revokes the presented refresh-token family. The body is optional;
+// {"reason":"idle"} marks a browser signing itself out for inactivity.
 func (h *Handler) logout(c *gin.Context) {
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&body) // absent or malformed: an ordinary sign-out
 	if raw, err := c.Cookie(refreshCookieName); err == nil && raw != "" {
-		_ = h.svc.Logout(c.Request.Context(), raw, metaFrom(c))
+		_ = h.svc.Logout(c.Request.Context(), raw, metaFrom(c), body.Reason == "idle")
 	}
 	h.clearRefreshCookie(c)
 	c.Status(http.StatusNoContent)

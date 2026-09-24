@@ -156,6 +156,12 @@ func present(r *AuditRow) {
 			}
 		}
 	case "auth.logout":
+		// Sign-outs used to be stored with the account's id and no email. The
+		// id is who acted, so it names them: it was their sign-out, not
+		// GuardRail's.
+		if r.ActorEmail == "" && r.TargetIsActor {
+			r.ActorEmail = r.TargetLabel
+		}
 		self()
 		r.Title = "Signed out"
 	case "auth.session_expired":

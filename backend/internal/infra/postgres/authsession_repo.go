@@ -75,6 +75,19 @@ func (r *AuthSessionRepo) RevokeFamily(ctx context.Context, familyID iam.ID, at 
 	})
 }
 
+// EndFamily revokes a family in one statement and reports whether it revoked
+// anything, so two sign-outs racing each other cannot both believe they did it.
+func (r *AuthSessionRepo) EndFamily(ctx context.Context, familyID iam.ID, at time.Time) (bool, error) {
+	var ended bool
+	err := r.db.withSystemScope(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at=$2
+			WHERE family_id=$1 AND revoked_at IS NULL`, familyID, at)
+		ended = tag.RowsAffected() > 0
+		return err
+	})
+	return ended, err
+}
+
 // RevokeAllForUser revokes all sessions for a user (e.g. on logout-all).
 func (r *AuthSessionRepo) RevokeAllForUser(ctx context.Context, userID iam.ID, at time.Time) error {
 	return r.db.withSystemScope(ctx, func(tx pgx.Tx) error {

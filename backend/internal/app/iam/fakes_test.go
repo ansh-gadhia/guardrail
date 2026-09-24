@@ -277,6 +277,18 @@ func (f *fakeSessionRepo) RevokeFamily(_ context.Context, familyID iam.ID, at ti
 	}
 	return nil
 }
+func (f *fakeSessionRepo) EndFamily(_ context.Context, familyID iam.ID, at time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ended := false
+	for _, s := range f.byID {
+		if s.FamilyID == familyID && s.RevokedAt == nil {
+			s.RevokedAt = &at
+			ended = true
+		}
+	}
+	return ended, nil
+}
 func (f *fakeSessionRepo) RevokeAllForUser(_ context.Context, userID iam.ID, at time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

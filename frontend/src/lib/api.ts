@@ -67,7 +67,7 @@ async function doRefresh(): Promise<TokenResponseShape | null> {
   // cookie is not left behind for somebody else to use.
   if (idleExpired()) {
     rememberSignOut(idleReason());
-    await axios.post("/api/v1/auth/logout", {}, { withCredentials: true }).catch(() => undefined);
+    await endSignIn(true);
     return null;
   }
   try {
@@ -120,6 +120,29 @@ export function takeSignOutReason(): string | null {
   } catch {
     return null;
   }
+}
+
+// endSignIn tells the server this sign-in is over — once, however many parts
+// of the page decide so at the same moment. A tab waking from sleep has its
+// idle clock and a refused request both reach this point; two requests were
+// two sign-outs in the audit log. idle says why, so the log can say it too.
+let ending: Promise<void> | null = null;
+
+export function endSignIn(idle = false): Promise<void> {
+  if (!ending) {
+    ending = axios
+      .post("/api/v1/auth/logout", idle ? { reason: "idle" } : {}, { withCredentials: true })
+      .then(
+        () => undefined,
+        () => undefined, // signing out never fails from where the person sits
+      );
+  }
+  return ending;
+}
+
+// signInStarted re-arms endSignIn for a new sign-in in the same tab.
+export function signInStarted(): void {
+  ending = null;
 }
 
 export function refreshSession(): Promise<TokenResponseShape | null> {

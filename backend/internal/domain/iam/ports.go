@@ -111,6 +111,10 @@ type AuthSessionRepository interface {
 	GetByTokenHash(ctx context.Context, hash []byte) (*AuthSession, error)
 	Revoke(ctx context.Context, id ID, at time.Time) error
 	RevokeFamily(ctx context.Context, familyID ID, at time.Time) error
+	// EndFamily revokes a family and reports whether any of it was still live:
+	// of any number of simultaneous sign-outs of one sign-in, exactly one is
+	// told it did the ending, and only that one is recorded.
+	EndFamily(ctx context.Context, familyID ID, at time.Time) (bool, error)
 	RevokeAllForUser(ctx context.Context, userID ID, at time.Time) error
 
 	// ListActive returns one view per live login session (family) matching the

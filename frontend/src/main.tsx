@@ -33,7 +33,7 @@ setOnAuthLost(() => {
 watchIdle(() => {
   if (!useAuth.getState().principal) return;
   rememberSignOut(idleReason());
-  void useAuth.getState().logout();
+  void useAuth.getState().logout(true);
 });
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

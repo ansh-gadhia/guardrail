@@ -50,6 +50,11 @@ func TestPresent_SaysWhatHappened(t *testing.T) {
 			title: "Signed out after inactivity", note: "No activity for 30 minutes", kind: "User", target: "a@x.io", self: true,
 		},
 		{
+			name:  "a sign-out stored with an id but no email is the account's own",
+			row:   AuditRow{Action: "auth.logout", Result: "success", TargetType: "user", TargetLabel: "admin@x.io", TargetIsActor: true},
+			title: "Signed out", kind: "User", target: "admin@x.io", self: true,
+		},
+		{
 			name: "an idle sign-out done by GuardRail names whose sign-in it ended",
 			// As stored: the account's id in actor_id, no actor email, so the
 			// store's own comparison already says "the actor's own account".

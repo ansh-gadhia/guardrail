@@ -3,6 +3,7 @@ package iam
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,7 +162,7 @@ func TestLogout_RevokesFamily(t *testing.T) {
 	ctx := context.Background()
 	pair, _ := h.svc.Login(ctx, LoginInput{Email: "admin@acme.com", Password: "supersecret-123"})
 
-	if err := h.svc.Logout(ctx, pair.RefreshToken, ReqMeta{}); err != nil {
+	if err := h.svc.Logout(ctx, pair.RefreshToken, ReqMeta{}, false); err != nil {
 		t.Fatalf("logout: %v", err)
 	}
 	if _, err := h.svc.Refresh(ctx, pair.RefreshToken, ReqMeta{}); err == nil {
@@ -297,5 +298,53 @@ func TestRefresh_CapsALegacyThirtyDayToken(t *testing.T) {
 	}
 	if want := clk.t.Add(12 * time.Hour); p.RefreshExpiresAt.After(want) {
 		t.Fatalf("a legacy token kept a deadline of %s; it should be capped at %s", p.RefreshExpiresAt, want)
+	}
+}
+
+// One sign-out is one event. A browser waking from sleep can send the request
+// twice at once — its idle clock and a refused request both notice — and both
+// were recorded, as "GuardRail signed out" twice, because the event carried an
+// id and no name.
+func TestLogout_RecordedOnceAndNamed(t *testing.T) {
+	h := newHarness(t)
+	h.addUser(t, "admin@acme.com", "supersecret-123")
+	ctx := context.Background()
+	pair, _ := h.svc.Login(ctx, LoginInput{Email: "admin@acme.com", Password: "supersecret-123"})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = h.svc.Logout(ctx, pair.RefreshToken, ReqMeta{}, false)
+		}()
+	}
+	wg.Wait()
+
+	got := h.audit.find("auth.logout", "")
+	if len(got) != 1 {
+		t.Fatalf("recorded %d sign-outs for one sign-in, want 1", len(got))
+	}
+	if got[0].ActorEmail != "admin@acme.com" {
+		t.Fatalf("sign-out credited to %q, want the person who signed out", got[0].ActorEmail)
+	}
+}
+
+// A browser that signs itself out for inactivity says so, and the log says it
+// the way the server's own idle check does — not as a plain sign-out.
+func TestLogout_IdleFromTheBrowserReadsAsIdle(t *testing.T) {
+	h := newHarness(t)
+	h.addUser(t, "admin@acme.com", "supersecret-123")
+	ctx := context.Background()
+	pair, _ := h.svc.Login(ctx, LoginInput{Email: "admin@acme.com", Password: "supersecret-123"})
+
+	if err := h.svc.Logout(ctx, pair.RefreshToken, ReqMeta{}, true); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(h.audit.find("auth.session_expired", "idle")); n != 1 {
+		t.Fatalf("idle sign-outs recorded: %d, want 1", n)
+	}
+	if n := len(h.audit.find("auth.logout", "")); n != 0 {
+		t.Fatalf("also recorded %d plain sign-outs", n)
 	}
 }

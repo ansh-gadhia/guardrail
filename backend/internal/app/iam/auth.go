@@ -296,14 +296,39 @@ func (s *Service) Refresh(ctx context.Context, rawToken string, meta ReqMeta) (*
 }
 
 // Logout revokes the family of the presented refresh token.
-func (s *Service) Logout(ctx context.Context, rawToken string, meta ReqMeta) error {
+//
+// It is recorded once. A browser can send it twice — a tab waking from sleep
+// both notices its idle clock and has a request refused — and both used to be
+// written down, as two sign-outs of one sign-in. Only the call that actually
+// ended a live sign-in records it now.
+//
+// idle says the browser is signing out because nobody touched it for the idle
+// limit, not because somebody chose to; the event then says that, the same
+// way the server's own idle check does. It is the holder's own sign-in, so the
+// word of their browser is enough.
+func (s *Service) Logout(ctx context.Context, rawToken string, meta ReqMeta, idle bool) error {
 	sess, err := s.sessions.GetByTokenHash(ctx, s.refresh.Hash(rawToken))
 	if err != nil {
 		return nil // idempotent: unknown token is a no-op
 	}
-	_ = s.sessions.RevokeFamily(ctx, sess.FamilyID, s.clock.Now())
+	ended, err := s.sessions.EndFamily(ctx, sess.FamilyID, s.clock.Now())
+	if err != nil {
+		return err
+	}
+	if !ended {
+		return nil // already over: somebody else's call recorded it
+	}
+	if idle {
+		s.recordSessionEnd(ctx, sess, meta, "idle")
+		return nil
+	}
+	// Named, not just an id: "admin@… signed out", not "GuardRail signed out".
+	var email string
+	if u, err := s.users.GetByID(ctx, iam.TenantScope{IsSuperAdmin: true}, sess.UserID); err == nil {
+		email = string(u.Email)
+	}
 	s.record(ctx, audit.Event{Action: "auth.logout", Category: audit.CategoryAuth,
-		ActorID: &sess.UserID, TargetType: "user", TargetID: sess.UserID.String(),
+		ActorID: &sess.UserID, ActorEmail: email, TargetType: "user", TargetID: sess.UserID.String(),
 		IP: meta.IP, UserAgent: meta.UserAgent, Result: audit.ResultSuccess})
 	return nil
 }

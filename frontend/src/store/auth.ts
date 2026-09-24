@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, setAccessToken, refreshSession } from "@/lib/api";
+import { api, endSignIn, setAccessToken, refreshSession, signInStarted } from "@/lib/api";
 import { setIdleLimit } from "@/lib/idle";
 import type { LoginResult, Principal, TokenResponse } from "@/lib/types";
 
@@ -26,7 +26,8 @@ interface AuthState {
   verifyMFA: (mfaToken: string, code: string) => Promise<TokenResponse>;
   ldapLogin: (username: string, password: string) => Promise<TokenResponse>;
   bootstrap: () => Promise<void>;
-  logout: () => Promise<void>;
+  // idle marks the console signing itself out for inactivity, not a choice.
+  logout: (idle?: boolean) => Promise<void>;
   changePassword: (current: string, next: string) => Promise<void>;
   has: (permission: string) => boolean;
 }
@@ -40,6 +41,7 @@ export const useAuth = create<AuthState>((set, get) => ({
   skipFirstRun: () => set({ firstRunDone: true }),
 
   setSession: (t) => {
+    signInStarted();
     setAccessToken(t.access_token);
     setIdleLimit(t.idle_timeout_seconds);
     // The end never moves once a sign-in exists (rotation cannot extend it), so
@@ -91,12 +93,8 @@ export const useAuth = create<AuthState>((set, get) => ({
     }
   },
 
-  logout: async () => {
-    try {
-      await api.post("/auth/logout", {});
-    } catch {
-      /* ignore */
-    }
+  logout: async (idle = false) => {
+    await endSignIn(idle);
     get().clear();
   },
 
