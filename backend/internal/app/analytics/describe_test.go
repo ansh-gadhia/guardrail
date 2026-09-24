@@ -50,6 +50,15 @@ func TestPresent_SaysWhatHappened(t *testing.T) {
 			title: "Signed out after inactivity", note: "No activity for 30 minutes", kind: "User", target: "a@x.io", self: true,
 		},
 		{
+			name: "an idle sign-out done by GuardRail names whose sign-in it ended",
+			// As stored: the account's id in actor_id, no actor email, so the
+			// store's own comparison already says "the actor's own account".
+			row: AuditRow{Action: "auth.session_expired", Result: "success", TargetType: "user", TargetLabel: "admin@x.io",
+				ActorID: "b1defd5f-fe37-4e10-baf2-b9a946b905f1", TargetIsActor: true,
+				Detail: map[string]any{"reason": "idle", "idle_minutes": float64(30)}},
+			title: "Signed out after inactivity", note: "No activity for 30 minutes", kind: "User", target: "admin@x.io",
+		},
+		{
 			name: "a recording removed by retention is about that recording",
 			row: AuditRow{Action: "recording.purged", Result: "success", TargetType: "session", SessionDevice: "MyUbuntuServerDLP",
 				Detail: map[string]any{"size_bytes": float64(757572), "retained_to": "2026-09-24T06:00:00Z"}},

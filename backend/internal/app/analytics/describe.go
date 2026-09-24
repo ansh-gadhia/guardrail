@@ -105,12 +105,23 @@ func present(r *AuditRow) {
 
 	// Some actions record what they acted on only in their detail. Give them a
 	// target anyway: a row with nothing in that column reads as if nothing was.
+	// An account event is about the account that acted — unless GuardRail
+	// acted on it (an idle sign-out), when it is about the account named in
+	// the target, which is then who the row must name.
 	self := func() {
-		r.TargetIsActor = true
 		r.TargetKind = "User"
-		if r.TargetLabel == "" {
-			r.TargetLabel = r.ActorEmail
+		if r.ActorEmail == "" {
+			// Recorded with the account's id as actor but no actor named: the
+			// store's id comparison calls that the account's own act, and it
+			// was not — GuardRail did it.
+			r.TargetIsActor = false
+			return
 		}
+		if r.TargetLabel != "" && r.TargetLabel != r.ActorEmail {
+			return
+		}
+		r.TargetIsActor = true
+		r.TargetLabel = r.ActorEmail
 	}
 	userRef := func(key string) string { return r.Refs[d.str(key)] }
 
