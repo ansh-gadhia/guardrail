@@ -51,6 +51,34 @@ func TestListAudit_ReturnsThePageAndTheTotal(t *testing.T) {
 	}
 }
 
+// The dashboard is open to everybody signed in; the audit log is not. Its feed
+// and failed-login count are the audit log's, and go only where it would.
+func TestDashboard_ShowsTheAuditLogOnlyToItsReaders(t *testing.T) {
+	store := &fakeStore{
+		summary: Summary{FailedLogins24h: 3, RecentActivity: []ActivityItem{{Action: "auth.login"}}},
+		rows:    []AuditRow{{Action: "auth.login", Result: "success", ActorEmail: "a@x.io"}},
+	}
+	svc := NewService(store)
+
+	operator := actor() // no log:read
+	sum, err := svc.Dashboard(context.Background(), operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.AuditVisible || len(sum.RecentActivity) != 0 || sum.FailedLogins24h != 0 {
+		t.Fatalf("an operator without log:read got the audit feed: visible=%v, %d events, %d failed",
+			sum.AuditVisible, len(sum.RecentActivity), sum.FailedLogins24h)
+	}
+
+	auditor := actor()
+	auditor.Permissions = []string{"log:read"}
+	sum, _ = svc.Dashboard(context.Background(), auditor)
+	if !sum.AuditVisible || len(sum.RecentActivity) != 1 || sum.FailedLogins24h != 3 {
+		t.Fatalf("an auditor did not get the feed: visible=%v, %d events, %d failed",
+			sum.AuditVisible, len(sum.RecentActivity), sum.FailedLogins24h)
+	}
+}
+
 func actor() iam.Claims {
 	return iam.Claims{OrganizationID: uuid.New(), Email: "a@example.com"}
 }

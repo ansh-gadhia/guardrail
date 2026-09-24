@@ -33,7 +33,16 @@ type Summary struct {
 	FailedLogins24h int            `json:"failed_logins_24h"`
 	TopDevices      []DeviceCount  `json:"top_devices"`
 	RecentActivity  []ActivityItem `json:"recent_activity"`
+	// AuditVisible says the two fields read from the audit log — the activity
+	// feed and the failed-login count — are filled in for this viewer. When it
+	// is false they are withheld, not zero: an empty feed and "0 failed
+	// logins" would tell somebody without the right to know that all is well.
+	AuditVisible bool `json:"audit_visible"`
 }
+
+// auditReadPerm is what reading the audit log takes, on the audit page and on
+// the dashboard alike.
+const auditReadPerm = "log:read"
 
 // DeviceCount is a device with its session count (for "top devices").
 type DeviceCount struct {
@@ -157,6 +166,15 @@ func (s *Service) Dashboard(ctx context.Context, actor iam.Claims) (Summary, err
 	if err != nil {
 		return sum, err
 	}
+	// The dashboard needs no permission, and it was handing the audit log's
+	// newest events, and its failed-login count, to everybody who could sign in.
+	// They are the audit log's to show: same permission as the audit page.
+	if !actor.Has(auditReadPerm) {
+		sum.RecentActivity = []ActivityItem{}
+		sum.FailedLogins24h = 0
+		return sum, nil
+	}
+	sum.AuditVisible = true
 	rows, err := s.store.ListAudit(ctx, scopeOf(actor), AuditFilter{Limit: len(sum.RecentActivity)})
 	if err != nil || len(rows) == 0 {
 		return sum, nil //nolint:nilerr // the undescribed feed is still a feed

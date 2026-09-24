@@ -505,6 +505,9 @@ export interface DashboardSummary {
     target_kind?: string;
     target_is_actor?: boolean;
   }[];
+  /** The feed and the failed-login count are filled in: the viewer may read
+   *  the audit log. False means withheld, not zero. */
+  audit_visible?: boolean;
 }
 
 export interface AuditRow {

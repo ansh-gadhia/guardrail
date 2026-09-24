@@ -43,6 +43,15 @@ const NAV: NavItem[] = [
   { to: "/organization", label: "Organization", icon: IconSettings, perm: "org:read", section: "Governance" },
 ];
 
+// canOpen says whether somebody may open a console page — by the same table
+// that decides whether the sidebar shows it, so a link elsewhere cannot lead
+// where the sidebar would not.
+export function canOpen(path: string, has: (perm: string) => boolean): boolean {
+  const base = "/" + (path.split(/[?#]/)[0].split("/")[1] ?? "");
+  const item = NAV.find((n) => n.to === base);
+  return !item?.perm || has(item.perm);
+}
+
 const COLLAPSE_KEY = "guardrail-sidebar-collapsed";
 
 export function AppLayout() {
@@ -89,10 +98,18 @@ export function AppLayout() {
 
   // Notifications = live active sessions (real API data). The bell surfaces what
   // is happening on the platform right now — who is connected to what.
+  //
+  // Kept as live as the approvals count beside it. It polled every fifteen
+  // seconds and not at all from a background tab — and a session is opened in
+  // a tab of its own, so the console was nearly always the background tab and
+  // its count stood still until somebody reloaded. Now: every five seconds,
+  // in the background too, and at once on coming back to the tab.
   const liveSessions = useQuery<Session[]>({
     queryKey: ["sessions", "active"],
     queryFn: async () => (await api.get<{ data: Session[] }>("/sessions/active")).data.data,
-    refetchInterval: 15000,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
     enabled: !!principal && has("session:read"),
   });
   const liveCount = liveSessions.data?.length ?? 0;
@@ -194,7 +211,10 @@ export function AppLayout() {
                           waiting on you" must not disappear just because the sidebar
                           got narrower. */}
                       {collapsed && n.to === "/approvals" && approvalCount > 0 && (
-                        <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-warn ring-2 ring-surface-1" />
+                        <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-warn ring-2 ring-surface" />
+                      )}
+                      {collapsed && n.to === "/sessions" && liveCount > 0 && (
+                        <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-success ring-2 ring-surface" />
                       )}
                     </span>
                     {!collapsed && <span className="flex-1">{n.label}</span>}

@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { plausibleDate } from "@/lib/dates";
 import type { AccessRequest, DashboardSummary, Device } from "@/lib/types";
 import { useAuth } from "@/store/auth";
+import { canOpen } from "@/components/AppLayout";
 import { ErrorNote, StatusBadge, Panel, EmptyState, Skeleton, Hairline, Badge, cn } from "@/components/ui";
 import { Donut, Legend, PostureBar } from "@/components/charts";
 import {
@@ -42,13 +43,18 @@ export function DashboardPage() {
     refetchInterval: 60_000,
   });
 
+  // Refreshed while it is on screen, so its "Active sessions" keeps pace with
+  // the live count in the sidebar instead of standing at the number it loaded.
   const summary = useQuery<DashboardSummary>({
     queryKey: ["dashboard"],
     queryFn: async () => (await api.get<DashboardSummary>("/dashboard/summary")).data,
+    refetchInterval: 10_000,
   });
+  const canSeeDevices = has("device:read");
   const devices = useQuery<Device[]>({
     queryKey: ["devices"],
     queryFn: async () => (await api.get<{ data: Device[] }>("/devices")).data.data,
+    enabled: canSeeDevices,
   });
 
   if (summary.isLoading) return <DashboardSkeleton />;
@@ -73,7 +79,9 @@ export function DashboardPage() {
       <PostureBand
         attention={attention}
         needsCred={needsCred}
-        failedLogins={s.failed_logins_24h}
+        // Withheld by the server from anybody who may not read the audit log —
+        // and then not shown at all, rather than shown as zero.
+        failedLogins={s.audit_visible ? s.failed_logins_24h : undefined}
         activeSessions={s.active_sessions}
         devices={s.devices}
         users={s.users}
@@ -81,18 +89,8 @@ export function DashboardPage() {
 
       <ApprovalsBand waiting={waiting} toReview={toReview} />
 
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-        <div className="lg:col-span-7">
-          <Panel title="Access activity" icon={IconAudit} actions={<TinyLink to="/audit">Audit log</TinyLink>}>
-            {s.recent_activity.length === 0 ? (
-              <EmptyState message="Privileged actions will appear here as they happen." />
-            ) : (
-              <ActivityRail activity={s.recent_activity} />
-            )}
-          </Panel>
-        </div>
-
-        <div className="space-y-5 lg:col-span-5">
+      {(() => {
+        const fleet = canSeeDevices && (
           <Panel title="Fleet coverage" icon={IconDevices} actions={<TinyLink to="/devices">Devices</TinyLink>}>
             {devices.isLoading ? (
               <Skeleton className="h-40" />
@@ -102,7 +100,8 @@ export function DashboardPage() {
               <FleetCoverage credentialed={credentialed} needsCred={needsCred} breakGlass={breakGlass} total={dev.length} />
             )}
           </Panel>
-
+        );
+        const top = (
           <Panel title="Top devices by sessions" icon={IconSessions}>
             {s.top_devices.length === 0 ? (
               <EmptyState message="No sessions recorded yet." />
@@ -117,8 +116,36 @@ export function DashboardPage() {
               </div>
             )}
           </Panel>
-        </div>
-      </div>
+        );
+        // The activity feed is the audit log, and only its readers get it.
+        // Without it the other two panels share the row instead of leaving a
+        // hole where it was.
+        if (!s.audit_visible) {
+          return (
+            <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+              <div className={fleet ? "lg:col-span-7" : "lg:col-span-12"}>{top}</div>
+              {fleet && <div className="lg:col-span-5">{fleet}</div>}
+            </div>
+          );
+        }
+        return (
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+            <div className="lg:col-span-7">
+              <Panel title="Access activity" icon={IconAudit} actions={<TinyLink to="/audit">Audit log</TinyLink>}>
+                {s.recent_activity.length === 0 ? (
+                  <EmptyState message="Privileged actions will appear here as they happen." />
+                ) : (
+                  <ActivityRail activity={s.recent_activity} />
+                )}
+              </Panel>
+            </div>
+            <div className="space-y-5 lg:col-span-5">
+              {fleet}
+              {top}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -134,7 +161,7 @@ function PostureBand({
 }: {
   attention: number;
   needsCred: number;
-  failedLogins: number;
+  failedLogins?: number;
   activeSessions: number;
   devices: number;
   users: number;
@@ -165,7 +192,7 @@ function PostureBand({
                 {needsCred} {needsCred === 1 ? "device needs" : "devices need"} a credential
               </SignalChip>
             )}
-            {failedLogins > 0 && (
+            {!!failedLogins && failedLogins > 0 && (
               <SignalChip to="/audit" tone="info" icon={IconAlert}>
                 {failedLogins} failed {failedLogins === 1 ? "login" : "logins"} · 24h
               </SignalChip>
@@ -211,11 +238,22 @@ function SignalChip({
   icon: typeof IconKey;
   children: ReactNode;
 }) {
+  const has = useAuth((st) => st.has);
   const tones = {
     danger: "border-danger/25 bg-danger/10 text-danger hover:bg-danger/15",
     warn: "border-warn/25 bg-warn/10 text-warn hover:bg-warn/15",
     info: "border-info/25 bg-info/10 text-info hover:bg-info/15",
   }[tone];
+  // Something worth knowing is still worth saying; it is just not a door to a
+  // page this person may not open.
+  if (!canOpen(to, has)) {
+    return (
+      <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium", tones.replace(/hover:\S+/, ""))}>
+        <Icon size={13} />
+        {children}
+      </span>
+    );
+  }
   return (
     <Link
       to={to}
@@ -297,6 +335,8 @@ function FleetCoverage({
 }
 
 function TinyLink({ to, children }: { to: string; children: ReactNode }) {
+  const has = useAuth((st) => st.has);
+  if (!canOpen(to, has)) return null;
   return (
     <Link
       to={to}
