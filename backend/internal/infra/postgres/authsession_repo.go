@@ -91,12 +91,15 @@ func (r *AuthSessionRepo) RevokeAllForUser(ctx context.Context, userID iam.ID, a
 // system scope so RLS does not hide other tenants' rows (org scoping, when asked
 // for, is applied explicitly in the WHERE clause).
 func (r *AuthSessionRepo) ListActive(ctx context.Context, q iam.SessionQuery) ([]iam.AuthSessionView, error) {
-	var userArg, orgArg any
+	var userArg, orgArg, sinceArg any
 	if q.UserID != nil {
 		userArg = *q.UserID
 	}
 	if q.OrgID != nil {
 		orgArg = *q.OrgID
+	}
+	if !q.ActiveSince.IsZero() {
+		sinceArg = q.ActiveSince
 	}
 	var out []iam.AuthSessionView
 	err := r.db.withSystemScope(ctx, func(tx pgx.Tx) error {
@@ -113,7 +116,8 @@ func (r *AuthSessionRepo) ListActive(ctx context.Context, q iam.SessionQuery) ([
 			  AND s.expires_at > now()
 			  AND ($1::uuid IS NULL OR s.user_id = $1::uuid)
 			  AND ($2::uuid IS NULL OR u.organization_id = $2::uuid)
-			ORDER BY s.created_at DESC`, userArg, orgArg)
+			  AND ($3::timestamptz IS NULL OR s.created_at > $3::timestamptz)
+			ORDER BY s.created_at DESC`, userArg, orgArg, sinceArg)
 		if err != nil {
 			return err
 		}

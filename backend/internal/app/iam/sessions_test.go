@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/guardrail/guardrail/internal/domain/iam"
 )
@@ -135,5 +136,27 @@ func TestSessions_RevokeAuthorization(t *testing.T) {
 	}
 	if all2, _ := h.svc.ListSessions(ctx, super, "", false); len(all2) != 0 {
 		t.Fatalf("after all revokes: want 0 sessions, got %d", len(all2))
+	}
+}
+
+// A sign-in the idle limit has ended is not active, whatever expiry its token
+// row still carries. Before this, a thirty-day token from before the limit
+// existed stayed on the console's list for a month after its browser was gone.
+func TestSessions_ListLeavesOutIdleSignIns(t *testing.T) {
+	h, clk := harnessAt(t)
+	ctx := context.Background()
+	u := h.addUser(t, "a@acme.com", "supersecret-123")
+	super := iam.Claims{UserID: u.ID, OrganizationID: u.OrganizationID, IsSuperAdmin: true}
+
+	signIn(t, h, "a@acme.com") // then walks away
+	clk.t = clk.t.Add(31 * time.Minute)
+	signIn(t, h, "a@acme.com") // a fresh one, elsewhere
+
+	all, err := h.svc.ListSessions(ctx, super, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("listed %d sign-ins, want only the fresh one", len(all))
 	}
 }

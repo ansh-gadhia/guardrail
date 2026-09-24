@@ -321,6 +321,9 @@ func (f *fakeSessionRepo) ListActive(_ context.Context, q iam.SessionQuery) ([]i
 		if q.OrgID != nil && *q.OrgID != orgID {
 			continue
 		}
+		if !q.ActiveSince.IsZero() && !s.CreatedAt.After(q.ActiveSince) {
+			continue
+		}
 		out = append(out, iam.AuthSessionView{
 			FamilyID: s.FamilyID, UserID: s.UserID, Email: email, IP: s.IP, UserAgent: s.UserAgent,
 			SignedInAt: firstSeen[s.FamilyID], LastSeenAt: s.CreatedAt, ExpiresAt: s.ExpiresAt,

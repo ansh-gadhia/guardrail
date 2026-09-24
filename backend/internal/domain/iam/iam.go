@@ -309,4 +309,8 @@ type AuthSessionView struct {
 type SessionQuery struct {
 	UserID *ID // limit to one user (self view)
 	OrgID  *ID // limit to one organization (admin view, scoped to a tenant)
+	// ActiveSince drops sign-ins whose current token was issued before it: the
+	// ones the idle limit has already ended, which the server would refuse the
+	// moment their browser tried to refresh. Zero lists them all.
+	ActiveSince time.Time
 }

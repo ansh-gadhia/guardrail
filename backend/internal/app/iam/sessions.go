@@ -33,6 +33,14 @@ func (s *Service) ListSessions(ctx context.Context, actor iam.Claims, currentRef
 	}
 	// super admin, not selfOnly → no filter: every active session.
 
+	// "Active" means what the server will honour. A sign-in idle past the limit
+	// is over — its next refresh is refused — even though its token row still
+	// carries the expiry it was issued with; a thirty-day token from before the
+	// limit existed would otherwise sit on this list for a month.
+	if s.cfg.IdleTimeout > 0 {
+		q.ActiveSince = s.clock.Now().Add(-s.cfg.IdleTimeout)
+	}
+
 	views, err := s.sessions.ListActive(ctx, q)
 	if err != nil {
 		return nil, err
