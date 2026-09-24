@@ -2,6 +2,7 @@ package v1
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -20,6 +21,21 @@ type tokenResponse struct {
 	TokenType   string       `json:"token_type"`
 	ExpiresAt   string       `json:"expires_at"`
 	Principal   principalDTO `json:"principal"`
+	// IdleTimeoutSeconds is how long this console may sit untouched before it
+	// signs itself out; 0 means it never does. The server cannot tell a person
+	// from the background polling an open tab does, so it is the browser that
+	// watches for keyboard and mouse — and it takes the number from here rather
+	// than carrying one of its own.
+	IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
+}
+
+func newTokenResponse(pair *appiam.TokenPair) tokenResponse {
+	return tokenResponse{
+		AccessToken: pair.AccessToken, TokenType: "Bearer",
+		ExpiresAt:          pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
+		Principal:          toPrincipalDTO(pair.Principal),
+		IdleTimeoutSeconds: int(pair.IdleTimeout / time.Second),
+	}
 }
 
 type principalDTO struct {
@@ -89,11 +105,7 @@ func (h *Handler) login(c *gin.Context) {
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
-	secretJSON(c, http.StatusOK, tokenResponse{
-		AccessToken: pair.AccessToken, TokenType: "Bearer",
-		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
-		Principal: toPrincipalDTO(pair.Principal),
-	})
+	secretJSON(c, http.StatusOK, newTokenResponse(pair))
 }
 
 type mfaVerifyRequest struct {
@@ -116,11 +128,7 @@ func (h *Handler) mfaVerify(c *gin.Context) {
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
-	secretJSON(c, http.StatusOK, tokenResponse{
-		AccessToken: pair.AccessToken, TokenType: "Bearer",
-		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
-		Principal: toPrincipalDTO(pair.Principal),
-	})
+	secretJSON(c, http.StatusOK, newTokenResponse(pair))
 }
 
 // refresh rotates the refresh token and issues a fresh access token.
@@ -137,11 +145,7 @@ func (h *Handler) refresh(c *gin.Context) {
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
-	secretJSON(c, http.StatusOK, tokenResponse{
-		AccessToken: pair.AccessToken, TokenType: "Bearer",
-		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
-		Principal: toPrincipalDTO(pair.Principal),
-	})
+	secretJSON(c, http.StatusOK, newTokenResponse(pair))
 }
 
 // logout revokes the presented refresh-token family.
@@ -174,11 +178,7 @@ func (h *Handler) changePassword(c *gin.Context) {
 		return
 	}
 	h.setRefreshCookie(c, pair.RefreshToken)
-	secretJSON(c, http.StatusOK, tokenResponse{
-		AccessToken: pair.AccessToken, TokenType: "Bearer",
-		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
-		Principal: toPrincipalDTO(pair.Principal),
-	})
+	secretJSON(c, http.StatusOK, newTokenResponse(pair))
 }
 
 // me returns the authenticated principal.

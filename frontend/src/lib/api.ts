@@ -1,4 +1,5 @@
 import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from "axios";
+import { idleExpired, idleReason, setIdleLimit } from "./idle";
 
 // The access token lives only in memory (never localStorage) to limit XSS blast
 // radius; the refresh token is an HttpOnly cookie the browser sends automatically.
@@ -55,14 +56,67 @@ let refreshing: Promise<TokenResponseShape | null> | null = null;
 
 interface TokenResponseShape {
   access_token: string;
+  idle_timeout_seconds?: number;
   [k: string]: unknown;
 }
 
 async function doRefresh(): Promise<TokenResponseShape | null> {
+  // A tab that slept past the idle limit wakes up and polls, and that poll's
+  // 401 lands here. Refreshing would sign it straight back in; the person it
+  // belongs to has not been here. End the sign-in on the server too, so the
+  // cookie is not left behind for somebody else to use.
+  if (idleExpired()) {
+    rememberSignOut(idleReason());
+    await axios.post("/api/v1/auth/logout", {}, { withCredentials: true }).catch(() => undefined);
+    return null;
+  }
   try {
     const r = await axios.post<TokenResponseShape>("/api/v1/auth/refresh", {}, { withCredentials: true });
     accessToken = r.data.access_token;
+    setIdleLimit(r.data.idle_timeout_seconds);
     return r.data;
+  } catch (err) {
+    // A POLICY sign-out — idle, or the session reached its maximum length — is
+    // kept for the sign-in page to explain. Waking a laptop to a login screen
+    // with no reason reads like a fault; with one it reads like the product
+    // doing its job. Anything else (no cookie, a bad token) says nothing: that
+    // is just somebody who is not signed in.
+    const ax = err as AxiosError<{ title?: string; detail?: string }>;
+    if (ax.response?.status === 401 && ax.response.data?.title === "Signed Out") {
+      rememberSignOut(ax.response.data.detail ?? "");
+    }
+    return null;
+  }
+}
+
+const SIGNED_OUT_KEY = "guardrail.signedOut";
+
+// sessionStorage, not state: the reason has to survive the redirect to /login,
+// and it is per-tab and gone when the browser closes, which is the lifetime it
+// should have.
+export function rememberSignOut(detail: string): void {
+  try {
+    sessionStorage.setItem(SIGNED_OUT_KEY, detail);
+  } catch {
+    /* storage refused (private mode, quota) — the sign-in page just says less */
+  }
+}
+
+// signOutExplained is true when the sign-in page already has a reason to show.
+export function signOutExplained(): boolean {
+  try {
+    return sessionStorage.getItem(SIGNED_OUT_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
+// takeSignOutReason returns why the console signed this person out, once.
+export function takeSignOutReason(): string | null {
+  try {
+    const v = sessionStorage.getItem(SIGNED_OUT_KEY);
+    if (v !== null) sessionStorage.removeItem(SIGNED_OUT_KEY);
+    return v;
   } catch {
     return null;
   }

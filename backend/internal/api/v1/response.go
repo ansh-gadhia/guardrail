@@ -39,6 +39,12 @@ func fail(c *gin.Context, err error) {
 		problem(c, http.StatusUnauthorized, "Account Locked", "too many failed attempts; try again later")
 	case errors.Is(err, iam.ErrAccountInactive):
 		problem(c, http.StatusUnauthorized, "Account Inactive", "account is not active")
+	// Signed out by policy. Said plainly, because "please sign in again" with no
+	// reason reads like a fault — and the console shows this on the sign-in page.
+	case errors.Is(err, iam.ErrSessionIdle):
+		problem(c, http.StatusUnauthorized, "Signed Out", "you were signed out after a period of inactivity")
+	case errors.Is(err, iam.ErrSessionLifetime):
+		problem(c, http.StatusUnauthorized, "Signed Out", "your session reached its maximum length; please sign in again")
 	case errors.Is(err, iam.ErrRefreshReuse), errors.Is(err, iam.ErrRefreshInvalid):
 		problem(c, http.StatusUnauthorized, "Session Expired", "please sign in again")
 	case errors.Is(err, iam.ErrPermissionDenied):

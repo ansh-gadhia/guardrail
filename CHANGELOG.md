@@ -12,6 +12,26 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+### Changed
+
+- **Closing the browser signs you out of the console.** The refresh cookie
+  carried a thirty-day `Max-Age`, so opening the site ten days later still
+  found you signed in. It is now a session cookie, and the server enforces the
+  lifetime whatever the browser does:
+
+  - **`GUARDRAIL_CONSOLE_IDLE_TIMEOUT`** (default `30m`) — nobody has touched
+    the keyboard or mouse in any tab of the console for this long, and it signs
+    out. A tab showing a live session counts as in use; the session's own idle
+    policy governs that. `0` disables it.
+  - **`GUARDRAIL_REFRESH_TOKEN_TTL`** (default `12h`, was `720h`) — the most a
+    sign-in can last. Staying active no longer extends it.
+
+  The sign-in page says which one ended the session, and each is audited as
+  `auth.session_expired`. A browser that restores its tabs gets its session
+  cookie back too; the idle limit is what refuses it. Anybody signed in when
+  this ships keeps their existing session until it idles out or reaches the new
+  cap, which is at most 12 hours.
+
 ## [1.5.0] - 2026-09-11
 
 ### Added

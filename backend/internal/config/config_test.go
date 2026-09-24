@@ -119,3 +119,40 @@ func TestLoad_TunnelDomain(t *testing.T) {
 		})
 	}
 }
+
+// A console sign-in is bounded by default: a working day at most, and half an
+// hour of nothing keeping it alive.
+func TestLoad_ConsoleSessionIsBoundedByDefault(t *testing.T) {
+	setRequired(t, nil)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Auth.RefreshTokenTTL.Hours() != 12 {
+		t.Errorf("default sign-in lifetime = %v, want 12h (it was a sliding 30 days)", c.Auth.RefreshTokenTTL)
+	}
+	if c.Auth.ConsoleIdleTimeout.Minutes() != 30 {
+		t.Errorf("default console idle timeout = %v, want 30m", c.Auth.ConsoleIdleTimeout)
+	}
+}
+
+// An idle timeout shorter than two access-token lifetimes signs out people who
+// are working, because an open console only refreshes when its token expires.
+func TestLoad_IdleTimeoutMustOutlastTheAccessToken(t *testing.T) {
+	setRequired(t, map[string]string{
+		"GUARDRAIL_ACCESS_TOKEN_TTL":     "15m",
+		"GUARDRAIL_CONSOLE_IDLE_TIMEOUT": "20m",
+	})
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "GUARDRAIL_CONSOLE_IDLE_TIMEOUT") {
+		t.Fatalf("20m idle with a 15m access token should be refused, got: %v", err)
+	}
+}
+
+// Zero switches the idle limit off; that is allowed and must not be refused.
+func TestLoad_IdleTimeoutZeroDisables(t *testing.T) {
+	setRequired(t, map[string]string{"GUARDRAIL_CONSOLE_IDLE_TIMEOUT": "0"})
+	if _, err := Load(); err != nil {
+		t.Fatalf("idle timeout 0 (disabled) was refused: %v", err)
+	}
+}

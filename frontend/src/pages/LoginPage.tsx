@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { api, problemDetail } from "@/lib/api";
+import { api, problemDetail, takeSignOutReason } from "@/lib/api";
 import { useAuth } from "@/store/auth";
 import { isMFAChallenge } from "@/lib/types";
 import type { AuthProviders } from "@/lib/types";
@@ -21,6 +21,9 @@ export function LoginPage() {
   const [mfaToken, setMfaToken] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Why the console signed this person out, when it was policy rather than them.
+  // Read once on arrival; it is not an error, and is not styled as one.
+  const [signedOut] = useState<string | null>(() => takeSignOutReason());
   const [busy, setBusy] = useState(false);
   const [providers, setProviders] = useState<AuthProviders>({ local: true, ldap: false, oidc: false });
 
@@ -93,6 +96,17 @@ export function LoginPage() {
 
           <div className="relative overflow-hidden rounded-2xl border border-line bg-surface p-6 shadow-md animate-slideup">
             <Hairline />
+            {signedOut && !error && (
+              <div
+                role="status"
+                className="mb-4 flex items-start gap-2.5 rounded-lg border border-line bg-surface-2/60 px-3 py-2.5 text-sm text-muted"
+              >
+                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                <span>
+                  {signedOut.charAt(0).toUpperCase() + signedOut.slice(1)}. Sign in to continue.
+                </span>
+              </div>
+            )}
             {error && (
               <div className="mb-4">
                 <ErrorNote message={error} />

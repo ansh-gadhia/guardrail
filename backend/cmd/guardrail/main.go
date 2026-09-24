@@ -438,6 +438,7 @@ func run() error {
 	auditRec := postgres.NewAuditRepo(pg).WithChainKey(auditChainKey)
 
 	iamCfg.RefreshTTL = cfg.Auth.RefreshTokenTTL
+	iamCfg.IdleTimeout = cfg.Auth.ConsoleIdleTimeout
 	iamSvc := appiam.NewService(appiam.Deps{
 		Users:    postgres.NewUserRepo(pg),
 		Orgs:     postgres.NewOrgRepo(pg),

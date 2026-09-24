@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useKeepAwake } from "@/lib/idle";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui";
@@ -57,6 +58,9 @@ export function SessionWatchPage() {
     retry: false,
   });
   const ended = !!status.data && status.data.status !== "active";
+  // What is typed into the session never reaches this page (it is in an
+  // iframe), so a live session counts as somebody being here. See useKeepAwake.
+  useKeepAwake(!ended);
   // Which renderer. Taken from the grant when it is there and the session record
   // otherwise, so the choice is made from what the server said rather than from
   // a guess at the device.

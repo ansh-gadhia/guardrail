@@ -153,7 +153,17 @@ func queryOffset(c *gin.Context) int {
 // to the auth endpoints only.
 func (h *Handler) setRefreshCookie(c *gin.Context, token string) {
 	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie(refreshCookieName, token, int(h.cookie.RefreshTTL.Seconds()),
+	// A SESSION cookie: no Max-Age, so the browser discards it when it closes.
+	//
+	// It carried Max-Age set to the refresh lifetime — thirty days — which is
+	// what kept somebody signed in across restarts and made "I opened it after
+	// ten days and I was still logged in" true. How long a login may last is the
+	// server's decision and is enforced there (see Service.Refresh); the cookie no
+	// longer gets to outlive the browser that holds it.
+	//
+	// maxAge 0 is net/http's "no Max-Age attribute", not "expire now" — that is
+	// -1, which clearRefreshCookie uses.
+	c.SetCookie(refreshCookieName, token, 0,
 		"/api/v1/auth", h.cookie.Domain, h.cookie.Secure, true /* httpOnly */)
 }
 

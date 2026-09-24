@@ -48,11 +48,7 @@ func (h *Handler) ssoExchange(c *gin.Context) {
 	// Not cacheable, and said out loud. The body carries a bearer token, and an
 	// intermediary that held it would be handing one person's session to whoever
 	// asked next.
-	secretJSON(c, http.StatusOK, tokenResponse{
-		AccessToken: pair.AccessToken, TokenType: "Bearer",
-		ExpiresAt: pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
-		Principal: toPrincipalDTO(pair.Principal),
-	})
+	secretJSON(c, http.StatusOK, newTokenResponse(pair))
 }
 
 // ssoResync hands an account back to the SIEM after a local role edit detached

@@ -22,9 +22,15 @@ func (r *AuthSessionRepo) Create(ctx context.Context, s *iam.AuthSession) error 
 	return r.db.withSystemScope(ctx, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO auth_sessions (id, user_id, family_id, refresh_token_hash,
-				user_agent, ip, expires_at, sso)
-			VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,'')::inet,$7,$8)`,
-			s.ID, s.UserID, s.FamilyID, s.RefreshTokenHash, s.UserAgent, s.IP, s.ExpiresAt, s.SSO)
+				user_agent, ip, expires_at, sso, created_at)
+			VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,'')::inet,$7,$8,
+				COALESCE($9::timestamptz, now()))`,
+			s.ID, s.UserID, s.FamilyID, s.RefreshTokenHash, s.UserAgent, s.IP, s.ExpiresAt, s.SSO,
+			// Written from the caller's clock rather than the database's now(),
+			// because the idle check subtracts it from the caller's clock. Two
+			// clocks a few minutes apart would sign people out early, or late. A
+			// zero time falls back to now() for any caller that does not set it.
+			nullTime(s.CreatedAt))
 		return mapWriteErr(err)
 	})
 }
@@ -142,4 +148,12 @@ func (r *AuthSessionRepo) FamilyOwner(ctx context.Context, familyID iam.ID) (iam
 		return nil
 	})
 	return userID, orgID, err
+}
+
+// nullTime maps the zero time to SQL NULL.
+func nullTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }

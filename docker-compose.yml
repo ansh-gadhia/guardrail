@@ -365,7 +365,15 @@ services:
       # (config.go), and passing an empty value would override it rather than
       # fall back; keep them in step if that default ever changes.
       GUARDRAIL_ACCESS_TOKEN_TTL: ${GUARDRAIL_ACCESS_TOKEN_TTL:-15m}
-      GUARDRAIL_REFRESH_TOKEN_TTL: ${GUARDRAIL_REFRESH_TOKEN_TTL:-720h}
+      # How long one console sign-in may last, in total — rotation no longer
+      # extends it. This default was 720h, and it overrode the application's own:
+      # changing the Go default alone would have left every compose deployment
+      # signed in for thirty days.
+      GUARDRAIL_REFRESH_TOKEN_TTL: ${GUARDRAIL_REFRESH_TOKEN_TTL:-12h}
+      # Sign somebody out when nothing has kept their console alive for this long
+      # — which, since an open console refreshes itself, means the browser was
+      # closed or the machine slept. Must be at least twice the access token TTL.
+      GUARDRAIL_CONSOLE_IDLE_TIMEOUT: ${GUARDRAIL_CONSOLE_IDLE_TIMEOUT:-30m}
       # Ceiling on a session with no approved window, and the window an approved
       # request falls back to when nobody named one. Neither is what ends a
       # session in normal use — that is the per-device idle timeout.

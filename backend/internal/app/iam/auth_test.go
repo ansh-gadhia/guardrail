@@ -168,3 +168,134 @@ func TestLogout_RevokesFamily(t *testing.T) {
 		t.Fatal("expected refresh to fail after logout")
 	}
 }
+
+// harnessAt builds a service whose clock can be moved, with the console's real
+// session policy: a twelve-hour lifetime and a thirty-minute idle timeout.
+func harnessAt(t *testing.T) (*harness, *movableClock) {
+	t.Helper()
+	h := newHarness(t)
+	clk := &movableClock{t: h.now}
+	h.svc.clock = clk
+	h.svc.cfg.RefreshTTL = 12 * time.Hour
+	h.svc.cfg.IdleTimeout = 30 * time.Minute
+	return h, clk
+}
+
+type movableClock struct{ t time.Time }
+
+func (c *movableClock) Now() time.Time { return c.t }
+
+// The complaint this fixes: open the site after ten days and still be signed
+// in. A browser that restored its session cookie must not be enough.
+func TestRefresh_SignsOutAfterTheBrowserWasClosed(t *testing.T) {
+	h, clk := harnessAt(t)
+	h.addUser(t, "admin@acme.com", "supersecret-123")
+	ctx := context.Background()
+	pair, err := h.svc.Login(ctx, LoginInput{Email: "admin@acme.com", Password: "supersecret-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clk.t = clk.t.Add(10 * 24 * time.Hour) // ten days later
+	_, err = h.svc.Refresh(ctx, pair.RefreshToken, ReqMeta{})
+	if err == nil {
+		t.Fatal("a token untouched for ten days still refreshed; the login survived the browser")
+	}
+	if !errors.Is(err, iam.ErrSessionIdle) && !errors.Is(err, iam.ErrSessionLifetime) {
+		t.Fatalf("err = %v, want a policy sign-out", err)
+	}
+}
+
+// Closed for longer than the idle timeout, even inside the lifetime.
+func TestRefresh_IdleTimeoutSignsOut(t *testing.T) {
+	h, clk := harnessAt(t)
+	h.addUser(t, "admin@acme.com", "supersecret-123")
+	ctx := context.Background()
+	pair, _ := h.svc.Login(ctx, LoginInput{Email: "admin@acme.com", Password: "supersecret-123"})
+
+	clk.t = clk.t.Add(31 * time.Minute)
+	if _, err := h.svc.Refresh(ctx, pair.RefreshToken, ReqMeta{}); !errors.Is(err, iam.ErrSessionIdle) {
+		t.Fatalf("31 minutes idle: err = %v, want ErrSessionIdle", err)
+	}
+	// And it is recorded as the system signing somebody out.
+	var found bool
+	for _, e := range h.audit.events {
+		if e.Action == "auth.session_expired" && e.Detail["reason"] == "idle" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("an idle sign-out was not audited")
+	}
+}
+
+// Somebody actively using the console is never signed out for being idle: an
+// open console refreshes every access-token lifetime, well inside the timeout.
+func TestRefresh_ActiveUseIsNotIdle(t *testing.T) {
+	h, clk := harnessAt(t)
+	h.addUser(t, "admin@acme.com", "supersecret-123")
+	ctx := context.Background()
+	pair, _ := h.svc.Login(ctx, LoginInput{Email: "admin@acme.com", Password: "supersecret-123"})
+
+	tok := pair.RefreshToken
+	for i := 0; i < 20; i++ { // five hours of refreshes, fifteen minutes apart
+		clk.t = clk.t.Add(15 * time.Minute)
+		p, err := h.svc.Refresh(ctx, tok, ReqMeta{})
+		if err != nil {
+			t.Fatalf("refresh %d at +%s of steady use: %v", i+1, time.Duration(i+1)*15*time.Minute, err)
+		}
+		tok = p.RefreshToken
+	}
+}
+
+// Rotation must not extend a login. This is the bug that made it immortal: every
+// refresh used to issue a token good for another full lifetime.
+func TestRefresh_RotationDoesNotExtendTheLifetime(t *testing.T) {
+	h, clk := harnessAt(t)
+	h.addUser(t, "admin@acme.com", "supersecret-123")
+	ctx := context.Background()
+	login := clk.t
+	pair, _ := h.svc.Login(ctx, LoginInput{Email: "admin@acme.com", Password: "supersecret-123"})
+
+	tok := pair.RefreshToken
+	var lastErr error
+	for i := 0; i < 60; i++ { // keep refreshing every 15 minutes, for 15 hours
+		clk.t = clk.t.Add(15 * time.Minute)
+		p, err := h.svc.Refresh(ctx, tok, ReqMeta{})
+		if err != nil {
+			lastErr = err
+			break
+		}
+		if !p.RefreshExpiresAt.Equal(login.Add(12 * time.Hour)) {
+			t.Fatalf("rotation moved the deadline to %s; it must stay at sign-in + 12h (%s)",
+				p.RefreshExpiresAt, login.Add(12*time.Hour))
+		}
+		tok = p.RefreshToken
+	}
+	if !errors.Is(lastErr, iam.ErrSessionLifetime) {
+		t.Fatalf("constant use for 15h: err = %v, want ErrSessionLifetime at the 12h mark", lastErr)
+	}
+	if got := clk.t.Sub(login); got > 12*time.Hour+15*time.Minute {
+		t.Fatalf("signed out only after %s of use; the lifetime is 12h", got)
+	}
+}
+
+// A login issued under the old sliding thirty days is capped by its first
+// refresh after the upgrade, rather than living out its thirty days.
+func TestRefresh_CapsALegacyThirtyDayToken(t *testing.T) {
+	h, clk := harnessAt(t)
+	h.addUser(t, "admin@acme.com", "supersecret-123")
+	ctx := context.Background()
+	h.svc.cfg.RefreshTTL = 720 * time.Hour // issued under the old policy
+	pair, _ := h.svc.Login(ctx, LoginInput{Email: "admin@acme.com", Password: "supersecret-123"})
+	h.svc.cfg.RefreshTTL = 12 * time.Hour // upgraded
+
+	clk.t = clk.t.Add(10 * time.Minute)
+	p, err := h.svc.Refresh(ctx, pair.RefreshToken, ReqMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := clk.t.Add(12 * time.Hour); p.RefreshExpiresAt.After(want) {
+		t.Fatalf("a legacy token kept a deadline of %s; it should be capped at %s", p.RefreshExpiresAt, want)
+	}
+}

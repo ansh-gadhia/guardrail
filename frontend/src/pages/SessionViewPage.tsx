@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useKeepAwake } from "@/lib/idle";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, getAccessToken } from "@/lib/api";
 import { Button, Badge, cn } from "@/components/ui";
@@ -53,6 +54,9 @@ export function SessionViewPage() {
     retry: false,
   });
   const ended = !!status.data && status.data.status !== "active";
+  // What is typed into the session never reaches this page (it is in an
+  // iframe), so a live session counts as somebody being here. See useKeepAwake.
+  useKeepAwake(!ended);
   // How the session is rendered follows from its protocol. A desktop is drawing
   // instructions decoded onto a canvas in this app; everything else is the
   // gateway's own page in an iframe. The session says which — asking the device

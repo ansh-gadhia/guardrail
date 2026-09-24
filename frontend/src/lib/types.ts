@@ -30,6 +30,8 @@ export interface TokenResponse {
   token_type: string;
   expires_at: string;
   principal: Principal;
+  // The console's inactivity limit, enforced in the browser; 0 disables it.
+  idle_timeout_seconds?: number;
 }
 
 export interface MFAChallenge {

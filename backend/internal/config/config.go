@@ -342,10 +342,16 @@ type RedisConfig struct {
 }
 
 type AuthConfig struct {
-	AccessTokenTTL  time.Duration
+	AccessTokenTTL time.Duration
+	// RefreshTokenTTL is the ABSOLUTE lifetime of one console sign-in. It was a
+	// sliding thirty days; rotation no longer extends it.
 	RefreshTokenTTL time.Duration
-	JWTSigningKey   string // symmetric signing secret (>= 32 bytes)
-	Issuer          string
+	// ConsoleIdleTimeout signs somebody out when nothing has kept their console
+	// alive for this long — which, since an open console refreshes itself, means
+	// the browser was closed or the machine slept.
+	ConsoleIdleTimeout time.Duration
+	JWTSigningKey      string // symmetric signing secret (>= 32 bytes)
+	Issuer             string
 }
 
 type SecurityConfig struct {
@@ -453,10 +459,13 @@ func Load() (*Config, error) {
 			Concurrency:  getInt("GUARDRAIL_HEALTH_CONCURRENCY", 16),
 		},
 		Auth: AuthConfig{
-			AccessTokenTTL:  getDuration("GUARDRAIL_ACCESS_TOKEN_TTL", 15*time.Minute),
-			RefreshTokenTTL: getDuration("GUARDRAIL_REFRESH_TOKEN_TTL", 720*time.Hour),
-			JWTSigningKey:   getEnv("GUARDRAIL_JWT_SIGNING_KEY", ""),
-			Issuer:          getEnv("GUARDRAIL_JWT_ISSUER", "guardrail"),
+			AccessTokenTTL: getDuration("GUARDRAIL_ACCESS_TOKEN_TTL", 15*time.Minute),
+			// A working day. It was 720h, and sliding, which made a sign-in
+			// effectively permanent for anybody who opened the console monthly.
+			RefreshTokenTTL:    getDuration("GUARDRAIL_REFRESH_TOKEN_TTL", 12*time.Hour),
+			ConsoleIdleTimeout: getDuration("GUARDRAIL_CONSOLE_IDLE_TIMEOUT", 30*time.Minute),
+			JWTSigningKey:      getEnv("GUARDRAIL_JWT_SIGNING_KEY", ""),
+			Issuer:             getEnv("GUARDRAIL_JWT_ISSUER", "guardrail"),
 		},
 		Security: SecurityConfig{
 			MasterKey:            getEnv("GUARDRAIL_MASTER_KEY", ""),
@@ -585,6 +594,22 @@ func (c *Config) validate() error {
 		errs = append(errs, errors.New("GUARDRAIL_JWT_SIGNING_KEY is required"))
 	} else if len(c.Auth.JWTSigningKey) < minSecretLen {
 		errs = append(errs, fmt.Errorf("GUARDRAIL_JWT_SIGNING_KEY must be at least %d bytes", minSecretLen))
+	}
+	// The idle timeout has to outlast the access token. An open console refreshes
+	// when its access token expires, so the gap between refreshes IS the access
+	// token lifetime; an idle timeout shorter than that signs out people who are
+	// actively working. Twice is the floor, to leave room for a background tab the
+	// browser has throttled to one wake-up a minute.
+	if c.Auth.ConsoleIdleTimeout > 0 && c.Auth.ConsoleIdleTimeout < 2*c.Auth.AccessTokenTTL {
+		errs = append(errs, fmt.Errorf(
+			"GUARDRAIL_CONSOLE_IDLE_TIMEOUT (%s) must be at least twice GUARDRAIL_ACCESS_TOKEN_TTL (%s), "+
+				"or people who are actively working get signed out",
+			c.Auth.ConsoleIdleTimeout, c.Auth.AccessTokenTTL))
+	}
+	if c.Auth.RefreshTokenTTL > 0 && c.Auth.RefreshTokenTTL < c.Auth.AccessTokenTTL {
+		errs = append(errs, fmt.Errorf(
+			"GUARDRAIL_REFRESH_TOKEN_TTL (%s) is the longest a sign-in may last and cannot be shorter "+
+				"than GUARDRAIL_ACCESS_TOKEN_TTL (%s)", c.Auth.RefreshTokenTTL, c.Auth.AccessTokenTTL))
 	}
 	if c.Security.MasterKey == "" {
 		errs = append(errs, errors.New("GUARDRAIL_MASTER_KEY is required"))

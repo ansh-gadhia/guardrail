@@ -234,6 +234,27 @@ func (s *Service) Refresh(ctx context.Context, rawToken string, meta ReqMeta) (*
 			Result: audit.ResultFailure, Detail: map[string]any{"reason": "refresh_reuse"}})
 		return nil, iam.ErrRefreshReuse
 	}
+	// Past its absolute lifetime. Reached however actively the console was being
+	// used: a working day is the most any one sign-in lasts.
+	if !now.Before(sess.ExpiresAt) {
+		s.recordSessionEnd(ctx, sess, meta, "lifetime")
+		return nil, iam.ErrSessionLifetime
+	}
+	// Idle for longer than the timeout. A console that is open refreshes itself
+	// every access-token lifetime, so the time since THIS token was issued is the
+	// time since anything last kept the session alive. Past the timeout, nothing
+	// was: the browser was closed, or the machine slept.
+	//
+	// This, not the cookie, is the guarantee. The refresh cookie is a session
+	// cookie and a browser discards it on exit — but Chrome, Edge and Firefox all
+	// restore session cookies when set to reopen previous tabs, and a person has
+	// no way to know which they have configured. A server-side limit does not
+	// depend on what the browser chose to remember.
+	if s.cfg.IdleTimeout > 0 && now.Sub(sess.CreatedAt) > s.cfg.IdleTimeout {
+		_ = s.sessions.RevokeFamily(ctx, sess.FamilyID, now)
+		s.recordSessionEnd(ctx, sess, meta, "idle")
+		return nil, iam.ErrSessionIdle
+	}
 	if !sess.IsUsable(now) {
 		return nil, iam.ErrRefreshInvalid
 	}
@@ -250,7 +271,12 @@ func (s *Service) Refresh(ctx context.Context, rawToken string, meta ReqMeta) (*
 	// would be wrong in both directions: an SSO user who also signs in with a
 	// password has two families with different provenance, and the same person's
 	// two sessions must not silently share one.
-	pair, err := s.issueTokens(ctx, user, meta, sess.FamilyID, sess.SSO)
+	// The new token inherits the family's deadline. It used to get a fresh one,
+	// which is what made a login immortal. min() also caps a family issued under
+	// the old sliding lifetime: its first refresh after this change pins it to
+	// no later than one full lifetime from now.
+	pair, err := s.issueTokensUntil(ctx, user, meta, sess.FamilyID, sess.SSO,
+		earliest(sess.ExpiresAt, now.Add(s.cfg.RefreshTTL)))
 	if err != nil {
 		return nil, err
 	}
@@ -386,6 +412,12 @@ func (s *Service) principalOf(ctx context.Context, u *iam.User) Principal {
 // from the user record — and a marker that lived only in the token would be lost
 // at the first rotation, fifteen minutes in.
 func (s *Service) issueTokens(ctx context.Context, user *iam.User, meta ReqMeta, familyID iam.ID, sso bool) (*TokenPair, error) {
+	return s.issueTokensUntil(ctx, user, meta, familyID, sso, time.Time{})
+}
+
+// issueTokensUntil mints a token pair whose refresh half expires at deadline, or
+// one full lifetime from now when deadline is zero — a fresh sign-in.
+func (s *Service) issueTokensUntil(ctx context.Context, user *iam.User, meta ReqMeta, familyID iam.ID, sso bool, deadline time.Time) (*TokenPair, error) {
 	now := s.clock.Now()
 	claims := claimsFromUser(user)
 	claims.SSO = sso
@@ -397,10 +429,15 @@ func (s *Service) issueTokens(ctx context.Context, user *iam.User, meta ReqMeta,
 	if err != nil {
 		return nil, err
 	}
-	refreshExp := now.Add(s.cfg.RefreshTTL)
+	refreshExp := deadline
+	if refreshExp.IsZero() {
+		refreshExp = now.Add(s.cfg.RefreshTTL)
+	}
 	sess := &iam.AuthSession{
 		ID: iam.NewID(), UserID: user.ID, FamilyID: familyID, RefreshTokenHash: refreshHash,
 		UserAgent: meta.UserAgent, IP: meta.IP, ExpiresAt: refreshExp, SSO: sso,
+		// The idle check measures from here, on this clock.
+		CreatedAt: now,
 	}
 	if err := s.sessions.Create(ctx, sess); err != nil {
 		return nil, err
@@ -408,7 +445,8 @@ func (s *Service) issueTokens(ctx context.Context, user *iam.User, meta ReqMeta,
 	return &TokenPair{
 		AccessToken: access, AccessExpiresAt: accessExp,
 		RefreshToken: rawRefresh, RefreshExpiresAt: refreshExp,
-		Principal: s.principalOf(ctx, user),
+		Principal:   s.principalOf(ctx, user),
+		IdleTimeout: s.cfg.IdleTimeout,
 	}, nil
 }
 
@@ -428,4 +466,27 @@ func (s *Service) authEvent(u *iam.User, meta ReqMeta, result audit.Result, reas
 		IP: meta.IP, UserAgent: meta.UserAgent,
 		Result: result, Detail: detail,
 	}
+}
+
+// earliest returns the sooner of two times.
+func earliest(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+// recordSessionEnd audits a console login ending by POLICY — idle or lifetime.
+//
+// Unlike a successful refresh, which is routine and not recorded, this is worth a
+// line: it is the system signing somebody out, and "why was I logged out" is a
+// question an administrator should be able to answer from the log.
+func (s *Service) recordSessionEnd(ctx context.Context, sess *iam.AuthSession, meta ReqMeta, why string) {
+	detail := map[string]any{"reason": why}
+	if why == "idle" && s.cfg.IdleTimeout > 0 {
+		detail["idle_minutes"] = int(s.cfg.IdleTimeout.Minutes())
+	}
+	s.record(ctx, audit.Event{Action: "auth.session_expired", Category: audit.CategoryAuth,
+		ActorID: &sess.UserID, TargetType: "user", TargetID: sess.UserID.String(),
+		IP: meta.IP, UserAgent: meta.UserAgent, Result: audit.ResultSuccess, Detail: detail})
 }

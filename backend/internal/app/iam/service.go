@@ -26,12 +26,22 @@ type Throttle interface {
 type Config struct {
 	MaxLoginFailures int           // account lockout threshold
 	LockoutDuration  time.Duration // how long an account stays locked
-	RefreshTTL       time.Duration // refresh-token lifetime
+	// RefreshTTL is the ABSOLUTE lifetime of one console login, counted from the
+	// moment of sign-in. Rotation never extends it. It used to be a sliding
+	// thirty days — every refresh issued a token good for another thirty — so
+	// opening the console once a month kept a person signed in indefinitely.
+	RefreshTTL time.Duration
+	// IdleTimeout ends a login nobody has used for this long. While the console
+	// is open it refreshes on its own every access-token lifetime, so this only
+	// ever fires when nothing is running it: the browser was closed, or the
+	// machine went to sleep. Zero disables it.
+	IdleTimeout time.Duration
 }
 
 // DefaultConfig returns production-sensible defaults.
 func DefaultConfig() Config {
-	return Config{MaxLoginFailures: 5, LockoutDuration: 15 * time.Minute, RefreshTTL: 720 * time.Hour}
+	return Config{MaxLoginFailures: 5, LockoutDuration: 15 * time.Minute,
+		RefreshTTL: 12 * time.Hour, IdleTimeout: 30 * time.Minute}
 }
 
 // Service implements the IAM use cases.

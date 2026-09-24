@@ -30,6 +30,9 @@ type TokenPair struct {
 	RefreshToken     string
 	RefreshExpiresAt time.Time
 	Principal        Principal
+	// IdleTimeout is the console's inactivity limit, for the browser to enforce
+	// between refreshes. Zero disables it.
+	IdleTimeout time.Duration
 
 	MFARequired bool
 	MFAToken    string

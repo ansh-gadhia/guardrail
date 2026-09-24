@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, setAccessToken, refreshSession } from "@/lib/api";
+import { setIdleLimit } from "@/lib/idle";
 import type { LoginResult, Principal, TokenResponse } from "@/lib/types";
 
 interface AuthState {
@@ -32,6 +33,7 @@ export const useAuth = create<AuthState>((set, get) => ({
 
   setSession: (t) => {
     setAccessToken(t.access_token);
+    setIdleLimit(t.idle_timeout_seconds);
     set({ principal: t.principal });
   },
 

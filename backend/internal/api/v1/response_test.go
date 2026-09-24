@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,9 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	appiam "github.com/guardrail/guardrail/internal/app/iam"
 	"github.com/guardrail/guardrail/internal/domain/access"
 	"github.com/guardrail/guardrail/internal/domain/iam"
 	"github.com/guardrail/guardrail/internal/domain/vault"
@@ -213,5 +216,25 @@ func TestRowErrorMapsDomainSentinels(t *testing.T) {
 		if got := rowError(c.err); got != c.want {
 			t.Errorf("rowError(%v) = %q, want %q", c.err, got, c.want)
 		}
+	}
+}
+
+// The browser enforces the console's idle limit, and it takes the number from
+// here. A response that dropped it would switch the idle sign-out off without
+// anything else noticing — the console treats an absent limit as "none".
+func TestTokenResponseCarriesTheIdleLimit(t *testing.T) {
+	body := newTokenResponse(&appiam.TokenPair{
+		AccessToken: "x", AccessExpiresAt: time.Unix(0, 0), IdleTimeout: 30 * time.Minute,
+	})
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["idle_timeout_seconds"] != float64(1800) {
+		t.Fatalf("idle_timeout_seconds = %v, want 1800", got["idle_timeout_seconds"])
 	}
 }
