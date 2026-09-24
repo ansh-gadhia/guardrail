@@ -47,6 +47,9 @@ type guardrailClaims struct {
 // expiry.
 func (j *JWTIssuer) Issue(c iam.Claims, now time.Time) (string, time.Time, error) {
 	exp := now.Add(j.ttl)
+	if !c.NotAfter.IsZero() && c.NotAfter.Before(exp) {
+		exp = c.NotAfter
+	}
 	claims := guardrailClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    j.issuer,

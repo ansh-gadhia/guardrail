@@ -154,6 +154,9 @@ type Claims struct {
 	// whether the organization's source-address policy applies — and only when
 	// that bypass has been switched on. It grants nothing on its own.
 	SSO bool
+	// NotAfter caps the token's expiry: an access token must not outlive the
+	// sign-in it was issued under. Zero means no cap beyond the issuer's TTL.
+	NotAfter time.Time
 }
 
 // Level is the rank to judge this principal by. Super admins sit above every

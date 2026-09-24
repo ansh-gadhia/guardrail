@@ -3,8 +3,15 @@ import { api, setAccessToken, refreshSession } from "@/lib/api";
 import { setIdleLimit } from "@/lib/idle";
 import type { LoginResult, Principal, TokenResponse } from "@/lib/types";
 
+// The current sign-in's hard end, for the footer to count down to.
+export interface SignInWindow {
+  endsAt: number; // epoch ms
+  lifetimeMs: number; // the longest any sign-in may last
+}
+
 interface AuthState {
   principal: Principal | null;
+  signIn: SignInWindow | null;
   ready: boolean; // initial session probe finished
   // firstRunDone marks the first-run flow as dismissed for this sign-in, so it
   // does not reappear on every navigation. Whether it comes back at all is a
@@ -26,6 +33,7 @@ interface AuthState {
 
 export const useAuth = create<AuthState>((set, get) => ({
   principal: null,
+  signIn: null,
   ready: false,
   firstRunDone: false,
 
@@ -34,12 +42,19 @@ export const useAuth = create<AuthState>((set, get) => ({
   setSession: (t) => {
     setAccessToken(t.access_token);
     setIdleLimit(t.idle_timeout_seconds);
-    set({ principal: t.principal });
+    // The end never moves once a sign-in exists (rotation cannot extend it), so
+    // the responses that start one — login, MFA, SSO, a page load — are enough.
+    const endsAt = t.sign_in_expires_at ? Date.parse(t.sign_in_expires_at) : NaN;
+    const lifetimeMs = (t.sign_in_lifetime_seconds ?? 0) * 1000;
+    set({
+      principal: t.principal,
+      signIn: Number.isFinite(endsAt) && lifetimeMs > 0 ? { endsAt, lifetimeMs } : null,
+    });
   },
 
   clear: () => {
     setAccessToken(null);
-    set({ principal: null, firstRunDone: false });
+    set({ principal: null, signIn: null, firstRunDone: false });
   },
 
   login: async (email, password, organization) => {

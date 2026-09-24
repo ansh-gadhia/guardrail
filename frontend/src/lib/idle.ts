@@ -58,6 +58,17 @@ export function idleExpired(): boolean {
   return limitMs > 0 && Date.now() - lastActivity() > limitMs;
 }
 
+// idleLimitMs is the configured limit; 0 when there is none.
+export function idleLimitMs(): number {
+  return limitMs;
+}
+
+// idleRemainingMs is how long until the console signs out for inactivity, or
+// null when it never will.
+export function idleRemainingMs(): number | null {
+  return limitMs > 0 ? limitMs - (Date.now() - lastActivity()) : null;
+}
+
 // idleReason is what the sign-in page says afterwards, in the server's voice.
 export function idleReason(): string {
   const m = Math.round(limitMs / 60_000);

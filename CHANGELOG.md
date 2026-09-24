@@ -8,7 +8,7 @@ Versioning policy: from **1.0.0**, standard Semantic Versioning applies — MAJO
 for incompatible API changes, MINOR for backward-compatible features, PATCH for
 fixes. The single source of truth is the top-level `VERSION` file; it is injected
 into the binary at build time (`-ldflags -X main.version`) and surfaced at
-`GET /api/v1/version`, `GET /healthz`, and in the web UI footer.
+`GET /api/v1/version`, `GET /healthz`, and at the foot of the web UI's sidebar.
 
 ## [Unreleased]
 
@@ -24,13 +24,21 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
     out. A tab showing a live session counts as in use; the session's own idle
     policy governs that. `0` disables it.
   - **`GUARDRAIL_REFRESH_TOKEN_TTL`** (default `12h`, was `720h`) — the most a
-    sign-in can last. Staying active no longer extends it.
+    sign-in can last. Staying active no longer extends it, and no access token
+    issued under it outlives it.
 
   The sign-in page says which one ended the session, and each is audited as
   `auth.session_expired`. A browser that restores its tabs gets its session
   cookie back too; the idle limit is what refuses it. Anybody signed in when
   this ships keeps their existing session until it idles out or reaches the new
   cap, which is at most 12 hours.
+
+- **The footer shows how long your sign-in has left.** A line along its top
+  edge burns down over the sign-in, beside "Signed in until 6:42 PM" and the
+  idle rule. It turns amber in the last half hour, and counts down the final
+  two minutes before an idle sign-out, so moving the mouse visibly keeps you
+  in. The vendor and client credit now sit on the right at full colour. The
+  footer is the height of the sidebar's foot, so one rule runs across the app.
 
 ## [1.5.0] - 2026-09-11
 

@@ -293,8 +293,8 @@ gotchas, are in `deploy/dns/README.md`.
 2. `docker compose up -d migrate` applies new migrations (idempotent, ordered).
 3. `docker compose up -d api web` performs a rolling restart.
 
-The running version is always visible at `GET /api/v1/version` and in the console
-footer; the single source of truth is the repo `VERSION` file, injected at build
+The running version is always visible at `GET /api/v1/version` and at the foot
+of the console's sidebar; the single source of truth is the repo `VERSION` file, injected at build
 time. See `CHANGELOG.md` for what changed.
 
 ---

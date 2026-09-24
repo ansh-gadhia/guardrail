@@ -32,6 +32,9 @@ export interface TokenResponse {
   principal: Principal;
   // The console's inactivity limit, enforced in the browser; 0 disables it.
   idle_timeout_seconds?: number;
+  // When this sign-in ends regardless of activity, and the most any may last.
+  sign_in_expires_at?: string;
+  sign_in_lifetime_seconds?: number;
 }
 
 export interface MFAChallenge {

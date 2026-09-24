@@ -222,9 +222,11 @@ func TestRowErrorMapsDomainSentinels(t *testing.T) {
 // The browser enforces the console's idle limit, and it takes the number from
 // here. A response that dropped it would switch the idle sign-out off without
 // anything else noticing — the console treats an absent limit as "none".
-func TestTokenResponseCarriesTheIdleLimit(t *testing.T) {
+func TestTokenResponseCarriesTheSignInLimits(t *testing.T) {
+	end := time.Date(2026, 9, 24, 18, 42, 0, 0, time.UTC)
 	body := newTokenResponse(&appiam.TokenPair{
 		AccessToken: "x", AccessExpiresAt: time.Unix(0, 0), IdleTimeout: 30 * time.Minute,
+		RefreshExpiresAt: end, SignInLifetime: 12 * time.Hour,
 	})
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -236,5 +238,9 @@ func TestTokenResponseCarriesTheIdleLimit(t *testing.T) {
 	}
 	if got["idle_timeout_seconds"] != float64(1800) {
 		t.Fatalf("idle_timeout_seconds = %v, want 1800", got["idle_timeout_seconds"])
+	}
+	// And the sign-in's own end, which the console's footer counts down to.
+	if got["sign_in_expires_at"] != "2026-09-24T18:42:00Z" || got["sign_in_lifetime_seconds"] != float64(43200) {
+		t.Fatalf("sign-in = %v / %v, want 2026-09-24T18:42:00Z / 43200", got["sign_in_expires_at"], got["sign_in_lifetime_seconds"])
 	}
 }

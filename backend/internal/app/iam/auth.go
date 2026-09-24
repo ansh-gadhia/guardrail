@@ -419,8 +419,15 @@ func (s *Service) issueTokens(ctx context.Context, user *iam.User, meta ReqMeta,
 // one full lifetime from now when deadline is zero — a fresh sign-in.
 func (s *Service) issueTokensUntil(ctx context.Context, user *iam.User, meta ReqMeta, familyID iam.ID, sso bool, deadline time.Time) (*TokenPair, error) {
 	now := s.clock.Now()
+	refreshExp := deadline
+	if refreshExp.IsZero() {
+		refreshExp = now.Add(s.cfg.RefreshTTL)
+	}
 	claims := claimsFromUser(user)
 	claims.SSO = sso
+	// Otherwise the last access token of the day, issued a minute before the
+	// sign-in's end, would carry on for its full TTL after it.
+	claims.NotAfter = refreshExp
 	access, accessExp, err := s.tokens.Issue(claims, now)
 	if err != nil {
 		return nil, err
@@ -428,10 +435,6 @@ func (s *Service) issueTokensUntil(ctx context.Context, user *iam.User, meta Req
 	rawRefresh, refreshHash, err := s.refresh.Generate()
 	if err != nil {
 		return nil, err
-	}
-	refreshExp := deadline
-	if refreshExp.IsZero() {
-		refreshExp = now.Add(s.cfg.RefreshTTL)
 	}
 	sess := &iam.AuthSession{
 		ID: iam.NewID(), UserID: user.ID, FamilyID: familyID, RefreshTokenHash: refreshHash,
@@ -445,8 +448,9 @@ func (s *Service) issueTokensUntil(ctx context.Context, user *iam.User, meta Req
 	return &TokenPair{
 		AccessToken: access, AccessExpiresAt: accessExp,
 		RefreshToken: rawRefresh, RefreshExpiresAt: refreshExp,
-		Principal:   s.principalOf(ctx, user),
-		IdleTimeout: s.cfg.IdleTimeout,
+		Principal:      s.principalOf(ctx, user),
+		IdleTimeout:    s.cfg.IdleTimeout,
+		SignInLifetime: s.cfg.RefreshTTL,
 	}, nil
 }
 

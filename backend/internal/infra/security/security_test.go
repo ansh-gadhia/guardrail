@@ -136,3 +136,24 @@ func TestRefreshToken_GenerateAndHash(t *testing.T) {
 		t.Fatal("distinct tokens produced identical hashes")
 	}
 }
+
+// An access token must not outlive the sign-in it belongs to: the last one of
+// the day, issued a minute before the sign-in ends, would otherwise carry on
+// for its full TTL afterwards.
+func TestJWT_NeverOutlivesTheSignIn(t *testing.T) {
+	issuer := NewJWTIssuer(strings.Repeat("k", 32), "guardrail", 15*time.Minute)
+	now := time.Now()
+	end := now.Add(time.Minute)
+	_, exp, err := issuer.Issue(iam.Claims{UserID: iam.NewID(), OrganizationID: iam.NewID(), NotAfter: end}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp.After(end) {
+		t.Fatalf("token expires %v, after the sign-in ends at %v", exp, end)
+	}
+	// A cap further out than the TTL changes nothing.
+	_, exp, _ = issuer.Issue(iam.Claims{UserID: iam.NewID(), OrganizationID: iam.NewID(), NotAfter: now.Add(time.Hour)}, now)
+	if !exp.Equal(now.Add(15 * time.Minute)) {
+		t.Fatalf("token expires %v, want the full TTL", exp)
+	}
+}

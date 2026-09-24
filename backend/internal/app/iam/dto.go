@@ -33,6 +33,10 @@ type TokenPair struct {
 	// IdleTimeout is the console's inactivity limit, for the browser to enforce
 	// between refreshes. Zero disables it.
 	IdleTimeout time.Duration
+	// SignInLifetime is the configured maximum a sign-in lasts. RefreshExpiresAt
+	// is when THIS one ends — rotation never moves it — and the two together let
+	// the console show how much of it is left.
+	SignInLifetime time.Duration
 
 	MFARequired bool
 	MFAToken    string

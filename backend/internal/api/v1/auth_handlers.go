@@ -27,14 +27,21 @@ type tokenResponse struct {
 	// watches for keyboard and mouse — and it takes the number from here rather
 	// than carrying one of its own.
 	IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
+	// When this sign-in ends however busy its holder is, and the most any
+	// sign-in lasts. The console shows the first and draws the one against the
+	// other, so the end of the day is never a surprise.
+	SignInExpiresAt       string `json:"sign_in_expires_at"`
+	SignInLifetimeSeconds int    `json:"sign_in_lifetime_seconds"`
 }
 
 func newTokenResponse(pair *appiam.TokenPair) tokenResponse {
 	return tokenResponse{
 		AccessToken: pair.AccessToken, TokenType: "Bearer",
-		ExpiresAt:          pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
-		Principal:          toPrincipalDTO(pair.Principal),
-		IdleTimeoutSeconds: int(pair.IdleTimeout / time.Second),
+		ExpiresAt:             pair.AccessExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
+		Principal:             toPrincipalDTO(pair.Principal),
+		IdleTimeoutSeconds:    int(pair.IdleTimeout / time.Second),
+		SignInExpiresAt:       pair.RefreshExpiresAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
+		SignInLifetimeSeconds: int(pair.SignInLifetime / time.Second),
 	}
 }
 

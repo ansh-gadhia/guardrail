@@ -131,7 +131,8 @@ they name your estate. Full notes in **[deploy/dns/README.md](deploy/dns/README.
 - **Web console** (`frontend/`, React 18 + TS + Vite + Tailwind): login (local /
   MFA / LDAP / OIDC SSO), dashboard, devices, live sessions + desktop/terminal
   viewers, recording playback, approvals, audit + CSV export, self-service MFA,
-  global search. App **version shown in the footer**.
+  global search. App **version shown at the foot of the sidebar**; the footer
+  shows how long your sign-in has left.
 - **API** (`backend/`, Go 1.26 + Gin): the full `/api/v1` surface, the
   credential-injecting proxy, background workers (notification dispatcher, session
   reaper, health poller), Prometheus metrics.

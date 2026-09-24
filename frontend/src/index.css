@@ -221,50 +221,60 @@
     animation: drawer-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
-  /* ---- Footer: animated brand strip ---------------------------------------
-     Motion is CSS-only, so the global reduced-motion rule below neutralises it. */
+  /* Shared by the sidebar brand seal's flowing edge. */
   @keyframes footer-flow {
     to { background-position: 200% 50%; }
   }
-  /* A slim beam flowing along the footer's top edge, tinted teal→green→red so it
-     reads as one piece with the Virtual Galaxy mark anchored below it. */
-  .footer-beam {
-    background-image: linear-gradient(
-      90deg,
-      transparent 0%,
-      rgb(var(--accent) / 0.55) 20%,
-      #7bc043 42%,
-      #ff3b30 58%,
-      rgb(var(--accent) / 0.55) 80%,
-      transparent 100%
-    );
-    background-size: 200% 100%;
-    animation: footer-flow 7s linear infinite;
+
+  /* ---- Footer fuse: the sign-in, drawn along the footer's top edge ---------
+     The lit length is what is left of this sign-in against the longest one may
+     last, and the head is "now". It is a measurement, not an ornament, so it
+     never loops: it draws in once when the console opens and afterwards moves
+     only as the time does. Amber when the sign-in is about to end, for either
+     reason. --left is set inline, 0..1. */
+  .fuse,
+  .fuse-head {
+    --fuse-ink: var(--grad-to);
+    position: absolute;
+    pointer-events: none;
   }
-  @keyframes footer-text {
-    to { background-position: -200% 0; }
+  .fuse {
+    left: 0;
+    top: -1px;
+    height: 2px;
+    width: calc(var(--left) * 100%);
+    border-radius: 0 2px 2px 0;
+    background: linear-gradient(90deg, rgb(var(--grad-from) / 0.15), rgb(var(--grad-from) / 0.7) 55%, rgb(var(--fuse-ink)));
+    transition: width 1.2s cubic-bezier(0.16, 1, 0.3, 1), background 0.4s;
+    animation: fuse-draw 1.4s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
-  .footer-shimmer {
-    background: linear-gradient(
-      90deg,
-      rgb(var(--muted)) 0%,
-      rgb(var(--muted)) 38%,
-      rgb(var(--fg)) 50%,
-      rgb(var(--muted)) 62%,
-      rgb(var(--muted)) 100%
-    );
-    background-size: 200% 100%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    animation: footer-text 6s linear infinite;
+  .fuse-head {
+    top: -4px;
+    /* Held inside the edges, so a full sign-in cannot push it past the right. */
+    left: clamp(4px, calc(var(--left) * 100%), calc(100% - 4px));
+    width: 8px;
+    height: 8px;
+    margin-left: -4px;
+    border-radius: 9999px;
+    background: rgb(var(--fuse-ink));
+    box-shadow:
+      0 0 0 3px rgb(var(--fuse-ink) / 0.16),
+      0 0 14px 3px rgb(var(--fuse-ink) / 0.55);
+    transition: left 1.2s cubic-bezier(0.16, 1, 0.3, 1), background 0.4s, box-shadow 0.4s;
+    animation: fuse-head-draw 1.4s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
-  @keyframes footer-rise {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
+  .fuse[data-tone="warn"],
+  .fuse-head[data-tone="warn"] {
+    --fuse-ink: var(--warn);
   }
-  .footer-rise {
-    animation: footer-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  .fuse[data-tone="warn"] {
+    background: linear-gradient(90deg, rgb(var(--warn) / 0.2), rgb(var(--warn)));
+  }
+  @keyframes fuse-draw {
+    from { width: 0; }
+  }
+  @keyframes fuse-head-draw {
+    from { left: 0; opacity: 0; }
   }
 
   /* ---- Sidebar brand seal: the company mark, framed under the product wordmark.
@@ -363,18 +373,14 @@
   }
 
   /* ---- Footer vendor mark ---------------------------------------------------
-     The company mark sits in the footer beside the tagline. It is set at the
-     text's own weight — quiet by default, warming on hover — so the strip stays
-     a signature rather than becoming a banner. */
-  .footer-mark {
-    opacity: 0.62;
-    filter: grayscale(0.35);
-    transition: opacity 0.35s, filter 0.35s, transform 0.35s;
+     Shown at full colour and at a size that can be read: it is the credit, and
+     a credit greyed into the background is one nobody sees. The hover answers
+     the pointer, since this is a link. */
+  .footer-mark img {
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   }
-  .footer-mark:hover,
-  .footer-mark:focus-visible {
-    opacity: 1;
-    filter: grayscale(0);
+  .footer-mark:hover img,
+  .footer-mark:focus-visible img {
     transform: translateY(-1px);
   }
 
