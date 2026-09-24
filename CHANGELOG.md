@@ -40,6 +40,15 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   in. The vendor and client credit now sit on the right at full colour. The
   footer is the height of the sidebar's foot, so one rule runs across the app.
 
+- **The sign-in page shows GuardRail at work.** Its dark panel is now a live
+  schematic: people, the vault behind its gate, and privileged systems, with
+  sessions running through it one at a time — request, approve, broker,
+  record — and a step bar that follows along. Signing in puts you on it: your
+  request crosses to the gate and waits for the answer, then the vault opens,
+  the gate turns red, or it holds on amber for a second factor. On a phone the
+  emblem's dial answers the same way. The form warns when Caps Lock is on.
+  With reduced motion the scene is drawn still and the steps are written out.
+
 ## [1.5.0] - 2026-09-11
 
 ### Added

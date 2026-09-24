@@ -384,6 +384,483 @@
     transform: translateY(-1px);
   }
 
+  /* ---- Sign-in rail: the live schematic (components/RailScene.tsx) ---------
+     Always on the dark panel, so its palette is its own rather than the theme's.
+     Transforms go on INNER groups only: the outer ones carry translate
+     attributes, and a CSS transform on them would replace the position. */
+  .rail-scene {
+    --rs-line: 58 74 97;
+    --rs-ink: 10 17 32;
+    --rs-teal: 45 212 191;
+    --rs-cyan: 103 232 249;
+    --rs-green: 52 211 153;
+    --rs-red: 248 113 113;
+    --rs-amber: 251 191 36;
+    overflow: visible;
+    font-family: theme("fontFamily.sans");
+  }
+  .rs-rail {
+    fill: none;
+    stroke: rgb(var(--rs-line) / 0.9);
+    stroke-width: 1.25;
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation: rs-draw 1.1s cubic-bezier(0.65, 0, 0.35, 1) var(--d, 0ms) forwards;
+  }
+  .rs-rail-you {
+    stroke-dasharray: 1;
+    stroke: rgb(var(--rs-teal) / 0.35);
+  }
+  .rs-through {
+    stroke: rgb(var(--rs-line) / 0.5);
+  }
+  @keyframes rs-draw {
+    to { stroke-dashoffset: 0; }
+  }
+  .rs-fade-in {
+    animation: fadein 1.4s ease 0.3s both;
+  }
+  .rs-pop {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: rs-pop 0.7s cubic-bezier(0.16, 1, 0.3, 1) var(--d, 0ms) both;
+  }
+  @keyframes rs-pop {
+    from { opacity: 0; transform: scale(0.6); }
+  }
+
+  .rs-node {
+    fill: rgb(var(--rs-ink));
+    stroke: rgb(var(--rs-line));
+    stroke-width: 1.25;
+    transition: stroke 0.35s, filter 0.35s;
+  }
+  .rs-glyph {
+    fill: none;
+    stroke: rgb(148 163 184);
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: stroke 0.35s;
+  }
+  .rs-label {
+    fill: rgb(100 116 139);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    transition: fill 0.35s;
+  }
+  .rs-label-you {
+    fill: rgb(203 213 225);
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+  .rs-person[data-active="1"] .rs-node,
+  .rs-system[data-live="1"] .rs-node {
+    stroke: rgb(var(--rs-teal));
+    filter: drop-shadow(0 0 6px rgb(var(--rs-teal) / 0.55));
+  }
+  .rs-person[data-active="1"] .rs-glyph,
+  .rs-system[data-live="1"] .rs-glyph {
+    stroke: rgb(var(--rs-teal));
+  }
+  .rs-system[data-live="1"] .rs-label {
+    fill: rgb(203 213 225);
+  }
+  .rs-rec {
+    fill: rgb(239 68 68);
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .rs-system[data-live="1"] .rs-rec {
+    opacity: 1;
+    animation: rs-blink 1.1s ease-in-out infinite;
+  }
+  @keyframes rs-blink {
+    50% { opacity: 0.25; }
+  }
+  .rs-stream {
+    fill: none;
+    stroke: rgb(var(--rs-teal) / 0.8);
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-dasharray: 2 8;
+    opacity: 0;
+    transition: opacity 0.4s;
+  }
+  .rs-stream[data-on="1"] {
+    opacity: 1;
+    animation: rs-flow 0.8s linear infinite;
+  }
+  @keyframes rs-flow {
+    to { stroke-dashoffset: 10; }
+  }
+
+  /* the gate */
+  .rs-gate-bar {
+    fill: rgb(var(--rs-line));
+    transform-box: fill-box;
+    transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), fill 0.25s;
+  }
+  .rs-gate[data-state="wait"] .rs-gate-bar {
+    fill: rgb(var(--rs-teal));
+    animation: rs-wait 0.9s ease-in-out infinite;
+  }
+  .rs-gate[data-state="mfa"] .rs-gate-bar {
+    fill: rgb(var(--rs-amber));
+  }
+  .rs-gate[data-state="open"] .rs-gate-bar {
+    fill: rgb(var(--rs-green));
+  }
+  .rs-gate[data-state="open"] .rs-gate-top {
+    transform: translateY(-10px);
+  }
+  .rs-gate[data-state="open"] .rs-gate-bottom {
+    transform: translateY(10px);
+  }
+  .rs-gate[data-state="deny"] .rs-gate-bar {
+    fill: rgb(var(--rs-red));
+    animation: rs-shake 0.45s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+  }
+  @keyframes rs-wait {
+    50% { opacity: 0.35; }
+  }
+  @keyframes rs-shake {
+    20%, 60% { transform: translateX(-3px); }
+    40%, 80% { transform: translateX(3px); }
+  }
+
+  /* the vault */
+  .rs-vault {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: rs-vault-in 1.2s cubic-bezier(0.16, 1, 0.3, 1) 0.25s both;
+  }
+  @keyframes rs-vault-in {
+    from { opacity: 0; transform: scale(0.8) rotate(-12deg); }
+  }
+  .rs-dial {
+    transform-box: fill-box;
+    transform-origin: center;
+    transition: transform 0.6s cubic-bezier(0.34, 1.4, 0.64, 1);
+  }
+  .rs-dial-ticks {
+    fill: none;
+    stroke: rgb(var(--rs-line));
+    stroke-width: 5;
+    stroke-dasharray: 1.2 7.18;
+  }
+  .rs-dial-major {
+    fill: none;
+    stroke: rgb(var(--rs-teal) / 0.7);
+    stroke-width: 7;
+    stroke-dasharray: 1.6 124.06;
+  }
+  .rs-dial-mark {
+    fill: rgb(var(--rs-teal));
+  }
+  .rs-ring {
+    fill: none;
+    stroke: rgb(var(--rs-teal) / 0.4);
+    stroke-width: 1.5;
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+  .rs-ring.flash-grant {
+    animation: rs-ring-grant 0.8s ease-out;
+  }
+  .rs-ring.flash-deny {
+    animation: rs-ring-deny 0.8s ease-out;
+  }
+  @keyframes rs-ring-grant {
+    from { stroke: rgb(var(--rs-green)); stroke-width: 3.5; }
+  }
+  @keyframes rs-ring-deny {
+    from { stroke: rgb(var(--rs-red)); stroke-width: 3.5; }
+  }
+  .rs-disc {
+    fill: rgb(var(--rs-ink));
+    stroke: rgb(var(--rs-line));
+  }
+  .rs-emblem {
+    transform-box: fill-box;
+    transform-origin: center;
+    transition: transform 0.5s cubic-bezier(0.16, 1, 0.3, 1), filter 0.5s;
+  }
+  .rs-flash {
+    fill: rgb(var(--rs-teal) / 0.55);
+    opacity: 0;
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+  .rs-vault[data-state="unlock"] .rs-ring {
+    animation: rs-ring-open 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    stroke: rgb(var(--rs-green));
+  }
+  .rs-vault[data-state="unlock"] .rs-flash {
+    animation: rs-flash 0.6s ease-out forwards;
+  }
+  /* The one big moment, and it has to be earned: when the vault opens for the
+     person signing in, a ring of light sweeps the whole panel. */
+  .rs-shock {
+    fill: none;
+    stroke: rgb(var(--rs-green));
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke; /* a line of light, not a thickening hoop */
+    opacity: 0;
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+  .rs-vault[data-state="unlock"] .rs-shock {
+    animation: rs-shock 0.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+  @keyframes rs-shock {
+    0% { opacity: 0.95; transform: scale(1); stroke-width: 3; }
+    100% { opacity: 0; transform: scale(9); stroke-width: 1; }
+  }
+  .rs-vault[data-state="unlock"] .rs-emblem {
+    transform: scale(1.12);
+    filter: brightness(1.35) drop-shadow(0 0 12px rgb(var(--rs-teal) / 0.8));
+  }
+  @keyframes rs-ring-open {
+    to { transform: scale(1.8); opacity: 0; stroke-width: 0.5; }
+  }
+  @keyframes rs-flash {
+    0% { opacity: 0.9; transform: scale(0.4); }
+    100% { opacity: 0; transform: scale(1.6); }
+  }
+  .rs-key circle:first-child {
+    fill: rgb(var(--rs-ink));
+    stroke: rgb(var(--rs-cyan) / 0.8);
+    stroke-width: 1.25;
+  }
+  .rs-key-glyph {
+    fill: none;
+    stroke: rgb(var(--rs-cyan));
+    stroke-width: 1.5;
+    stroke-linecap: round;
+  }
+  .rs-key {
+    transform-box: fill-box;
+    transform-origin: center;
+    opacity: 0;
+    transform: scale(0.4);
+    transition: opacity 0.3s, transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .rs-key[data-on="1"] {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  /* the session in flight */
+  .rs-head,
+  .rs-trail {
+    --c: var(--rs-teal);
+    opacity: 0;
+    transition: opacity 0.25s;
+  }
+  .rs-head[data-on="1"] {
+    opacity: 1;
+  }
+  .rs-trail {
+    fill: none;
+    stroke: rgb(var(--c));
+    stroke-linecap: round;
+  }
+  .rs-trail-wide[data-on="1"] {
+    opacity: 0.3;
+    stroke-width: 6;
+  }
+  .rs-trail-fine[data-on="1"] {
+    opacity: 0.95;
+    stroke-width: 1.6;
+  }
+  .rs-head[data-tone="sealed"],
+  .rs-trail[data-tone="sealed"] {
+    --c: var(--rs-cyan);
+  }
+  .rs-head[data-tone="grant"],
+  .rs-trail[data-tone="grant"] {
+    --c: var(--rs-green);
+  }
+  .rs-head[data-tone="deny"],
+  .rs-trail[data-tone="deny"] {
+    --c: var(--rs-red);
+  }
+  .rs-head[data-tone="mfa"],
+  .rs-trail[data-tone="mfa"] {
+    --c: var(--rs-amber);
+  }
+  .rs-head-glow {
+    fill: rgb(var(--c) / 0.7);
+  }
+  .rs-head-core {
+    fill: rgb(var(--c));
+    stroke: rgb(255 255 255 / 0.85);
+    stroke-width: 1;
+  }
+  .rs-head-seal {
+    fill: none;
+    stroke: rgb(var(--c) / 0.75);
+    stroke-width: 1;
+    stroke-dasharray: 2 2.2;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .rs-head[data-tone="sealed"] .rs-head-seal {
+    opacity: 1;
+  }
+  .rs-head-core,
+  .rs-head-glow,
+  .rs-head-burst {
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+  .rs-head[data-hold="1"] .rs-head-core,
+  .rs-head[data-hold="1"] .rs-head-glow {
+    animation: rs-breathe 1.1s ease-in-out infinite;
+  }
+  @keyframes rs-breathe {
+    50% { transform: scale(1.5); }
+  }
+  .rs-head-burst {
+    fill: none;
+    stroke: rgb(var(--rs-red));
+    stroke-width: 1.5;
+    opacity: 0;
+  }
+  .rs-head[data-burst="1"] .rs-head-burst {
+    animation: rs-burst 0.8s ease-out forwards;
+  }
+  .rs-head[data-burst="1"] .rs-head-core,
+  .rs-head[data-burst="1"] .rs-head-glow {
+    animation: rs-gone 0.5s ease-in 0.15s forwards;
+  }
+  @keyframes rs-burst {
+    0% { opacity: 0.95; transform: scale(1); }
+    100% { opacity: 0; transform: scale(5.5); }
+  }
+  @keyframes rs-gone {
+    to { opacity: 0; transform: scale(0.2); }
+  }
+
+  /* the step bar under the scene — it arrives with the first session */
+  .rs-steps-in {
+    animation: fadein 0.8s ease 1.3s both;
+  }
+  .rs-steps-lit {
+    background: linear-gradient(90deg, rgb(45 212 191 / 0.25), rgb(45 212 191));
+    transition: width 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .rs-step {
+    color: rgb(100 116 139);
+    transition: color 0.4s;
+  }
+  .rs-step[data-state="done"] {
+    color: rgb(94 234 212 / 0.6);
+  }
+  .rs-step[data-state="now"] {
+    color: rgb(255 255 255);
+  }
+  .rs-step-dot {
+    background: rgb(51 65 85);
+    transition: background 0.4s, box-shadow 0.4s;
+  }
+  .rs-step[data-state="done"] .rs-step-dot {
+    background: rgb(45 212 191 / 0.6);
+  }
+  .rs-step[data-state="now"] .rs-step-dot {
+    background: rgb(45 212 191);
+    box-shadow: 0 0 0 3px rgb(45 212 191 / 0.2), 0 0 10px rgb(45 212 191 / 0.8);
+  }
+
+  /* The blueprint the scene is drawn on, and a lamp that follows the pointer
+     across it — the one effect here that answers the person rather than the
+     story. --mx/--my are set on pointer move. */
+  .rail-grid,
+  .rail-grid-lit {
+    background-size: 44px 44px;
+  }
+  .rail-grid {
+    background-image:
+      linear-gradient(rgb(148 163 184 / 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(148 163 184 / 0.05) 1px, transparent 1px);
+  }
+  .rail-grid-lit {
+    background-image:
+      linear-gradient(rgb(45 212 191 / 0.2) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(45 212 191 / 0.2) 1px, transparent 1px);
+    -webkit-mask-image: radial-gradient(300px circle at var(--mx, 60%) var(--my, 45%), #000, transparent 70%);
+    mask-image: radial-gradient(300px circle at var(--mx, 60%) var(--my, 45%), #000, transparent 70%);
+  }
+
+  /* The headline is written left to right as the rails are drawn — the same
+     opening moment, not a second one. */
+  .rail-headline {
+    animation: rail-write 1.2s cubic-bezier(0.65, 0, 0.35, 1) 0.15s both;
+  }
+  @keyframes rail-write {
+    from { clip-path: inset(-10% 100% -10% 0); }
+    to { clip-path: inset(-10% 0 -10% 0); }
+  }
+
+  /* ---- Sign-in form ---------------------------------------------------------- */
+  /* A wrong answer shakes the form, once. */
+  .signin-shake {
+    animation: rs-shake 0.45s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+  }
+  /* While the server decides, a light runs along the button's lower edge. */
+  .signin-busy {
+    position: relative;
+    overflow: hidden;
+  }
+  .signin-busy::after {
+    content: "";
+    position: absolute;
+    left: -40%;
+    bottom: 0;
+    width: 40%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.9), transparent);
+    animation: signin-run 0.9s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+  }
+  @keyframes signin-run {
+    to { left: 100%; }
+  }
+  /* The emblem above the form on a phone, where the schematic has no room: its
+     dial turns while the server decides, and it answers the same way the vault
+     does. */
+  .compact-vault .cv-dial {
+    transform-origin: center;
+    transition: transform 0.6s cubic-bezier(0.34, 1.4, 0.64, 1);
+  }
+  .compact-vault .cv-ring {
+    transform-origin: center;
+    transition: stroke 0.3s;
+  }
+  .compact-vault[data-state="wait"] .cv-dial {
+    animation: cv-spin 2.4s linear infinite;
+  }
+  @keyframes cv-spin {
+    to { transform: rotate(360deg); }
+  }
+  .compact-vault[data-state="mfa"] .cv-ring {
+    stroke: rgb(var(--warn));
+  }
+  .compact-vault[data-state="deny"] {
+    animation: rs-shake 0.45s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+  }
+  .compact-vault[data-state="deny"] .cv-ring {
+    stroke: rgb(var(--danger));
+  }
+  .compact-vault[data-state="unlock"] .cv-dial {
+    transform: rotate(270deg);
+  }
+  .compact-vault[data-state="unlock"] .cv-ring {
+    stroke: rgb(var(--success));
+    animation: rs-ring-open 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     *,
     ::before,
