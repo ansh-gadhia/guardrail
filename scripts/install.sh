@@ -272,22 +272,201 @@ stream() {
     return "$rc"
 }
 
-# pull_images pulls every image the deployment runs, one at a time, the way
-# `docker pull` shows it: which image, then each layer by id with its own
-# "Downloading [====>    ] 12.3MB/45MB" bar, "Pull complete", and the digest
-# and status at the end.
+# pull_images pulls every image the deployment runs and shows it as a progress
+# board: one line per image, redrawn in place — a bar, the percentage, bytes
+# downloaded of the total — and a footer with the whole pull's size, speed and
+# time. Images already on the host say "up to date"; a failure says why.
 #
-# It was `docker compose pull`, which draws its own condensed tree instead and
-# folds each service to a single "✔ api Pulled" line the moment it finishes —
-# so an operator watching an update could not see which images were being
-# fetched, from where, or at what tag. Named in full here, numbered, so the
-# pull reads as a list of exactly what this version runs.
+# It used to hand the terminal to `docker compose pull`, then to `docker pull`
+# image by image. Neither showed a bar anybody could rely on: compose folds
+# each service to a line as it finishes, docker draws bars only when its output
+# is a terminal it recognises, and the containerd image store draws them
+# differently again. So the numbers come from compose's machine-readable
+# progress (--progress json: per-layer bytes, current and total) and the bar is
+# drawn here, the same way on every host. Compose still does the pulling, so
+# registry logins and digest pins work exactly as before.
 #
-# The image list comes from compose itself (config --images, with this
-# deployment's profiles), so it is always what `up` is about to start, digest
-# pins included. If compose cannot produce it, the old compose pull runs
-# instead: better an unfamiliar progress display than no pull.
+# --ignore-pull-failures, because otherwise one image that cannot be pulled
+# (a tag not yet published) cancels every other pull in flight. The failure is
+# still reported, by image, and pull_images returns non-zero.
+#
+# Not a terminal (a log, a pipe): one line per image as it finishes, no cursor
+# movement. A compose too old for JSON progress: pull_images_plain.
 pull_images() { # pull_images [--profile P ...]
+    local -a cargs=(-p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@")
+    # Read from the help, flattened: the help wraps to the terminal, and on a
+    # narrow one "json" lands on the line after "--progress".
+    if ! docker compose --help 2>/dev/null | tr -s ' \n' ' ' | grep -q -- '--progress string [^(]*([^)]*json'; then
+        pull_images_plain "$@"
+        return
+    fi
+    local -a svcs=()
+    local -A IMG=() ST=() NOTE=() BT=() BC=() NL=() ND=() LT=() LC=() LD=() LSEEN=()
+    local s img namew=4 tty=0 utf=0 full='#' empty='-' ell='...'
+    # Each service's OWN image, read from compose's resolved configuration.
+    # Not `config --images SERVICE`: that lists the service AND everything it
+    # depends on, so "api" came back as the migrate image. The resolved YAML is
+    # normalised — services two spaces in, their image four — which is what
+    # lets awk read it without jq. Sorted, because compose's own order is not
+    # stable, and a board whose rows move between runs is harder to read.
+    while IFS=$'\t' read -r s img; do
+        [ -n "$s" ] && [ -n "$img" ] || continue
+        svcs+=("$s"); IMG[$s]=$img
+    done < <(docker compose "${cargs[@]}" config 2>/dev/null | awk '
+        /^services:$/ { in_s = 1; next }
+        in_s && /^[^ ]/ { in_s = 0 }
+        in_s && /^  [A-Za-z0-9_.-]+:$/ { svc = substr($1, 1, length($1) - 1); next }
+        in_s && /^    image: / { sub(/^    image: /, ""); print svc "\t" $0 }' | sort)
+    if [ "${#svcs[@]}" -eq 0 ]; then
+        docker compose "${cargs[@]}" pull
+        return
+    fi
+    [ -t 1 ] && tty=1
+    case "${LC_ALL:-}${LC_CTYPE:-}${LANG:-}" in
+        *UTF-8* | *utf-8* | *UTF8* | *utf8*) utf=1 full=$'█' empty=$'░' ell=$'…' ;;
+    esac
+    for s in "${svcs[@]}"; do
+        ST[$s]="wait"; BT[$s]=0; BC[$s]=0; NL[$s]=0; ND[$s]=0
+        [ "${#s}" -gt "$namew" ] && namew=${#s}
+    done
+
+    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' fi=0 drawn=0 last=0 t0=$SECONDS
+    # shellcheck disable=SC1003 # a literal backslash: the ASCII spinner's fourth frame
+    [ "$utf" -eq 1 ] || frames='|/-\'
+    local -a extra=()
+
+    # _pi_line SERVICE — one row of the board, cut to the terminal's width.
+    #
+    # Every row MUST fit: the board is redrawn by moving the cursor up one line
+    # per row, and a row that wraps onto two lines throws that count off and
+    # scrolls the board down the screen. So the widths are worked out first —
+    # the bar narrows on a narrow terminal, the image name gives way from the
+    # left (the tag is the part worth keeping), and a note is cut to its column.
+    _pi_line() {
+        local sv=$1 cols icon right note="" pct barw=20 fill i bar="" img st=${ST[$1]} room rightw
+        cols=$(term_cols)
+        rightw=$((barw + 26))
+        room=$((cols - 1 - namew - 8 - rightw))
+        if [ "$room" -lt 16 ]; then barw=10; rightw=$((barw + 26)); room=$((cols - 1 - namew - 8 - rightw)); fi
+        [ "$room" -lt 12 ] && room=12
+        case "$st" in
+            wait)   icon="${D}·${R}"; note="waiting" ;;
+            pull)
+                icon="${CYN}${frames:fi:1}${R}"
+                if [ "${BT[$sv]}" -gt 0 ]; then pct=$((BC[$sv] * 100 / BT[$sv]))
+                elif [ "${NL[$sv]}" -gt 0 ]; then pct=$((ND[$sv] * 100 / NL[$sv]))
+                else pct=0; fi
+                [ "$pct" -gt 100 ] && pct=100
+                fill=$((pct * barw / 100))
+                for ((i = 0; i < barw; i++)); do if [ "$i" -lt "$fill" ]; then bar+="$full"; else bar+="$empty"; fi; done
+                right="${CYN}${bar}${R} $(printf '%3d%%' "$pct")"
+                if [ "${BT[$sv]}" -gt 0 ]; then right+="  ${D}$(hbytes "${BC[$sv]}") / $(hbytes "${BT[$sv]}")${R}"
+                elif [ "${NL[$sv]}" -gt 0 ]; then right+="  ${D}${ND[$sv]}/${NL[$sv]} layers${R}"; fi ;;
+            done)
+                if [ "${BC[$sv]}" -gt 0 ]; then
+                    for ((i = 0; i < barw; i++)); do bar+="$full"; done
+                    icon="${GRN}✔${R}"; right="${GRN}${bar}${R} 100%  ${D}$(hbytes "${BT[$sv]}")${R}"
+                else
+                    icon="${GRN}✔${R}"; note="up to date"
+                fi ;;
+            shared) icon="${D}✔${R}"; note=${NOTE[$sv]} ;;
+            fail)   icon="${RED}✘${R}"; note=${NOTE[$sv]} ;;
+        esac
+        if [ -n "$note" ]; then
+            [ "${#note}" -gt "$rightw" ] && note="${note:0:$((rightw - ${#ell}))}${ell}"
+            if [ "$st" = fail ]; then right="${RED}${note}${R}"; else right="${D}${note}${R}"; fi
+        fi
+        img=${IMG[$sv]}
+        [ "${#img}" -gt "$room" ] && img="${ell}${img:$((${#img} - room + ${#ell}))}"
+        printf '  %s %-*s  %-*s  %s' "$icon" "$namew" "$sv" "$room" "$img" "$right"
+    }
+
+    # _pi_draw — the whole board, over the previous one.
+    _pi_draw() {
+        local sv tb=0 tc=0 el=$((SECONDS - t0)) speed=""
+        for sv in "${svcs[@]}"; do tb=$((tb + BT[$sv])); tc=$((tc + BC[$sv])); done
+        [ "$el" -gt 0 ] && [ "$tc" -gt 0 ] && speed="   $(hbytes $((tc / el)))/s"
+        [ "$drawn" -eq 1 ] && printf '\033[%dA' $((${#svcs[@]} + 1))
+        for sv in "${svcs[@]}"; do printf '\r\033[K'; _pi_line "$sv"; printf '\n'; done
+        printf '\r\033[K  %s\n' "${D}$(hbytes "$tc") of $(hbytes "$tb")${speed}   $(fmt_secs "$el")${R}"
+        drawn=1
+    }
+
+    local line id parent text cur tot msg key now
+    local re_id='"id":"([^"]*)"' re_parent='"parent_id":"([^"]*)"' re_text='"text":"([^"]*)"'
+    local re_cur='"current":([0-9]+)' re_tot='"total":([0-9]+)' re_status='"status":"(([^"\\]|\\.)*)"'
+    [ "$tty" -eq 1 ] && _pi_draw
+    while IFS= read -r line; do
+        case "$line" in '{'*) ;; *) [ -n "$line" ] && extra+=("$line"); continue ;; esac
+        id=""; parent=""; text=""; cur=""; tot=""; msg=""
+        [[ $line =~ $re_id ]] && id=${BASH_REMATCH[1]}
+        [[ $line =~ $re_parent ]] && parent=${BASH_REMATCH[1]}
+        [[ $line =~ $re_text ]] && text=${BASH_REMATCH[1]}
+        [[ $line =~ $re_cur ]] && cur=${BASH_REMATCH[1]}
+        [[ $line =~ $re_tot ]] && tot=${BASH_REMATCH[1]}
+        [[ $line =~ $re_status ]] && msg=${BASH_REMATCH[1]//\\\"/\"}
+        if [ -n "$parent" ] && [ -n "${ST[$parent]:-}" ]; then
+            # A layer of service $parent.
+            key="$parent|$id"
+            if [ -z "${LSEEN[$key]:-}" ]; then LSEEN[$key]=1; NL[$parent]=$((NL[$parent] + 1)); fi
+            [ "${ST[$parent]}" = wait ] && ST[$parent]="pull"
+            case "$text" in
+                Downloading)
+                    if [ -n "$tot" ] && [ -z "${LT[$key]:-}" ]; then LT[$key]=$tot; BT[$parent]=$((BT[$parent] + tot)); fi
+                    if [ -n "$cur" ] && [ -n "${LT[$key]:-}" ]; then
+                        BC[$parent]=$((BC[$parent] + cur - ${LC[$key]:-0})); LC[$key]=$cur
+                    fi ;;
+                "Download complete" | "Verifying Checksum" | Extracting | "Pull complete" | "Already exists")
+                    if [ -z "${LD[$key]:-}" ]; then
+                        LD[$key]=1; ND[$parent]=$((ND[$parent] + 1))
+                        if [ -n "${LT[$key]:-}" ]; then
+                            BC[$parent]=$((BC[$parent] + LT[$key] - ${LC[$key]:-0})); LC[$key]=${LT[$key]}
+                        fi
+                    fi ;;
+            esac
+        elif [ -n "$id" ] && [ -n "${ST[$id]:-}" ]; then
+            # The service itself.
+            case "$text" in
+                Pulling) [ "${ST[$id]}" = wait ] && ST[$id]="pull" ;;
+                Pulled) ST[$id]="done" ;;
+                # Compose's message repeats the whole reference twice before the
+                # reason; the reason is its last part ("not found",
+                # "unauthorized", "denied").
+                Error) ST[$id]="fail"; NOTE[$id]="failed: ${msg##*: }"; [ -n "$msg" ] || NOTE[$id]="failed" ;;
+                # What compose calls a Warning is the same failure for a service
+                # it could build from source instead. For an operator it is not
+                # a warning: the image this version runs is not in the registry.
+                Warning) ST[$id]="fail"; NOTE[$id]="not pulled: ${msg##*: }"; [ -n "$msg" ] || NOTE[$id]="not pulled" ;;
+                Skipped*) ST[$id]="shared"; NOTE[$id]="same image as ${text##* by }" ;;
+            esac
+            if [ "$tty" -eq 0 ]; then
+                case "${ST[$id]}" in done | shared | fail) _pi_line "$id"; printf '\n' ;; esac
+            fi
+        fi
+        if [ "$tty" -eq 1 ]; then
+            # At most about ten frames a second: progress arrives far faster.
+            now=${EPOCHREALTIME//[!0-9]/}
+            if [ -z "$now" ] || [ $((now - last)) -ge 100000 ]; then
+                fi=$(((fi + 1) % ${#frames})); _pi_draw; last=${now:-0}
+            fi
+        fi
+    done < <(docker compose "${cargs[@]}" --progress json pull --ignore-pull-failures 2>&1 >/dev/null)
+
+    local failed=0
+    for s in "${svcs[@]}"; do
+        # Anything compose never mentioned was not pulled — not an image it pulls.
+        [ "${ST[$s]}" = wait ] && { ST[$s]="shared"; NOTE[$s]="not pulled (built here, or no image)"; }
+        [ "${ST[$s]}" = pull ] && ST[$s]="done"
+        [ "${ST[$s]}" = fail ] && failed=1
+    done
+    if [ "$tty" -eq 1 ]; then _pi_draw; fi
+    if [ "${#extra[@]}" -gt 0 ]; then printf '  %s\n' "${extra[@]}"; fi
+    return "$failed"
+}
+
+# pull_images_plain pulls image by image with docker's own output, under a
+# numbered header. For a compose that cannot report progress as JSON.
+pull_images_plain() { # pull_images_plain [--profile P ...]
     local -a imgs=() failed=()
     mapfile -t imgs < <(docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@" \
         config --images 2>/dev/null | sort -u)
