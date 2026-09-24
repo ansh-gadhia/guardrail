@@ -28,7 +28,10 @@ func fail(c *gin.Context, err error) {
 	case errors.Is(err, iam.ErrNotFound):
 		problem(c, http.StatusNotFound, "Not Found", "resource not found")
 	case errors.Is(err, iam.ErrInvalidInput):
-		problem(c, http.StatusBadRequest, "Bad Request", "invalid input")
+		// Every wrap of it is a sentence written for the person who sent the
+		// request ("a person has one role…"); a bare "invalid input" left
+		// them guessing what to change.
+		problem(c, http.StatusBadRequest, "Bad Request", detailFor(err, iam.ErrInvalidInput, "invalid input"))
 	case errors.Is(err, iam.ErrConflict):
 		problem(c, http.StatusConflict, "Conflict", "resource already exists")
 	case errors.Is(err, iam.ErrEmailAmbiguous):

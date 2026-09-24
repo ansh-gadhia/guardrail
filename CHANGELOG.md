@@ -64,8 +64,27 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   emblem's dial answers the same way. The form warns when Caps Lock is on.
   With reduced motion the scene is drawn still and the steps are written out.
 
+- **A person has one role.** Creating a user or changing their role is now a
+  single choice — picking another switches to it — and the API refuses more
+  than one (`400`, with the reason). Two roles at once made somebody's
+  permissions the union of two jobs and their approval rank the higher of the
+  two; teams are how to widen what somebody reaches. Every existing account
+  already held one role.
+
 ### Fixed
 
+- **The dashboard showed the audit log to everybody.** Its activity feed and
+  failed-login count came from an endpoint that needs no permission, and its
+  chips linked to pages the viewer could not open. Both now go only to people
+  who may read the audit log; for anyone else they are withheld (not shown as
+  zero, which would read as "all clear"), and the panels close up around them.
+  Every dashboard link checks the same permissions as the sidebar.
+- **The Sessions count in the sidebar stood still.** It polled every fifteen
+  seconds and not at all from a background tab — and sessions open in a tab of
+  their own. It now keeps pace with the approvals count: every five seconds,
+  in the background too, at once on returning to the tab, and as a dot when
+  the sidebar is collapsed. The dashboard's active-session figure refreshes
+  with it.
 - **The access log listed sign-ins that had already ended.** It showed every
   sign-in whose token had not expired, and tokens issued before the idle limit
   carried thirty days — so a browser closed weeks ago still appeared "active",

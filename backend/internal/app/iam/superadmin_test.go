@@ -164,12 +164,12 @@ func TestNonSuperAdminCanGrantOrdinaryRoles(t *testing.T) {
 		IsSuperAdmin: false, Permissions: []string{"user:write"},
 	}
 	target := h.addUserInOrg(t, orgID, "ordinary@acme.com", "TargetPass123!").ID
-	ordinary := []iam.ID{iam.NewID(), iam.NewID()}
+	ordinary := []iam.ID{iam.NewID()} // a person holds one role (see oneRole)
 
 	if err := h.svc.AssignRoles(context.Background(), actor, target, ordinary, ReqMeta{}); err != nil {
 		t.Fatalf("an org admin was refused ordinary roles: %v", err)
 	}
-	if roles, called := h.users.rolesOf(target); !called || len(roles) != 2 {
+	if roles, called := h.users.rolesOf(target); !called || len(roles) != 1 {
 		t.Errorf("ordinary roles not granted: called=%v roles=%v", called, roles)
 	}
 }

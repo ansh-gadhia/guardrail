@@ -804,24 +804,48 @@ function RoleSummaryCard({
   );
 }
 
-function RoleChecklist({
+/* A person holds one role, so this is a choice, not a checklist: picking
+   another role switches to it. Two at once made somebody's permissions the
+   union of two jobs and their approval rank the higher of the two — one stray
+   tick away — and the server now refuses it too. Teams are how to widen what
+   somebody reaches. */
+function RolePicker({
   roles,
   selected,
-  toggle,
+  choose,
+  name,
 }: {
   roles: Role[];
   selected: Set<string>;
-  toggle: (id: string) => void;
+  choose: (id: string) => void;
+  name: string;
 }) {
   return (
-    <div className="space-y-2">
-      {roles.map((r) => (
-        <label key={r.id} className="flex items-center gap-2 text-sm text-fg">
-          <input type="checkbox" checked={selected.has(r.id)} onChange={() => toggle(r.id)} />
-          <span className="font-medium">{r.name}</span>
-          <span className="text-xs text-faint">{r.description}</span>
-        </label>
-      ))}
+    <div role="radiogroup" aria-label="Role" className="space-y-1.5">
+      {roles.map((r) => {
+        const on = selected.has(r.id);
+        return (
+          <label
+            key={r.id}
+            className={cn(
+              "flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 transition",
+              on ? "border-accent/50 bg-accent-soft/40 ring-1 ring-accent/25" : "border-line hover:border-line-strong hover:bg-surface-2/50",
+            )}
+          >
+            <input
+              type="radio"
+              name={name}
+              className="mt-1 accent-[rgb(var(--accent))]"
+              checked={on}
+              onChange={() => choose(r.id)}
+            />
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-fg">{r.name}</span>
+              {r.description && <span className="block text-xs text-faint">{r.description}</span>}
+            </span>
+          </label>
+        );
+      })}
     </div>
   );
 }
@@ -839,12 +863,7 @@ function CreateUserModal({
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [sel, setSel] = useState<Set<string>>(new Set());
-  const toggle = (id: string) =>
-    setSel((s) => {
-      const n = new Set(s);
-      n.has(id) ? n.delete(id) : n.add(id);
-      return n;
-    });
+  const choose = (id: string) => setSel(new Set([id]));
 
   /* Teams, optionally, at the moment the account is made.
      A role says what somebody may do; a team is how they reach the devices they
@@ -890,7 +909,8 @@ function CreateUserModal({
           </button>
           <button
             className="btn-primary"
-            disabled={create.isPending || !email || !scorePassword(password).acceptable}
+            // A role is required: without one the account can sign in and do nothing.
+            disabled={create.isPending || !email || !scorePassword(password).acceptable || sel.size !== 1}
             onClick={() => create.mutate()}
           >
             {create.isPending ? "Creating…" : "Create user"}
@@ -919,8 +939,8 @@ function CreateUserModal({
         />
       </Field>
       <PasswordStrength value={password} />
-      <Field label="Roles">
-        <RoleChecklist roles={roles} selected={sel} toggle={toggle} />
+      <Field label="Role">
+        <RolePicker roles={roles} selected={sel} choose={choose} name="role-new-user" />
       </Field>
       {canReadTeams && (teams.data?.length ?? 0) > 0 && (
         <Field
@@ -953,15 +973,14 @@ function EditRolesModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  // Map the user's current role names back to ids using the roles catalogue.
-  const initial = new Set(roles.filter((r) => user.roles.includes(r.name)).map((r) => r.id));
-  const [sel, setSel] = useState<Set<string>>(initial);
-  const toggle = (id: string) =>
-    setSel((s) => {
-      const n = new Set(s);
-      n.has(id) ? n.delete(id) : n.add(id);
-      return n;
-    });
+  // Map the user's current role back to its id using the roles catalogue. One
+  // role per person; should an older account hold several, the highest-ranked
+  // is what is shown, and saving leaves them with that one.
+  const held = roles
+    .filter((r) => user.roles.includes(r.name))
+    .sort((a, b) => (b.approval_level ?? 0) - (a.approval_level ?? 0));
+  const [sel, setSel] = useState<Set<string>>(new Set(held.slice(0, 1).map((r) => r.id)));
+  const choose = (id: string) => setSel(new Set([id]));
 
   /* This person's teams, pre-ticked from what they are actually on. Editing them
      here is the point: "what is this person on" is asked while looking at the
@@ -1007,10 +1026,10 @@ function EditRolesModal({
     onSuccess: onSaved,
   });
 
-  // What this change actually does to their standing. Roles are a checklist, but
-  // the thing an administrator is really deciding is how far this person can
-  // reach and whose access they can sign off — so spell that out rather than
-  // leaving it to be inferred from a set of ticks.
+  // What this change actually does to their standing. The thing an
+  // administrator is really deciding is how far this person can reach and whose
+  // access they can sign off — so spell that out rather than leaving it to be
+  // inferred from which role is picked.
   const selected = roles.filter((r) => sel.has(r.id));
   const beforeRank = user.approval_level ?? 0;
   const afterRank = selected.reduce((m, r) => Math.max(m, r.approval_level ?? 0), 0);
@@ -1020,14 +1039,14 @@ function EditRolesModal({
 
   return (
     <Modal
-      title={`Roles & teams — ${user.email}`}
+      title={`Role & teams — ${user.email}`}
       onClose={onClose}
       footer={
         <>
           <button className="btn-ghost" onClick={onClose}>
             Cancel
           </button>
-          <button className="btn-primary" disabled={save.isPending} onClick={() => save.mutate()}>
+          <button className="btn-primary" disabled={save.isPending || sel.size !== 1} onClick={() => save.mutate()}>
             {save.isPending ? "Saving…" : "Save"}
           </button>
         </>
@@ -1038,7 +1057,7 @@ function EditRolesModal({
           <ErrorNote message={problemDetail(save.error, "Could not update roles")} />
         </div>
       )}
-      <RoleChecklist roles={roles} selected={sel} toggle={toggle} />
+      <RolePicker roles={roles} selected={sel} choose={choose} name={`role-${user.user_id}`} />
 
       {canReadTeams && (
         <div className="mt-4 border-t border-line pt-3">
@@ -1109,7 +1128,7 @@ function EditRolesModal({
         {selected.length === 0 && (
           <div className="flex items-center gap-2 text-danger">
             <IconAlert size={14} className="shrink-0" />
-            <span>No roles selected — they will be able to sign in and do nothing.</span>
+            <span>Pick a role — without one they can sign in and do nothing.</span>
           </div>
         )}
         <p className="text-xs text-muted">

@@ -15,6 +15,9 @@ import (
 func (s *Service) CreateUser(ctx context.Context, actor iam.Claims, in CreateUserInput) (*Principal, error) {
 	// Checked before the row is written: there is no transaction spanning Create
 	// and SetRoles, so refusing afterwards would leave an orphaned user behind.
+	if err := oneRole(in.RoleIDs); err != nil {
+		return nil, err
+	}
 	if err := guardSuperAdminGrant(actor, in.RoleIDs); err != nil {
 		return nil, err
 	}
@@ -170,8 +173,23 @@ func guardSuperAdminGrant(actor iam.Claims, roleIDs []iam.ID) error {
 	return nil
 }
 
+// oneRole holds a person to a single role. A role is a whole job — Operator,
+// Auditor, Organization Admin — and two of them at once made what somebody may
+// do the union of two jobs nobody chose together, and their approval rank the
+// higher of the two, which is easy to grant by accident with one extra tick.
+// Where somebody reaches is widened with teams, not a second role.
+func oneRole(roleIDs []iam.ID) error {
+	if len(roleIDs) > 1 {
+		return fmt.Errorf("%w: a person has one role; pick the one that fits, and use teams to widen what they reach", iam.ErrInvalidInput)
+	}
+	return nil
+}
+
 // AssignRoles replaces a user's role assignments.
 func (s *Service) AssignRoles(ctx context.Context, actor iam.Claims, userID iam.ID, roleIDs []iam.ID, meta ReqMeta) error {
+	if err := oneRole(roleIDs); err != nil {
+		return err
+	}
 	if err := guardSuperAdminGrant(actor, roleIDs); err != nil {
 		return err
 	}
