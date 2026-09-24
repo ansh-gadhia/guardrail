@@ -12,6 +12,24 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-09-24
+
+### Changed
+
+- **The installer shows a real progress bar for each image.** 1.6.1 handed the
+  terminal to `docker pull`, whose bars appear only when docker recognises a
+  terminal and are drawn differently under the containerd image store — so an
+  update showed status lines ("Pulling fs layer", "Download complete") and no
+  bar. The pull is now a board, one row per image redrawn in place: a bar, the
+  percentage and the bytes downloaded of the total, with a footer giving the
+  whole pull's size, speed and time. An image already present says "up to
+  date", a shared one "same image as …", and one that cannot be pulled says why
+  ("not pulled: not found"), where before a published image missing from the
+  registry could pass as up to date. The numbers come from compose's own JSON
+  progress, so registry logins and digest pins behave as before. Piped to a
+  log it prints one line per image as each finishes; a compose too old for JSON
+  progress falls back to `docker pull` image by image.
+
 ## [1.6.1] - 2026-09-24
 
 ### Security
