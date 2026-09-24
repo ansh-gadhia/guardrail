@@ -207,13 +207,19 @@ func (f *fakeOrgRepo) List(_ context.Context, _ iam.TenantScope, _ iam.Page) ([]
 	return out, nil
 }
 
-// fakeRoleRepo is a no-op iam.RoleRepository.
+// fakeRoleRepo is an iam.RoleRepository over a fixed set of roles.
 type fakeRoleRepo struct{ roles []iam.Role }
 
 func (f fakeRoleRepo) List(context.Context, iam.TenantScope, iam.Page) ([]iam.Role, error) {
 	return f.roles, nil
 }
-func (fakeRoleRepo) GetByID(context.Context, iam.TenantScope, iam.ID) (*iam.Role, error) {
+func (f fakeRoleRepo) GetByID(_ context.Context, _ iam.TenantScope, id iam.ID) (*iam.Role, error) {
+	for i := range f.roles {
+		if f.roles[i].ID == id {
+			r := f.roles[i]
+			return &r, nil
+		}
+	}
 	return nil, iam.ErrNotFound
 }
 func (fakeRoleRepo) Create(context.Context, iam.TenantScope, *iam.Role) error { return nil }

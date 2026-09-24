@@ -82,6 +82,9 @@ func (s *Service) RevokeSession(ctx context.Context, actor iam.Claims, familyID 
 		if !actor.IsSuperAdmin && orgID != actor.OrganizationID {
 			return iam.ErrPermissionDenied
 		}
+		if _, err := s.guardRank(ctx, actor, ownerID, "sign them out"); err != nil {
+			return err
+		}
 	}
 	if err := s.sessions.RevokeFamily(ctx, familyID, s.clock.Now()); err != nil {
 		return err

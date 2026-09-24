@@ -51,7 +51,9 @@ func fail(c *gin.Context, err error) {
 	case errors.Is(err, iam.ErrRefreshReuse), errors.Is(err, iam.ErrRefreshInvalid):
 		problem(c, http.StatusUnauthorized, "Session Expired", "please sign in again")
 	case errors.Is(err, iam.ErrPermissionDenied):
-		problem(c, http.StatusForbidden, "Forbidden", "permission denied")
+		// Where it was wrapped, the wrap says which rule refused and what would
+		// be allowed — "ranked at or above you", "only a super admin can…".
+		problem(c, http.StatusForbidden, "Forbidden", detailFor(err, iam.ErrPermissionDenied, "permission denied"))
 	// Named separately from ErrPermissionDenied: the caller almost certainly DOES
 	// have the permission — this account is refused to everybody, including super
 	// admins — so "permission denied" would send them to check a grant that is

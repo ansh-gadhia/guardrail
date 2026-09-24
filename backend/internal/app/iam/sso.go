@@ -604,7 +604,8 @@ func (s *Service) ResumeSSOSync(ctx context.Context, actor iam.Claims, userID ia
 	if err := s.guardBootstrapAdmin(ctx, actor, userID, "resume SIEM role sync"); err != nil {
 		return err
 	}
-	user, err := s.users.GetByID(ctx, actor.Scope(), userID)
+	// Handing somebody's role to the SIEM is changing their role.
+	user, err := s.guardRank(ctx, actor, userID, "hand their role to the SIEM")
 	if err != nil {
 		return err
 	}

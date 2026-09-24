@@ -162,9 +162,10 @@ func TestNonSuperAdminCanGrantOrdinaryRoles(t *testing.T) {
 	actor := iam.Claims{
 		UserID: iam.NewID(), OrganizationID: orgID, Email: "orgadmin@acme.com",
 		IsSuperAdmin: false, Permissions: []string{"user:write"},
+		ApprovalLevel: 50, // Organization Admin: outranks the people it manages
 	}
 	target := h.addUserInOrg(t, orgID, "ordinary@acme.com", "TargetPass123!").ID
-	ordinary := []iam.ID{iam.NewID()} // a person holds one role (see oneRole)
+	ordinary := []iam.ID{roleID(RoleOperator)} // a person holds one role (see oneRole)
 
 	if err := h.svc.AssignRoles(context.Background(), actor, target, ordinary, ReqMeta{}); err != nil {
 		t.Fatalf("an org admin was refused ordinary roles: %v", err)
@@ -243,4 +244,14 @@ func TestBootstrapAdminCanBeRemovedButNotDemotedOrReset(t *testing.T) {
 	if err := h.svc.DeleteUser(context.Background(), root, boot.ID, ReqMeta{}); err != nil {
 		t.Fatalf("removing the installation account must be allowed, got %v", err)
 	}
+}
+
+// roleID is a seeded role's id, by name.
+func roleID(name string) iam.ID {
+	for _, r := range seededRoles() {
+		if r.Name == name {
+			return r.ID
+		}
+	}
+	panic("no seeded role " + name)
 }

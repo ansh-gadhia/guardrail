@@ -33,7 +33,7 @@ func newHarness(t *testing.T) *harness {
 	})
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	svc := NewService(Deps{
-		Users: users, Orgs: orgs, Roles: fakeRoleRepo{}, Sessions: sessions,
+		Users: users, Orgs: orgs, Roles: fakeRoleRepo{roles: seededRoles()}, Sessions: sessions,
 		Hasher: hasher, Tokens: security.NewJWTIssuer("0123456789abcdef0123456789abcdef", "guardrail", 15*time.Minute),
 		Refresh: security.NewRefreshGenerator(), Audit: rec, Throttle: nopThrottle{},
 		Clock:  fixedClock{t: now},

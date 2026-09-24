@@ -146,6 +146,15 @@ func (u *User) IsBootstrapAdmin() bool { return u.IsSuperAdmin }
 // ApprovalLevel is the user's rank: the highest of their roles'.
 func (u *User) ApprovalLevel() int { return EffectiveApprovalLevel(u.Roles) }
 
+// Level is the rank to judge this user by, on the same scale as Claims.Level:
+// a super admin sits above every configurable role.
+func (u *User) Level() int {
+	if u.HasSuperAdmin() {
+		return SuperAdminLevel
+	}
+	return u.ApprovalLevel()
+}
+
 // RoleNames returns the names of the user's roles.
 func (u *User) RoleNames() []string {
 	out := make([]string, 0, len(u.Roles))

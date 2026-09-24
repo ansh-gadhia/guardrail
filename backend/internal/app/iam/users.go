@@ -18,7 +18,10 @@ func (s *Service) CreateUser(ctx context.Context, actor iam.Claims, in CreateUse
 	if err := oneRole(in.RoleIDs); err != nil {
 		return nil, err
 	}
-	if err := guardSuperAdminGrant(actor, in.RoleIDs); err != nil {
+	if err := s.guardSuperAdminGrant(ctx, actor, in.RoleIDs, "", in.Email); err != nil {
+		return nil, err
+	}
+	if _, err := s.guardGrantRank(ctx, actor, in.RoleIDs, nil, "", in.Email); err != nil {
 		return nil, err
 	}
 	if err := iam.ValidatePassword(in.Password); err != nil {
@@ -95,6 +98,9 @@ func (s *Service) GetUser(ctx context.Context, actor iam.Claims, id iam.ID) (*Pr
 // Removing the last super admin therefore costs a trip to the server rather
 // than being unrecoverable. The console warns before it happens.
 func (s *Service) DeleteUser(ctx context.Context, actor iam.Claims, id iam.ID, meta ReqMeta) error {
+	if _, err := s.guardRank(ctx, actor, id, "remove their account"); err != nil {
+		return err
+	}
 	if err := s.users.SoftDelete(ctx, actor.Scope(), id); err != nil {
 		return err
 	}
@@ -161,16 +167,97 @@ func (s *Service) guardBootstrapAdmin(ctx context.Context, actor iam.Claims, use
 //
 // CreateUser applies the same rule to the is_super_admin flag; this closes the
 // other door to the same privilege.
-func guardSuperAdminGrant(actor iam.Claims, roleIDs []iam.ID) error {
+//
+// Checked first, before anything is looked up, and recorded like the other
+// hierarchy refusals (see guardGrantRank).
+func (s *Service) guardSuperAdminGrant(ctx context.Context, actor iam.Claims, roleIDs []iam.ID, target, who string) error {
 	if actor.IsSuperAdmin {
 		return nil
 	}
 	for _, id := range roleIDs {
 		if id == iam.SuperAdminRoleID {
+			s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "user.protected_denied",
+				Category: audit.CategoryUser, ActorID: &actor.UserID, ActorEmail: actor.Email,
+				TargetType: "user", TargetID: target, Result: audit.ResultDenied,
+				Detail: map[string]any{"attempted": "give them the Super Admin role", "target": who, "reason": "role_above"}})
 			return fmt.Errorf("%w: only a super admin can grant the Super Admin role", iam.ErrPermissionDenied)
 		}
 	}
 	return nil
+}
+
+// The hierarchy.
+//
+// Somebody may manage another person — their role, their password, their
+// account, their teams, their sign-ins — only if they outrank them. A super
+// admin outranks everybody; anybody else outranks only people whose rank
+// (their role's approval level) is strictly below their own. An Organization
+// Admin therefore manages Operators, Auditors and Read-only users, and neither
+// another Organization Admin nor a Super Admin.
+//
+// Before this the only rules were "nobody but a super admin grants Super
+// Admin" and "nobody touches the installation account". An Organization Admin
+// could demote a Super Admin — change their role to Read-only — and that was
+// recorded as an ordinary, successful role change.
+//
+// Acting on your own account is not managing somebody else, and is left to the
+// other rules (you cannot promote yourself: see guardGrantRank).
+
+// guardRank refuses an action on another person the actor does not outrank,
+// and records the attempt. It returns the target, loaded, for the caller.
+func (s *Service) guardRank(ctx context.Context, actor iam.Claims, targetID iam.ID, what string) (*iam.User, error) {
+	target, err := s.users.GetByID(ctx, actor.Scope(), targetID)
+	if err != nil {
+		return nil, err
+	}
+	if targetID == actor.UserID || actor.IsSuperAdmin || actor.Level() > target.Level() {
+		return target, nil
+	}
+	s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "user.protected_denied",
+		Category: audit.CategoryUser, ActorID: &actor.UserID, ActorEmail: actor.Email,
+		TargetType: "user", TargetID: targetID.String(), Result: audit.ResultDenied,
+		Detail: map[string]any{"attempted": what, "target": target.Email.String(), "reason": "outranked"}})
+	return nil, fmt.Errorf("%w: %s is ranked at or above you, so only somebody ranked higher can %s",
+		iam.ErrPermissionDenied, target.Email, what)
+}
+
+// guardGrantRank refuses to hand out a role ranked at or above the actor's own:
+// nobody makes somebody their equal or their superior, only somebody ranked
+// above both can. A role the person already holds is not being handed out, so
+// saving someone's unchanged role is not refused. It returns the roles, loaded.
+//
+// A refusal is recorded against the person it would have been given to — an
+// attempt to hand out a role above your own is exactly what a reviewer of the
+// log is looking for. target is their id, or empty for somebody not yet
+// created; who names them either way.
+func (s *Service) guardGrantRank(ctx context.Context, actor iam.Claims, roleIDs []iam.ID, held []iam.Role, target, who string) ([]iam.Role, error) {
+	out := make([]iam.Role, 0, len(roleIDs))
+	for _, id := range roleIDs {
+		role, err := s.roles.GetByID(ctx, actor.Scope(), id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *role)
+		already := false
+		for _, h := range held {
+			already = already || h.ID == id
+		}
+		// Super Admin is not "rank 100": it is no limit at all, and ranks above
+		// any level a custom role can be given.
+		level := role.ApprovalLevel
+		if role.ID == iam.SuperAdminRoleID {
+			level = iam.SuperAdminLevel
+		}
+		if !actor.IsSuperAdmin && !already && level >= actor.Level() {
+			s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "user.protected_denied",
+				Category: audit.CategoryUser, ActorID: &actor.UserID, ActorEmail: actor.Email,
+				TargetType: "user", TargetID: target, Result: audit.ResultDenied,
+				Detail: map[string]any{"attempted": "give them the " + role.Name + " role", "target": who, "reason": "role_above"}})
+			return nil, fmt.Errorf("%w: %s is ranked at or above your own role, so only somebody ranked higher can give it",
+				iam.ErrPermissionDenied, role.Name)
+		}
+	}
+	return out, nil
 }
 
 // oneRole holds a person to a single role. A role is a whole job — Operator,
@@ -190,10 +277,18 @@ func (s *Service) AssignRoles(ctx context.Context, actor iam.Claims, userID iam.
 	if err := oneRole(roleIDs); err != nil {
 		return err
 	}
-	if err := guardSuperAdminGrant(actor, roleIDs); err != nil {
+	if err := s.guardSuperAdminGrant(ctx, actor, roleIDs, userID.String(), ""); err != nil {
 		return err
 	}
 	if err := s.guardBootstrapAdmin(ctx, actor, userID, "role change"); err != nil {
+		return err
+	}
+	target, err := s.guardRank(ctx, actor, userID, "change their role")
+	if err != nil {
+		return err
+	}
+	granted, err := s.guardGrantRank(ctx, actor, roleIDs, target.Roles, userID.String(), target.Email.String())
+	if err != nil {
 		return err
 	}
 	if err := s.users.SetRoles(ctx, actor.Scope(), userID, roleIDs); err != nil {
@@ -213,8 +308,22 @@ func (s *Service) AssignRoles(ctx context.Context, actor iam.Claims, userID iam.
 	s.record(ctx, audit.Event{OrganizationID: &actor.OrganizationID, Action: "user.assign_roles",
 		Category: audit.CategoryRole, ActorID: &actor.UserID, ActorEmail: actor.Email,
 		TargetType: "user", TargetID: userID.String(), IP: meta.IP, UserAgent: meta.UserAgent,
-		Result: audit.ResultSuccess, Detail: map[string]any{"role_count": len(roleIDs)}})
+		Result: audit.ResultSuccess, Detail: map[string]any{
+			"role_count": len(roleIDs),
+			// By name, before and after: "role_count: 1" said a role changed and
+			// nothing about what it was or became.
+			"from": roleNames(target.Roles),
+			"to":   roleNames(granted),
+		}})
 	return nil
+}
+
+func roleNames(rs []iam.Role) []string {
+	out := make([]string, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, r.Name)
+	}
+	return out
 }
 
 // ResetPasswordResult carries the temporary password back to the administrator,
@@ -253,8 +362,11 @@ func (s *Service) ResetPassword(ctx context.Context, actor iam.Claims, userID ia
 	if target.IsBootstrapAdmin() {
 		return nil, s.guardBootstrapAdmin(ctx, actor, userID, "password reset")
 	}
-	if target.HasSuperAdmin() && !actor.IsSuperAdmin {
-		return nil, fmt.Errorf("%w: only a super admin can reset a super admin's password", iam.ErrPermissionDenied)
+	// Was: only a super admin's password was out of reach. A peer's is too — an
+	// Organization Admin resetting another's is taking over an account of their
+	// own rank.
+	if _, err := s.guardRank(ctx, actor, userID, "reset their password"); err != nil {
+		return nil, err
 	}
 	// Federated accounts have no local password to reset; saying so beats
 	// silently setting one that the identity provider will never consult.

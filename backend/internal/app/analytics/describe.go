@@ -348,7 +348,7 @@ var catalogue = map[string]string{
 	"user.delete":                  "Deleted a user",
 	"user.provision":               "Provisioned a user",
 	"user.bootstrap":               "Created the first administrator",
-	"user.assign_roles":            "Changed a user's roles",
+	"user.assign_roles":            "Changed a user's role",
 	"user.reset_password":          "Reset a password",
 	"user.protected_denied":        "Change to a protected account refused",
 	"team.create":                  "Created a team",
@@ -375,6 +375,21 @@ var catalogue = map[string]string{
 func notes(r *AuditRow, d detail) string {
 	switch {
 	case r.Action == "user.assign_roles":
+		// Recorded by name after 1.6.0; older events carry only a count.
+		if d.has("to") {
+			from, to := strings.Join(d.strs("from"), ", "), strings.Join(d.strs("to"), ", ")
+			switch {
+			case from == "" && to == "":
+				return "No role before or after"
+			case from == "":
+				return "Given " + to
+			case to == "":
+				return from + " removed; no role now"
+			case from == to:
+				return to + ", unchanged"
+			}
+			return from + " → " + to
+		}
 		if n := d.num("role_count"); n >= 0 && d.has("role_count") {
 			return plural(n, "role", "roles") + " now"
 		}
@@ -388,6 +403,14 @@ func notes(r *AuditRow, d detail) string {
 	case r.Action == "user.protected_denied":
 		if r.TargetLabel == "" {
 			r.TargetKind, r.TargetLabel = "User", d.str("target")
+		}
+		switch d.str("reason") {
+		case "outranked":
+			r.Title = "Refused by the role hierarchy"
+			return "Tried to " + d.str("attempted") + "; they are ranked at or above whoever tried"
+		case "role_above":
+			r.Title = "Refused by the role hierarchy"
+			return "Tried to " + d.str("attempted") + ", a role ranked at or above their own"
 		}
 		if a := d.str("attempted"); a != "" {
 			return "Tried: " + a

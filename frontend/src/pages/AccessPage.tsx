@@ -106,6 +106,9 @@ export function AccessPage() {
                 // Named once: it gates the delete button and the sentence that
                 // explains why the button is off.
                 const isSelf = u.user_id === me?.user_id;
+                // Whether the hierarchy lets the viewer manage this person at
+                // all. The server refuses otherwise; this just says so first.
+                const outranked = !isSelf && !me?.is_super_admin && rankOf(me) <= rankOf(u);
                 // Named here for the same reason isSelf is: it decides a badge
                 // AND which controls below are truthful.
                 const provider = authProviderLabel(u.auth_provider);
@@ -151,7 +154,14 @@ export function AccessPage() {
                     </div>
                     {canWrite && (
                       <div className="mt-4 flex items-center justify-end gap-2 border-t border-line pt-3">
-                        {u.is_bootstrap_admin ? (
+                        {outranked && !u.is_bootstrap_admin ? (
+                          <span
+                            className="mr-auto flex items-center gap-1.5 text-xs text-faint"
+                            title="Their role is ranked at or above yours. Only somebody ranked higher can change their role, reset their password, change their teams or remove them."
+                          >
+                            <IconLock size={13} /> Ranked at or above you
+                          </span>
+                        ) : u.is_bootstrap_admin ? (
                           /* Say WHY rather than hiding the controls. A missing button
                              sends somebody hunting for a permission they already have;
                              this account's roles and password are refused to everyone,
@@ -207,14 +217,16 @@ export function AccessPage() {
                           title={
                             isSelf
                               ? "You cannot remove the account you are signed in as. Sign in as another super admin to remove this one."
-                              : u.is_bootstrap_admin
+                              : outranked
+                                ? "Their role is ranked at or above yours, so only somebody ranked higher can remove them."
+                                : u.is_bootstrap_admin
                                 ? "Remove the installation account"
                                 : "Remove user"
                           }
                         >
                           <button
                             className="btn-subtle text-faint hover:text-danger"
-                            disabled={remove.isPending || isSelf}
+                            disabled={remove.isPending || isSelf || outranked}
                             aria-label={
                               isSelf ? `Cannot remove ${u.email}: it is the account you are signed in as` : `Remove user ${u.email}`
                             }
@@ -804,6 +816,17 @@ function RoleSummaryCard({
   );
 }
 
+/* The hierarchy, as the server enforces it (iam/users.go, guardRank). Somebody
+   manages another person only if they outrank them: a super admin outranks
+   everybody, anybody else only people whose role is ranked strictly below their
+   own. And nobody hands out a role ranked at or above their own. The console
+   says so up front rather than offering controls the server will refuse. */
+const SUPER_ADMIN_LEVEL = 1000; // iam.SuperAdminLevel
+function rankOf(p: { is_super_admin: boolean; approval_level?: number } | null | undefined): number {
+  if (!p) return -1;
+  return p.is_super_admin ? SUPER_ADMIN_LEVEL : (p.approval_level ?? 0);
+}
+
 /* A person holds one role, so this is a choice, not a checklist: picking
    another role switches to it. Two at once made somebody's permissions the
    union of two jobs and their approval rank the higher of the two — one stray
@@ -814,22 +837,33 @@ function RolePicker({
   selected,
   choose,
   name,
+  held = [],
 }: {
   roles: Role[];
   selected: Set<string>;
   choose: (id: string) => void;
   name: string;
+  /** Roles the person already holds: keeping one is not handing it out. */
+  held?: string[];
 }) {
+  const me = useAuth((s) => s.principal);
+  const myRank = rankOf(me);
   return (
     <div role="radiogroup" aria-label="Role" className="space-y-1.5">
       {roles.map((r) => {
         const on = selected.has(r.id);
+        const aboveMe = !me?.is_super_admin && !held.includes(r.id) && (isSuperRole(r) ? SUPER_ADMIN_LEVEL : r.approval_level ?? 0) >= myRank;
         return (
           <label
             key={r.id}
+            title={aboveMe ? "Ranked at or above your own role — only somebody ranked higher can give it." : undefined}
             className={cn(
-              "flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 transition",
-              on ? "border-accent/50 bg-accent-soft/40 ring-1 ring-accent/25" : "border-line hover:border-line-strong hover:bg-surface-2/50",
+              "flex items-start gap-2.5 rounded-lg border px-3 py-2 transition",
+              aboveMe
+                ? "cursor-not-allowed border-line opacity-50"
+                : on
+                  ? "cursor-pointer border-accent/50 bg-accent-soft/40 ring-1 ring-accent/25"
+                  : "cursor-pointer border-line hover:border-line-strong hover:bg-surface-2/50",
             )}
           >
             <input
@@ -837,10 +871,14 @@ function RolePicker({
               name={name}
               className="mt-1 accent-[rgb(var(--accent))]"
               checked={on}
+              disabled={aboveMe}
               onChange={() => choose(r.id)}
             />
             <span className="min-w-0">
-              <span className="block text-sm font-medium text-fg">{r.name}</span>
+              <span className="flex items-center gap-2 text-sm font-medium text-fg">
+                {r.name}
+                {aboveMe && <span className="text-2xs font-normal text-faint">ranked at or above you</span>}
+              </span>
               {r.description && <span className="block text-xs text-faint">{r.description}</span>}
             </span>
           </label>
@@ -1057,7 +1095,7 @@ function EditRolesModal({
           <ErrorNote message={problemDetail(save.error, "Could not update roles")} />
         </div>
       )}
-      <RolePicker roles={roles} selected={sel} choose={choose} name={`role-${user.user_id}`} />
+      <RolePicker roles={roles} selected={sel} choose={choose} name={`role-${user.user_id}`} held={held.map((r) => r.id)} />
 
       {canReadTeams && (
         <div className="mt-4 border-t border-line pt-3">

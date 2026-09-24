@@ -113,6 +113,33 @@ func (s *Service) SetTeamMembers(ctx context.Context, actor iam.Claims, id iam.I
 	if s.teams == nil {
 		return ErrTeamsUnavailable
 	}
+	// Adding somebody to a team, or taking them off it, changes what they can
+	// reach: the hierarchy applies to each person whose membership changes.
+	// Those already on it and staying are not being managed.
+	current, err := s.teams.ListMembers(ctx, actor.Scope(), id)
+	if err != nil {
+		return err
+	}
+	was := map[iam.ID]bool{}
+	for _, m := range current {
+		was[m.UserID] = true
+	}
+	will := map[iam.ID]bool{}
+	for _, uid := range dedupeIDs(userIDs) {
+		will[uid] = true
+		if !was[uid] {
+			if _, err := s.guardRank(ctx, actor, uid, "change their teams"); err != nil {
+				return err
+			}
+		}
+	}
+	for uid := range was {
+		if !will[uid] {
+			if _, err := s.guardRank(ctx, actor, uid, "change their teams"); err != nil {
+				return err
+			}
+		}
+	}
 	if err := s.teams.SetMembers(ctx, actor.Scope(), id, dedupeIDs(userIDs)); err != nil {
 		return err
 	}
@@ -137,6 +164,9 @@ func (s *Service) AddUserToTeams(ctx context.Context, actor iam.Claims, userID i
 	}
 	if s.teams == nil {
 		return ErrTeamsUnavailable
+	}
+	if _, err := s.guardRank(ctx, actor, userID, "change their teams"); err != nil {
+		return err
 	}
 	for _, tid := range dedupeIDs(teamIDs) {
 		members, err := s.teams.ListMembers(ctx, actor.Scope(), tid)
@@ -175,6 +205,9 @@ func (s *Service) AddUserToTeams(ctx context.Context, actor iam.Claims, userID i
 func (s *Service) SetUserTeams(ctx context.Context, actor iam.Claims, userID iam.ID, teamIDs []iam.ID, meta ReqMeta) error {
 	if s.teams == nil {
 		return ErrTeamsUnavailable
+	}
+	if _, err := s.guardRank(ctx, actor, userID, "change their teams"); err != nil {
+		return err
 	}
 	current, err := s.teams.ListForUser(ctx, actor.Scope(), userID)
 	if err != nil {

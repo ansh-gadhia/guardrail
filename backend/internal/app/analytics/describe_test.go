@@ -80,6 +80,18 @@ func TestPresent_SaysWhatHappened(t *testing.T) {
 			title: "Changed how long recordings are kept", note: "90 → 45 days", kind: "Setting", target: "Recording retention",
 		},
 		{
+			name: "a role change says what the role was and what it became",
+			row: AuditRow{Action: "user.assign_roles", Result: "success", TargetType: "user", TargetLabel: "v@x.io",
+				Detail: map[string]any{"role_count": float64(1), "from": []any{"Operator"}, "to": []any{"Organization Admin"}}},
+			title: "Changed a user's role", note: "Operator → Organization Admin", kind: "User", target: "v@x.io",
+		},
+		{
+			name: "a change the hierarchy refused says so",
+			row: AuditRow{Action: "user.protected_denied", Result: "denied", TargetType: "user", TargetLabel: "boss@x.io",
+				Detail: map[string]any{"attempted": "change their role", "target": "boss@x.io", "reason": "outranked"}},
+			title: "Refused by the role hierarchy", note: "Tried to change their role; they are ranked at or above whoever tried", kind: "User", target: "boss@x.io",
+		},
+		{
 			name:  "an action nobody has described yet still reads as words",
 			row:   AuditRow{Action: "device.some_new_thing", Result: "failure"},
 			title: "Some new thing (failed)",
