@@ -601,6 +601,7 @@ services:
         DOMAIN="${GUARDRAIL_TUNNEL_DOMAIN-tunnel.guardrail.lan}";
         WANT="${GUARDRAIL_HOST_IP:-}";
         PLAIN="${GUARDRAIL_DNS_PLAIN:-yes}";
+        PPORT="${GUARDRAIL_DNS_PLAIN_PORT:-53}";
         addrs() { ip -4 -o addr show scope global 2>/dev/null | awk '$$2 !~ /^(docker[0-9]+|br-[0-9a-f]+)$$/ {split($$4,p,"/"); print $$2 "=" p[1]}' | tr '\n' ' '; };
         on_host() { ip -4 -o addr show 2>/dev/null | awk -v w="$$1" '{split($$4,p,"/"); if (p[1]==w) f=1} END{exit !f}'; };
         detect() { ip -4 route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($$i=="src"){print $$(i+1); exit}}'; };
@@ -619,15 +620,15 @@ services:
         echo "  fix: set GUARDRAIL_HOST_IP in the .env beside docker-compose.yml to one of those,";
         echo "       then: docker compose --profile dns up -d --force-recreate dns";
         sleep 30; exit 1; fi;
-        if [ "$$PLAIN" = yes ] && netstat -lnu 2>/dev/null | awk '{print $$4}' | grep -qE "^(0\.0\.0\.0|\[::\]|$$IP):53$$"; then
-        echo "guardrail-dns: port 53 on $$IP is already served by something else on this host.";
+        if [ "$$PLAIN" = yes ] && netstat -lnu 2>/dev/null | awk '{print $$4}' | grep -qE "^(0\.0\.0\.0|\[::\]|$$IP):$$PPORT$$"; then
+        echo "guardrail-dns: port $$PPORT on $$IP is already served by something else on this host.";
         echo "  this host is already a DNS server (a directory server, Pi-hole, or systemd-resolved";
         echo "  configured to serve the LAN). dnsmasq cannot bind, so this container will keep failing.";
         echo "  the fix is one record on the resolver that already runs here: *.$$DOMAIN -> $$IP,";
-        echo "  then re-run install.sh and answer no to the bundled resolver.";
+        echo "  then re-run install.sh and turn plain DNS off, or give it another port.";
         echo "  retrying in 20s in case that listener is on its way out...";
         sleep 20; fi;
-        if [ "$$PLAIN" = yes ]; then PORT=53; LISTEN="--listen-address=$$IP --listen-address=127.0.0.1";
+        if [ "$$PLAIN" = yes ]; then PORT=$$PPORT; LISTEN="--listen-address=$$IP --listen-address=127.0.0.1";
         else PORT=5335; LISTEN="--listen-address=127.0.0.1"; fi;
         SERVERS=""; DOH="";
         for u in "${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8}" "${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}"; do
@@ -636,8 +637,8 @@ services:
         "") ;;
         *) SERVERS="$$SERVERS --server=$$u" ;;
         esac; done;
-        if [ "$$PLAIN" = yes ]; then echo "guardrail-dns: *.$$DOMAIN -> $$IP (plain DNS on $$IP:53; DNS over HTTPS through dns-gateway)";
-        else echo "guardrail-dns: *.$$DOMAIN -> $$IP (no plain DNS; answering dns-gateway on 127.0.0.1:5335 for DNS over HTTPS)"; fi;
+        if [ "$$PLAIN" = yes ]; then echo "guardrail-dns: *.$$DOMAIN -> $$IP (plain DNS on $$IP:$$PORT)";
+        else echo "guardrail-dns: *.$$DOMAIN -> $$IP (no plain DNS; answering dns-gateway on 127.0.0.1:5335 only)"; fi;
         echo "guardrail-dns: upstreams ${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8} ${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}$${DOH:+ (https ones through dns-gateway)}";
         echo "guardrail-dns: your own records go in deploy/dns/ — see deploy/dns/README.md";
         exec dnsmasq --no-daemon --log-facility=-
@@ -677,12 +678,14 @@ services:
       - ./deploy/dns/conf.d:/etc/guardrail/dns/conf.d:ro
     restart: unless-stopped
 
-  # DNS over HTTPS for the resolver above (RFC 8484, /dns-query). GuardRail's
-  # own binary in a mode of its own — `guardrail dns-gateway`, see
+  # The encrypted ways into the resolver above: DNS over HTTPS (RFC 8484,
+  # /dns-query) and DNS over TLS (RFC 7858), each on or off by itself
+  # (GUARDRAIL_DNS_DOH, GUARDRAIL_DNS_DOT) on a port of its own. GuardRail's own
+  # binary in a mode of its own — `guardrail dns-gateway`, see
   # cmd/guardrail/dns_gateway.go — rather than a third-party image, because on
   # a privileged-access host every image is something to vouch for.
   #
-  # Where clients reach it is GUARDRAIL_DOH_PORT:
+  # DoH is reached on GUARDRAIL_DNS_DOH_PORT:
   #   - the console's port (GUARDRAIL_HTTPS_PORT, 443 by default): Traefik holds
   #     that port and its certificate, so it routes /dns-query here through
   #     deploy/traefik/dynamic/doh.yml, which install.sh writes for this case.
@@ -690,6 +693,7 @@ services:
   #     — so nothing on the network can reach it without TLS.
   #   - any other port: served here directly over TLS, with the console's
   #     certificate, which it re-reads when an update regenerates it.
+  # DoT is always served here directly, on GUARDRAIL_DNS_DOT_PORT (853).
   # Queries go to dnsmasq on loopback. When an upstream is an https:// URL, the
   # resolver's own lookups come back through here (127.0.0.1:5053) and leave
   # over HTTPS too.
@@ -713,9 +717,15 @@ services:
     read_only: true
     security_opt: ["no-new-privileges:true"]
     environment:
-      GUARDRAIL_DOH_PORT: ${GUARDRAIL_DOH_PORT:-443}
+      # Defaults are what a server from before 1.7.0 ran: plain DNS on 53 and
+      # nothing encrypted. install.sh writes every one of these.
+      GUARDRAIL_DNS_DOH: ${GUARDRAIL_DNS_DOH:-no}
+      GUARDRAIL_DNS_DOH_PORT: ${GUARDRAIL_DNS_DOH_PORT:-443}
+      GUARDRAIL_DNS_DOT: ${GUARDRAIL_DNS_DOT:-no}
+      GUARDRAIL_DNS_DOT_PORT: ${GUARDRAIL_DNS_DOT_PORT:-853}
       GUARDRAIL_HTTPS_PORT: ${GUARDRAIL_HTTPS_PORT:-443}
       GUARDRAIL_DNS_PLAIN: ${GUARDRAIL_DNS_PLAIN:-yes}
+      GUARDRAIL_DNS_PLAIN_PORT: ${GUARDRAIL_DNS_PLAIN_PORT:-53}
       GUARDRAIL_DNS_UPSTREAM: ${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8}
       GUARDRAIL_DNS_UPSTREAM2: ${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}
     volumes:

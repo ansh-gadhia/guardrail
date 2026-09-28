@@ -1,16 +1,18 @@
-// Package doh relays DNS between DNS over HTTPS (RFC 8484) and ordinary DNS.
+// Package dnsrelay relays DNS between the encrypted transports — DNS over
+// HTTPS (RFC 8484) and DNS over TLS (RFC 7858) — and ordinary DNS.
 //
-// Two directions, both plain byte relays — a DNS message goes through
+// Every direction is a plain byte relay — a DNS message goes through
 // unchanged, so nothing here resolves anything or needs to understand more of
 // the wire format than a few header fields:
 //
-//   - Server answers DoH clients (a browser, Windows' encrypted DNS) by handing
-//     each query to an ordinary resolver over TCP — the bundled dnsmasq, which
-//     holds the tunnel wildcard and the operator's own records.
+//   - Server answers DoH clients (a browser, Windows' encrypted DNS), and
+//     TLSServer DoT clients (Android's Private DNS, systemd-resolved), by
+//     handing each query to an ordinary resolver over TCP — the bundled
+//     dnsmasq, which holds the tunnel wildcard and the operator's own records.
 //   - Forwarder is the other way round: it answers ordinary DNS on UDP and TCP
 //     by sending each query to DoH upstreams, so that the resolver's own
 //     lookups leave the host encrypted as well.
-package doh
+package dnsrelay
 
 import (
 	"bytes"
@@ -268,19 +270,30 @@ func (f *Forwarder) ServeTCP(ctx context.Context, ln net.Listener) error {
 			}
 			return err
 		}
-		go func() {
-			defer func() { _ = conn.Close() }()
-			for {
-				_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-				q, err := readFrame(conn)
-				if err != nil {
-					return
-				}
-				if err := writeFrame(conn, f.Exchange(ctx, q)); err != nil {
-					return
-				}
-			}
-		}()
+		go serveFrames(ctx, conn, 10*time.Second, f.Exchange)
+	}
+}
+
+// serveFrames answers length-prefixed DNS queries on conn, one after another,
+// until the client goes quiet for idle, hangs up, or ctx ends. It is TCP DNS
+// (RFC 1035 §4.2.2) and, on a TLS connection, DNS over TLS: the same framing
+// inside TLS, whose handshake runs on the first read and so is bounded by the
+// same deadline.
+func serveFrames(ctx context.Context, conn net.Conn, idle time.Duration, exchange func(context.Context, []byte) []byte) {
+	defer func() { _ = conn.Close() }()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(idle))
+		q, err := readFrame(conn)
+		if err != nil {
+			return
+		}
+		resp := exchange(ctx, q)
+		_ = conn.SetWriteDeadline(time.Now().Add(idle))
+		if err := writeFrame(conn, resp); err != nil {
+			return
+		}
 	}
 }
 

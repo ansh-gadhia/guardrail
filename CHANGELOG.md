@@ -14,27 +14,35 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ### Added
 
-- **DNS over HTTPS, on any port.** The bundled resolver answered plain DNS on
-  port 53 and nothing else, so every lookup crossed the network readable and
-  forgeable. It now serves DNS over HTTPS (RFC 8484) at
-  `https://<host>[:port]/dns-query`, from a new `dns-gateway` service that is
-  GuardRail's own binary rather than another image to vouch for. On the
-  console's port it shares Traefik's listener and certificate; on any other
-  port it serves TLS itself with the same certificate, and picks up a
-  regenerated one without a restart. Plain DNS on port 53 is now a choice of its
-  own: off on a fresh install, so the resolver listens on loopback only, and
-  kept on by an update of a server that has it. Upstreams can be `https://` URLs
-  too, so the resolver's own lookups leave encrypted — a fresh install uses
-  Cloudflare's and Google's.
+- **Plain DNS, DNS over HTTPS and DNS over TLS, each on or off, each on any
+  port.** The bundled resolver answered plain DNS on port 53 and nothing else,
+  so every lookup crossed the network readable and forgeable, and 53 was the
+  only port it could use. Now it has three ways in, switched separately and in
+  any combination: plain DNS (UDP and TCP) on any port; DNS over HTTPS (RFC
+  8484) at `https://<host>[:port]/dns-query`; and DNS over TLS (RFC 7858), 853
+  by convention. The encrypted two come from a new `dns-gateway` service —
+  GuardRail's own binary rather than another image to vouch for — using the
+  console's certificate, which it picks up again when an update regenerates it.
+  DoH on the console's port shares Traefik's listener; on any other port, and
+  DoT always, the gateway serves TLS itself. With plain DNS off the resolver
+  listens on loopback only. Upstreams can be `https://` URLs too, so the
+  resolver's own lookups leave encrypted.
 - **The installer asks for all of it, and an update offers back what is
-  installed.** The DoH port, plain DNS and both upstreams are asked on install
-  and on every update, each with the current value as the default, so Enter
-  keeps it and typing a new one changes it — 443 to 1010 and back is one
-  update each way. A port is checked before it is written: out of range, the
-  HTTP port, the resolver's internal ports, or one something else is listening
-  on (named) is refused and asked again. After start-up the installer asks the
-  endpoint a real question and says whether it answered, and the summary prints
-  the URL to give clients.
+  installed.** Each way in and its port, the tunnel domain and both upstreams
+  are asked on install and on every update, with the current value as the
+  default — Enter keeps it, typing a new one changes it, so 443 to 1010 and
+  back is one update each way. The update opens with what the server runs now
+  ("plain DNS :53 · DoH off · DoT off"). A fresh install starts with all three
+  off; an update of a server from before 1.7.0 keeps what it ran, plain DNS on
+  53. A port is checked before it is written: out of range, the console's
+  port (except for DoH), the HTTP port, the resolver's internal ports, one an
+  earlier answer took, or one something else listens on (named) is refused and
+  asked again — while the ports this deployment's own resolver and gateway
+  hold, found from their sockets, are not. After start-up the installer asks
+  each way in a real question, reads the answer's response code, and says
+  which answered and, for any that did not, why ("SERVFAIL: the resolver
+  behind it did not answer", "HTTP 502"). The summary lists what to give
+  clients.
 
 ### Fixed
 
@@ -48,6 +56,9 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
   It checked port 53 before asking about DNS and found the resolver it was
   about to update holding it, then warned that the host was already a DNS
   server and suggested turning the resolver off.
+- **An update offers back whether the tunnel was kept.** With the bundled
+  resolver off, "Keep the tunnel enabled anyway?" defaulted to no every time,
+  so pressing Enter on a server that kept it switched it off.
 - **An update offers the upstreams the server actually has.** It offered
   8.8.8.8 and 1.1.1.1 whatever `.env` said, so pressing Enter replaced a site's
   own resolvers with public ones.

@@ -6,25 +6,33 @@ anything else, so adding a record meant editing `docker-compose.yml`.
 
 ## How clients reach it
 
-DNS over HTTPS (RFC 8484), always, at the port the installer asked for
-(`GUARDRAIL_DOH_PORT`, 443 unless you chose another):
+Three ways in, each switched on or off by itself and each on any port. Use one,
+two or all three; the resolver runs while any of them is on.
 
-    https://<host ip>/dns-query           on 443
-    https://<host ip>:<port>/dns-query    on any other port
+| Way in | Clients use | Settings in `.env` |
+|---|---|---|
+| Plain DNS (UDP and TCP, unencrypted) | `<host ip>` port 53, or the port you chose | `GUARDRAIL_DNS_PLAIN`, `GUARDRAIL_DNS_PLAIN_PORT` |
+| DNS over HTTPS | `https://<host ip>/dns-query` on 443, `https://<host ip>:<port>/dns-query` otherwise | `GUARDRAIL_DNS_DOH`, `GUARDRAIL_DNS_DOH_PORT` |
+| DNS over TLS | `<host ip>` port 853, or the port you chose | `GUARDRAIL_DNS_DOT`, `GUARDRAIL_DNS_DOT_PORT` |
 
-On the console's own port it shares the console's listener and certificate —
-Traefik hands `/dns-query` to the `dns-gateway` service. On any other port
-`dns-gateway` serves it itself, with the same certificate. Either way clients
-must trust that certificate: the installer's is self-signed, so import
-`deploy/tls/cert.pem` on each client (or replace it with one from your CA).
+A fresh install turns all three off. An update of a server from before these
+existed keeps what it ran: plain DNS on 53, nothing encrypted.
 
-Plain, unencrypted DNS on `<host ip>:53` is a separate choice
-(`GUARDRAIL_DNS_PLAIN`), off on a fresh install. Off, the resolver listens on
+DNS over HTTPS on the console's own port shares the console's listener and
+certificate — Traefik hands `/dns-query` to the `dns-gateway` service. On any
+other port, and for DNS over TLS always, `dns-gateway` serves it itself with the
+same certificate. Either way clients must trust that certificate: the
+installer's is self-signed, so import `deploy/tls/cert.pem` on each client (or
+replace it with one from your CA). With plain DNS off, the resolver listens on
 loopback only and answers nothing but the gateway.
 
-To change either, re-run the installer and choose **Update**: every DNS
-question is asked again with what is installed now as the default, so Enter
-keeps it and typing a new value replaces it.
+To change any of it, re-run the installer and choose **Update**. Every DNS
+question is asked again with what is installed now as the default — Enter keeps
+it, typing a new value replaces it. A port is checked before it is written:
+the HTTP port, the resolver's internal ports (5053, 5335, 8053), a port another
+answer took, or one something else listens on (named) is refused and asked
+again. After start-up the installer asks each way in a real question and says
+which answered.
 
 ## Your own records
 
@@ -71,10 +79,11 @@ configuration, so after adding or changing one:
   never gets a look in. Put your own records under a different domain.
 - **A name here is not reachable unless this resolver is the one being asked.**
   These records exist only in dnsmasq. A client using its own DNS sees nothing.
-- **DNS over HTTPS answers anyone who can reach its port.** Like any DoH
-  service it is an open resolver to whoever reaches the port — with DoH on
-  443, that is everyone who can reach the console. Firewall the port, not the
-  resolver, if that is wider than your LAN.
+- **Every way in answers anyone who can reach its port.** The resolver does
+  not filter clients by address — dnsmasq's `local-service` has no effect once
+  it is told which address to listen on — so each port is an open resolver to
+  whoever reaches it. With DoH on 443, that is everyone who can reach the
+  console. Firewall the ports if that is wider than your LAN.
 - **Anything not matched is forwarded** to the upstreams in `.env`
   (`GUARDRAIL_DNS_UPSTREAM`, `GUARDRAIL_DNS_UPSTREAM2`). Each is an IP (plain
   DNS) or an `https://` URL, which the gateway sends over DNS over HTTPS so the
@@ -82,12 +91,13 @@ configuration, so after adding or changing one:
 
 ## Checking your work
 
-    # over DNS over HTTPS, the way clients ask
-    dig +https +short @<host ip> -p <port> fw1.corp.lan     # BIND 9.18 or later
+    # each way in, the way clients ask (dig from BIND 9.18 or later)
+    dig +short @<host ip> -p <port> fw1.corp.lan            # plain DNS
+    dig +https +short @<host ip> -p <port> fw1.corp.lan     # DNS over HTTPS
+    dig +tls +short @<host ip> -p <port> fw1.corp.lan       # DNS over TLS
     curl -sv --doh-insecure --doh-url https://<host ip>[:port]/dns-query \
         http://fw1.corp.lan/ 2>&1 | grep -m1 Trying         # the address it resolved to
 
-    dig +short @<host ip> fw1.corp.lan          # plain DNS, when that is on
     docker compose --profile dns logs dns dns-gateway   # startup: modes, ports, files read
     docker kill --signal=USR1 guardrail-dns-1   # dump the live cache to the log
 

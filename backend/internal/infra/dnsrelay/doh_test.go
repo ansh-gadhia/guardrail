@@ -1,4 +1,4 @@
-package doh
+package dnsrelay
 
 import (
 	"bytes"
