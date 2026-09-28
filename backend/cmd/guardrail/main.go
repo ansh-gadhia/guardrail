@@ -66,6 +66,12 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "dns-gateway":
+			if err := runDNSGateway(os.Args[2:]); err != nil {
+				_, _ = os.Stderr.WriteString("fatal: " + err.Error() + "\n")
+				os.Exit(1)
+			}
+			return
 		case "rotate-kek":
 			if err := runRotateKEK(os.Args[2:]); err != nil {
 				_, _ = os.Stderr.WriteString("fatal: " + err.Error() + "\n")

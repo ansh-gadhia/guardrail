@@ -81,3 +81,7 @@ deploy/dns/hosts/*
 !deploy/dns/hosts/.gitkeep
 deploy/dns/conf.d/*
 !deploy/dns/conf.d/.gitkeep
+
+# Written by install.sh when DNS over HTTPS shares the console's port, and
+# removed when it has a port of its own: per-server state, not source.
+deploy/traefik/dynamic/doh.yml

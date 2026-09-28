@@ -107,7 +107,8 @@ The full deployment story (TLS, secrets, scaling, HA, upgrades) is in the
 ### Local DNS records
 
 If you run the bundled resolver, it answers the `*.<tunnel domain>` wildcard out
-of the box. Anything else you want it to answer goes in two directories beside
+of the box, over DNS over HTTPS at `https://<host>[:port]/dns-query` (and plain
+DNS on port 53 if you turned that on). Anything else you want it to answer goes in two directories beside
 the compose file — no editing `docker-compose.yml`, and both survive updates:
 
 ```bash
@@ -144,8 +145,10 @@ they name your estate. Full notes in **[deploy/dns/README.md](deploy/dns/README.
   loopback-bound, and the API reaches Postgres over TLS the server *requires*.
 - **Optional DNS resolver** (`--profile dns`, dnsmasq): answers the
   `*.<tunnel domain>` wildcard that whole-host session delivery needs, for
-  networks where you cannot add a record to the LAN resolver. Your own records
-  go in `deploy/dns/` — see below.
+  networks where you cannot add a record to the LAN resolver. Served as **DNS
+  over HTTPS** at `https://<host>[:port]/dns-query`, on the console's port or
+  any other the installer is given; plain DNS on port 53 is optional and off by
+  default. Your own records go in `deploy/dns/` — see below.
 
 See **[SETUP.md](SETUP.md)** for the architecture diagram and the default port map.
 

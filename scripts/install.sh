@@ -579,8 +579,15 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # cron job, a pipe under nohup) has no /dev/tty to open. Binding fd 3 once, here,
 # makes every prompt work in all three cases, and a read that hits EOF aborts
 # instead of re-prompting forever against a closed descriptor.
+#
+# The braces are load-bearing. A bare `exec` applies EVERY redirection on its
+# line to the shell itself, for good — so `exec 3</dev/tty 2>/dev/null` opened
+# the terminal and also sent the rest of the run's stderr to /dev/null. Every
+# warn, err and die was silent whenever a terminal was attached, which is every
+# interactive run: a refused answer just re-asked the question with no reason.
+# Grouped, the 2>/dev/null only hides a failed open here and is then undone.
 setup_input() {
-    if exec 3</dev/tty 2>/dev/null; then
+    if { exec 3</dev/tty; } 2>/dev/null; then
         return 0
     fi
     exec 3<&0
@@ -1211,48 +1218,67 @@ configure_host_ip() {
 # because it is the setting most likely to change after the fact — a lab turns it
 # on, an enterprise turns it off once their own resolver has the record.
 configure_dns() {
+    # Every answer below is offered back as the default, so an update shows what
+    # is installed and Enter keeps it. The install passes the fresh defaults.
     local current_domain="${1:-tunnel.guardrail.lan}" current_enabled="${2:-yes}"
+    local current_doh="${3:-443}" current_plain="${4:-no}"
+    local current_up1="${5:-https://1.1.1.1/dns-query}" current_up2="${6:-https://8.8.8.8/dns-query}"
     step "Session tunnel and DNS"
     printf '%s\n' "  ${D}Brokered web sessions can be served at their own hostname"
     printf '%s\n' "  (<session-id>.<domain>) instead of under a /proxy/ path. Appliance"
     printf '%s\n' "  UIs that hard-navigate need this. It requires wildcard DNS.${R}"
     echo
 
-    # Checked BEFORE the question, because the answer depends on it. The bundled
-    # resolver binds one address on port 53 and exits when it cannot; a host that
-    # is already a DNS server — a directory server, a Pi-hole, systemd-resolved
-    # serving the LAN — can never run it. Left undetected, "yes" is accepted
-    # cheerfully at install time and shows up later as a container in a restart
-    # loop, which names neither the port nor what holds it.
     local dns_default; dns_default=$([ "$current_enabled" = "yes" ] && echo y || echo n)
-    if port53_taken "$(host_ip)"; then
-        local holder; holder=$(port53_holder "$(host_ip)")
-        warn "port 53 on $(host_ip) is already served${holder:+ by ${B}${holder}${R}} — the bundled resolver cannot bind it"
-        printf '%s\n' "  ${D}This host is already a DNS server. Add the wildcard record there"
-        printf '%s\n' "  instead — it is one line, and it keeps a single resolver authoritative"
-        printf '%s\n' "  for this network:"
-        printf '%s\n' "      *.${current_domain}  ->  $(host_ip)"
-        printf '%s\n' "  Answer no below and the tunnel still works; only the bundled resolver"
-        printf '%s\n' "  is left off.${R}"
-        echo
-        dns_default=n
-    fi
-
     ask_yn DNS_ENABLED "Run the bundled DNS resolver for the tunnel domain?" "$dns_default"
     if [ "$DNS_ENABLED" = "yes" ]; then
         ask TUNNEL_DOMAIN "Tunnel domain" "$current_domain"
-        # Both upstreams are asked for, and the second is not a formality. The
-        # resolver runs with --no-resolv, so these two are the ONLY places a
-        # non-tunnel lookup can go. Leaving a public default in place on a segment
-        # with no route to the internet does not degrade to the site's resolver —
-        # it makes every lookup that is not the tunnel domain wait for a timeout,
-        # which reads as "the DNS server is broken" and is really "it was told to
-        # ask somewhere it cannot reach".
-        ask DNS_UPSTREAM  "Upstream DNS for everything else" "${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8}"
-        ask DNS_UPSTREAM2 "Second upstream" "${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}"
-        info "the resolver will answer ${B}*.${TUNNEL_DOMAIN}${R} with ${B}$(host_ip)${R}"
-        info "it listens on ${B}$(host_ip):53${R} — point clients' primary DNS there"
-        port53_taken "$(host_ip)" && warn "port 53 is already taken here — this resolver will not start until that is freed"
+
+        # DNS over HTTPS (RFC 8484), always on with the resolver. On the
+        # console's own port it shares Traefik's listener and certificate at
+        # /dns-query; on any other port the gateway serves it directly, over
+        # TLS with the same certificate.
+        ask_doh_port DOH_PORT "$current_doh"
+
+        # Plain DNS is the resolver's old way in, and no longer the only one.
+        # Off, the resolver answers only the DoH gateway, on loopback, and
+        # nothing on the network can query it unencrypted.
+        #
+        # Port 53 is checked HERE and only when plain DNS is wanted: DoH does
+        # not need it, so a host that is already a DNS server can still run the
+        # bundled resolver for DoH. And this deployment's own resolver holding
+        # the port is not a conflict — an update used to see it, call the port
+        # taken, and suggest turning DNS off. Only while it serves plain DNS,
+        # though: running DoH-only it does not hold 53, so whatever does is not
+        # ours.
+        local plain_default; plain_default=$([ "$current_plain" = "yes" ] && echo y || echo n)
+        if port53_taken "$(host_ip)" && ! { [ "$current_plain" = "yes" ] && own_resolver_running; }; then
+            local holder; holder=$(port53_holder "$(host_ip)")
+            warn "port 53 on $(host_ip) is already served${holder:+ by ${B}${holder}${R}} — plain DNS cannot be offered here"
+            printf '%s\n' "  ${D}DNS over HTTPS is unaffected. For plain DNS, add the wildcard record on"
+            printf '%s\n' "  the resolver that already runs here: *.${TUNNEL_DOMAIN}  ->  $(host_ip)${R}"
+            plain_default=n
+        fi
+        ask_yn DNS_PLAIN "Also answer plain (unencrypted) DNS on port 53?" "$plain_default"
+
+        # Each upstream is an address (plain DNS) or an https:// URL (DNS over
+        # HTTPS, sent through the gateway so the resolver's own lookups leave
+        # encrypted). Both are asked for, and the second is not a formality: the
+        # resolver runs with --no-resolv, so these are the ONLY places a
+        # non-tunnel lookup can go. On a segment with no route to the internet a
+        # public default does not degrade to the site's resolver — every lookup
+        # that is not the tunnel domain waits out a timeout.
+        info "upstreams: an IP for plain DNS, or an ${B}https://${R} URL for DNS over HTTPS"
+        ask_upstream DNS_UPSTREAM  "Upstream DNS for everything else" "$current_up1"
+        ask_upstream DNS_UPSTREAM2 "Second upstream" "$current_up2"
+
+        info "the resolver answers ${B}*.${TUNNEL_DOMAIN}${R} with ${B}$(host_ip)${R}"
+        info "DNS over HTTPS: ${B}$(doh_url "$DOH_PORT")${R}"
+        if [ "$DNS_PLAIN" = "yes" ]; then
+            info "plain DNS: ${B}$(host_ip):53${R}"
+        else
+            info "plain DNS: ${B}off${R} — clients use DNS over HTTPS"
+        fi
     else
         # Empty domain disables the tunnel entirely; sessions fall back to the
         # path-prefixed proxy, which is exactly how it worked before it existed.
@@ -1264,8 +1290,117 @@ configure_dns() {
             TUNNEL_DOMAIN=""
             info "tunnel disabled — sessions serve under /proxy/<id>/"
         fi
-        DNS_UPSTREAM="${GUARDRAIL_DNS_UPSTREAM:-8.8.8.8}"
-        DNS_UPSTREAM2="${GUARDRAIL_DNS_UPSTREAM2:-1.1.1.1}"
+        # Kept as they were, for the day the resolver is turned back on.
+        DOH_PORT="$current_doh"; DNS_PLAIN="$current_plain"
+        DNS_UPSTREAM="$current_up1"; DNS_UPSTREAM2="$current_up2"
+    fi
+}
+
+# The URL clients configure for DNS over HTTPS. Port 443 is left out: it is
+# what https:// means, and some clients' fields do not take a port for it.
+doh_url() { # doh_url PORT
+    if [ "$1" = "443" ]; then printf 'https://%s/dns-query' "$(host_ip)"
+    else printf 'https://%s:%s/dns-query' "$(host_ip)" "$1"; fi
+}
+
+# This deployment's own resolver is running (and so is what holds port 53).
+own_resolver_running() {
+    have docker || return 1
+    docker ps --filter "label=com.docker.compose.project=$PROJECT" \
+        --filter "label=com.docker.compose.service=dns" --format '{{.Names}}' 2>/dev/null | grep -q .
+}
+
+# Anything listening on a TCP port, on any address.
+tcp_port_in_use() { # tcp_port_in_use PORT
+    have ss || return 1
+    ss -ltn 2>/dev/null | awk -v p="$1" '{ n = split($4, a, ":"); if (a[n] == p) hit = 1 } END { exit !hit }'
+}
+
+tcp_port_holder() { # tcp_port_holder PORT — the process name, when ss says
+    have ss || return 0
+    ss -ltnp 2>/dev/null | awk -v p="$1" '{ n = split($4, a, ":"); if (a[n] == p && match($0, /users:\(\("[^"]+"/)) { who = substr($0, RSTART + 9, RLENGTH - 9); gsub(/"/, "", who); print who; exit } }'
+}
+
+# ask_doh_port VAR default — the port clients reach DNS over HTTPS on.
+#
+# Any port, checked before it is written: the console's HTTPS port is shared
+# (Traefik routes /dns-query); the HTTP port is refused (it only redirects);
+# the resolver's own internal ports are refused; and a port something else
+# already listens on is refused with its holder named — unless it is the port
+# this deployment's gateway is on now, which an update re-offers as the
+# default.
+ask_doh_port() {
+    local __dv="$1" __dd="$2" __dp="" __dh=""
+    while true; do
+        ask __dp "DNS over HTTPS port" "$__dd"
+        if ! [[ "$__dp" =~ ^[0-9]+$ ]] || [ "$((10#$__dp))" -lt 1 ] || [ "$((10#$__dp))" -gt 65535 ]; then
+            warn "enter a port between 1 and 65535"; continue
+        fi
+        __dp=$((10#$__dp))
+        if [ "$__dp" = "${HTTPS_PORT:-443}" ]; then
+            info "shares the console's port ${__dp}: Traefik answers /dns-query there"
+            printf -v "$__dv" '%s' "$__dp"; return 0
+        fi
+        case "$__dp" in
+            "${HTTP_PORT:-80}") warn "port ${__dp} is the HTTP port, which only redirects to HTTPS — pick another"; continue ;;
+            53 | 5053 | 5335 | 8053) warn "port ${__dp} is used inside the resolver itself — pick another"; continue ;;
+        esac
+        if [ "$__dp" != "${DOH_PORT_OURS:-}" ] && tcp_port_in_use "$__dp"; then
+            __dh=$(tcp_port_holder "$__dp")
+            warn "port ${__dp} is already in use on this server${__dh:+ by ${B}${__dh}${R}} — pick another"
+            continue
+        fi
+        printf -v "$__dv" '%s' "$__dp"; return 0
+    done
+}
+
+# ask_upstream VAR "Prompt" default — an IP address, or an https:// DoH URL.
+ask_upstream() {
+    local __uv="$1" __up="$2" __ud="$3" __ua=""
+    while true; do
+        ask __ua "$__up" "$__ud"
+        case "$__ua" in
+            https://?*) printf -v "$__uv" '%s' "$__ua"; return 0 ;;
+            http://*) warn "DNS over HTTPS needs https:// — an http:// upstream would send lookups in the clear" ;;
+            *)
+                if [[ "$__ua" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$__ua" =~ ^[0-9A-Fa-f:]+:[0-9A-Fa-f:]*$ ]]; then
+                    printf -v "$__uv" '%s' "$__ua"; return 0
+                fi
+                warn "enter an IP address, or an https:// URL such as https://1.1.1.1/dns-query" ;;
+        esac
+    done
+}
+
+# write_doh_route — when DNS over HTTPS shares the console's port, the Traefik
+# route that hands /dns-query to the gateway; otherwise, no such route.
+#
+# Written after fetch_release, whose copy merges into deploy/traefik and would
+# not remove it. Priority 15: above the API (10) and the console (1), below the
+# session tunnel (20), so a proxied appliance keeps its own /dns-query.
+write_doh_route() {
+    local route="$INSTALL_DIR/deploy/traefik/dynamic/doh.yml"
+    if [ "${DNS_ENABLED:-no}" = "yes" ] && [ "${DOH_PORT:-443}" = "${HTTPS_PORT:-443}" ]; then
+        mkdir -p "$(dirname "$route")"
+        cat >"$route" <<'ROUTE'
+# Written by install.sh: DNS over HTTPS shares the console's port, so Traefik
+# hands /dns-query to dns-gateway. Removed when DoH has a port of its own.
+http:
+  routers:
+    doh:
+      rule: "Path(`/dns-query`)"
+      priority: 15
+      entryPoints: [websecure]
+      service: doh
+      tls: {}
+  services:
+    doh:
+      loadBalancer:
+        servers:
+          - url: "http://host.docker.internal:8053"
+ROUTE
+        chmod 0644 "$route"
+    else
+        rm -f "$route"
     fi
 }
 
@@ -1615,6 +1750,12 @@ migrate_env() {
     # with nothing in the configuration having been touched.
     ensure_env_key GUARDRAIL_HOST_IP "$(host_ip)" \
         "The address operators reach this server on: TLS certificate SAN, console URL, and the address the bundled resolver binds and hands out. On a host with more than one NIC this must be set explicitly — detection follows the lowest-metric default route, which is often the wrong interface."
+    # An installation from before DNS over HTTPS served plain DNS and nothing
+    # else, so that is what it keeps until somebody answers otherwise.
+    ensure_env_key GUARDRAIL_DOH_PORT 443 \
+        "The port clients reach DNS over HTTPS on (https://<host>[:port]/dns-query). The console's HTTPS port is shared through Traefik; any other port is served by dns-gateway directly."
+    ensure_env_key GUARDRAIL_DNS_PLAIN yes \
+        "yes: the bundled resolver also answers plain DNS on <host>:53. no: DNS over HTTPS only."
     ensure_env_key GUARDRAIL_DNS_UPSTREAM2 1.1.1.1 \
         "Second upstream for the bundled resolver, which runs with --no-resolv: this and GUARDRAIL_DNS_UPSTREAM are the only places a non-tunnel lookup can go. On a segment with no internet, point both at a resolver that can be reached."
 }
@@ -1669,6 +1810,11 @@ GUARDRAIL_TUNNEL_DOMAIN=${TUNNEL_DOMAIN}
 # that is actually reachable.
 GUARDRAIL_DNS_UPSTREAM=${DNS_UPSTREAM}
 GUARDRAIL_DNS_UPSTREAM2=${DNS_UPSTREAM2}
+# DNS over HTTPS: https://<host>[:port]/dns-query. The console's HTTPS port is
+# shared through Traefik; any other port is served by dns-gateway directly.
+GUARDRAIL_DOH_PORT=${DOH_PORT}
+# yes: also answer plain DNS on <host>:53. no: DNS over HTTPS only.
+GUARDRAIL_DNS_PLAIN=${DNS_PLAIN}
 
 # ---- Secrets ----
 GUARDRAIL_JWT_SIGNING_KEY=${JWT_KEY}
@@ -2146,6 +2292,64 @@ wait_healthy() {
     return 0
 }
 
+# check_doh asks the DNS over HTTPS endpoint one question, the way a client
+# would, and says whether it answered. It asks for a name under the tunnel
+# domain, which the resolver answers itself, so a site with no route to its
+# upstreams still gets a true reading of GuardRail's half. An HTTP 200 means
+# every hop answered: Traefik or the gateway's TLS, the gateway, and dnsmasq
+# behind it (a resolver that is down comes back as 502).
+check_doh() {
+    [ "${DNS_ENABLED:-no}" = "yes" ] || return 0
+    local port=${DOH_PORT:-443} q code="" tries=10
+    q=$(doh_probe_query "doh-check.${TUNNEL_DOMAIN}")
+    while [ "$tries" -gt 0 ]; do
+        code=$(curl -sk --max-time 3 -o /dev/null -w '%{http_code}' \
+            -H 'accept: application/dns-message' "https://127.0.0.1:${port}/dns-query?dns=${q}" 2>/dev/null || true)
+        if [ "$code" = "200" ]; then
+            ok "DNS over HTTPS is answering on port ${port}"
+            if have ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
+                warn "ufw is active here — clients reach DNS over HTTPS only if port ${port}/tcp is allowed"
+            fi
+            return 0
+        fi
+        sleep 2
+        tries=$((tries - 1))
+    done
+    warn "DNS over HTTPS did not answer on port ${port} ${D}(last HTTP status: ${code:-none})${R}"
+    info "check: docker compose -p $PROJECT logs dns-gateway dns"
+    if [ "$port" = "${HTTPS_PORT:-443}" ] && have ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
+        # Sharing the console's port, Traefik's container reaches the gateway on
+        # the docker0 address, which a host firewall filters like any other.
+        info "ufw is active: Traefik reaches the gateway on 172.17.0.1:8053 — allow it with"
+        info "  ${B}ufw allow in from 172.16.0.0/12 to any port 8053 proto tcp${R}"
+    fi
+    return 0
+}
+
+# doh_probe_query NAME — an RFC 8484 GET parameter: a DNS query for NAME's A
+# record, in wire format, base64url without padding. ID 0 as the RFC asks.
+doh_probe_query() {
+    local fmt='\x00\x00\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00' label
+    local IFS=.
+    for label in $1; do
+        [ -n "$label" ] && fmt+=$(printf '\\x%02x' "${#label}")$label
+    done
+    fmt+='\x00\x00\x01\x00\x01'
+    # shellcheck disable=SC2059 # the format IS the message: hex escapes built above
+    printf "$fmt" | base64 | tr -d '\n=' | tr '+/' '-_'
+}
+
+# The DNS over HTTPS port offered when nothing is configured yet: 443, unless
+# something other than this console holds it — then the console's own port,
+# shared, which is certain to be free for it.
+doh_port_default() {
+    if [ "${HTTPS_PORT:-443}" != "443" ] && tcp_port_in_use 443; then
+        echo "${HTTPS_PORT}"
+    else
+        echo 443
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Bootstrap API token
 # ---------------------------------------------------------------------------
@@ -2235,7 +2439,12 @@ summary() {
         printf '    %s     %s\n' "${B}Data${R}" "Docker volumes ${D}(/var/lib/docker/volumes/${PROJECT}_*)${R}"
     fi
     if [ "${DNS_ENABLED:-no}" = "yes" ]; then
-        printf '    %s      %s\n' "${B}DNS${R}" "point clients at ${ip} for *.${TUNNEL_DOMAIN}"
+        local doh_port; doh_port=${DOH_PORT:-$(grep -E '^GUARDRAIL_DOH_PORT=' "$ENV_FILE" | cut -d= -f2-)}
+        local plain; plain=${DNS_PLAIN:-$(grep -E '^GUARDRAIL_DNS_PLAIN=' "$ENV_FILE" | cut -d= -f2-)}
+        printf '    %s      %s\n' "${B}DoH${R}" "$(doh_url "${doh_port:-443}")  ${D}(*.${TUNNEL_DOMAIN} -> ${ip})${R}"
+        if [ "${plain:-yes}" = "yes" ]; then
+            printf '    %s      %s\n' "${B}DNS${R}" "${ip}:53 ${D}(plain, unencrypted)${R}"
+        fi
     fi
 
     if [ -n "$BOOTSTRAP_TOKEN" ]; then
@@ -2312,7 +2521,10 @@ do_install() {
     resolve_data_paths
 
     configure_host_ip ""
-    configure_dns "tunnel.guardrail.lan" "yes"
+    # A fresh install is DNS over HTTPS only — plain DNS off, upstreams over
+    # HTTPS too. Every one of these is offered as a default and can be changed.
+    configure_dns "tunnel.guardrail.lan" "yes" "$(doh_port_default)" "no" \
+        "https://1.1.1.1/dns-query" "https://8.8.8.8/dns-query"
 
     # Loopback-published for psql/backups; shifted if something already holds them.
     PG_PORT=$(free_port 5432);  note_port Postgres 5432 "$PG_PORT"
@@ -2333,12 +2545,14 @@ do_install() {
     step "Installing"
     install_docker
     fetch_release
+    write_doh_route
     prepare_dirs
     write_env
     generate_cert
     enforce_modes
     start_stack
     wait_healthy
+    check_doh
     mint_api_token
     summary
 }
@@ -2347,10 +2561,31 @@ do_update() {
     [ -f "$ENV_FILE" ] || die "nothing to update — no $ENV_FILE. Run install first."
 
     # Read what is already configured so the update keeps it.
-    local cur_domain cur_dns cur_host_ip
-    cur_domain=$(grep -E '^GUARDRAIL_TUNNEL_DOMAIN=' "$ENV_FILE" | cut -d= -f2- || true)
-    cur_host_ip=$(grep -E '^GUARDRAIL_HOST_IP=' "$ENV_FILE" | cut -d= -f2- || true)
-    HTTPS_PORT=$(grep -E '^GUARDRAIL_HTTPS_PORT=' "$ENV_FILE" | cut -d= -f2- || echo 443)
+    local cur_domain cur_dns cur_host_ip cur_doh cur_plain cur_up1 cur_up2
+    envv() { grep -E "^$1=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- || true; }
+    cur_domain=$(envv GUARDRAIL_TUNNEL_DOMAIN)
+    cur_host_ip=$(envv GUARDRAIL_HOST_IP)
+    HTTPS_PORT=$(envv GUARDRAIL_HTTPS_PORT); HTTPS_PORT=${HTTPS_PORT:-443}
+    HTTP_PORT=$(envv GUARDRAIL_HTTP_PORT); HTTP_PORT=${HTTP_PORT:-80}
+    # What this deployment has now, offered back as every default below. An
+    # installation from before DNS over HTTPS has no DoH keys: it served plain
+    # DNS and nothing else, from the upstreams compose defaulted to — so that is
+    # what "current" means for it, and Enter keeps it.
+    #
+    # The upstreams used to be offered from the environment rather than from
+    # this file, so an update showed 8.8.8.8 and 1.1.1.1 whatever the server
+    # actually had — and Enter quietly replaced them.
+    cur_doh=$(envv GUARDRAIL_DOH_PORT); cur_doh=${cur_doh:-$(doh_port_default)}
+    cur_plain=$(envv GUARDRAIL_DNS_PLAIN); cur_plain=${cur_plain:-yes}
+    cur_up1=$(envv GUARDRAIL_DNS_UPSTREAM); cur_up1=${cur_up1:-8.8.8.8}
+    cur_up2=$(envv GUARDRAIL_DNS_UPSTREAM2); cur_up2=${cur_up2:-1.1.1.1}
+    # The DoH port this deployment's gateway listens on now is not "in use"
+    # when it is offered back.
+    DOH_PORT_OURS=""
+    if docker ps --filter "label=com.docker.compose.project=$PROJECT" \
+        --filter "label=com.docker.compose.service=dns-gateway" --format '{{.Names}}' 2>/dev/null | grep -q .; then
+        DOH_PORT_OURS=$cur_doh
+    fi
     DESKTOP_ENABLED=$(grep -E '^GUARDRAIL_DESKTOP_ENABLED=' "$ENV_FILE" | cut -d= -f2- || echo true)
     if docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}' 2>/dev/null | grep -q -- '-dns-'; then
         cur_dns=yes
@@ -2372,10 +2607,11 @@ do_update() {
     # and an update that cannot correct it leaves the operator editing .env by
     # hand to fix a certificate the installer generated.
     configure_host_ip "$cur_host_ip"
-    configure_dns "${cur_domain:-tunnel.guardrail.lan}" "$cur_dns"
+    configure_dns "${cur_domain:-tunnel.guardrail.lan}" "$cur_dns" "$cur_doh" "$cur_plain" "$cur_up1" "$cur_up2"
 
     install_docker
     fetch_release
+    write_doh_route
 
     # Where the data lives is read back off the .env rather than re-derived, so an
     # update leaves it exactly where the operator put it — including a layout
@@ -2390,9 +2626,14 @@ do_update() {
         -e "s|^GUARDRAIL_TUNNEL_DOMAIN=.*|GUARDRAIL_TUNNEL_DOMAIN=${TUNNEL_DOMAIN}|" \
         -e "s|^GUARDRAIL_DNS_UPSTREAM=.*|GUARDRAIL_DNS_UPSTREAM=${DNS_UPSTREAM}|" \
         -e "s|^GUARDRAIL_DNS_UPSTREAM2=.*|GUARDRAIL_DNS_UPSTREAM2=${DNS_UPSTREAM2}|" \
+        -e "s|^GUARDRAIL_DOH_PORT=.*|GUARDRAIL_DOH_PORT=${DOH_PORT}|" \
+        -e "s|^GUARDRAIL_DNS_PLAIN=.*|GUARDRAIL_DNS_PLAIN=${DNS_PLAIN}|" \
         -e "s|^GUARDRAIL_HOST_IP=.*|GUARDRAIL_HOST_IP=${HOST_IP}|" \
         "$ENV_FILE"
     grep -q '^GUARDRAIL_DNS_UPSTREAM=' "$ENV_FILE" || echo "GUARDRAIL_DNS_UPSTREAM=${DNS_UPSTREAM}" >>"$ENV_FILE"
+    grep -q '^GUARDRAIL_DNS_UPSTREAM2=' "$ENV_FILE" || echo "GUARDRAIL_DNS_UPSTREAM2=${DNS_UPSTREAM2}" >>"$ENV_FILE"
+    grep -q '^GUARDRAIL_DOH_PORT=' "$ENV_FILE" || echo "GUARDRAIL_DOH_PORT=${DOH_PORT}" >>"$ENV_FILE"
+    grep -q '^GUARDRAIL_DNS_PLAIN=' "$ENV_FILE" || echo "GUARDRAIL_DNS_PLAIN=${DNS_PLAIN}" >>"$ENV_FILE"
 
     # A CHANGE OF VERSION CLEARS THE DIGEST PIN. This is not tidying.
     #
@@ -2427,8 +2668,8 @@ do_update() {
     # A DNS resolver that was on and is now off has to be removed, not just left
     # out of the next `up` — compose would otherwise leave it running forever.
     if [ "${DNS_ENABLED}" = "no" ]; then
-        docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile dns rm -sf dns >/dev/null 2>&1 || true
-        info "bundled DNS resolver stopped and removed"
+        docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile dns rm -sf dns dns-gateway >/dev/null 2>&1 || true
+        info "bundled DNS resolver and its DNS over HTTPS gateway stopped and removed"
     fi
 
     start_stack
@@ -2437,6 +2678,7 @@ do_update() {
     # how a server ends up serving a certificate for an address it no longer has.
     spin "reloading the edge certificate" docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" restart traefik
     wait_healthy
+    check_doh
     summary
 }
 

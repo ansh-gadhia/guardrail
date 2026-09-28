@@ -12,6 +12,46 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+### Added
+
+- **DNS over HTTPS, on any port.** The bundled resolver answered plain DNS on
+  port 53 and nothing else, so every lookup crossed the network readable and
+  forgeable. It now serves DNS over HTTPS (RFC 8484) at
+  `https://<host>[:port]/dns-query`, from a new `dns-gateway` service that is
+  GuardRail's own binary rather than another image to vouch for. On the
+  console's port it shares Traefik's listener and certificate; on any other
+  port it serves TLS itself with the same certificate, and picks up a
+  regenerated one without a restart. Plain DNS on port 53 is now a choice of its
+  own: off on a fresh install, so the resolver listens on loopback only, and
+  kept on by an update of a server that has it. Upstreams can be `https://` URLs
+  too, so the resolver's own lookups leave encrypted — a fresh install uses
+  Cloudflare's and Google's.
+- **The installer asks for all of it, and an update offers back what is
+  installed.** The DoH port, plain DNS and both upstreams are asked on install
+  and on every update, each with the current value as the default, so Enter
+  keeps it and typing a new one changes it — 443 to 1010 and back is one
+  update each way. A port is checked before it is written: out of range, the
+  HTTP port, the resolver's internal ports, or one something else is listening
+  on (named) is refused and asked again. After start-up the installer asks the
+  endpoint a real question and says whether it answered, and the summary prints
+  the URL to give clients.
+
+### Fixed
+
+- **The installer's warnings and errors were invisible in a terminal.** Opening
+  the terminal for prompts with `exec 3</dev/tty 2>/dev/null` also sent the
+  whole run's stderr to `/dev/null`, so every warning, error and fatal message
+  was lost in every interactive run — a refused answer re-asked the question
+  without saying why, and a failure could end the run with no reason given.
+  This goes back to the first installer.
+- **An update no longer mistakes the bundled resolver for a port-53 conflict.**
+  It checked port 53 before asking about DNS and found the resolver it was
+  about to update holding it, then warned that the host was already a DNS
+  server and suggested turning the resolver off.
+- **An update offers the upstreams the server actually has.** It offered
+  8.8.8.8 and 1.1.1.1 whatever `.env` said, so pressing Enter replaced a site's
+  own resolvers with public ones.
+
 ## [1.6.2] - 2026-09-24
 
 ### Changed
