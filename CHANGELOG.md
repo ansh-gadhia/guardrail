@@ -12,6 +12,8 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-28
+
 ### Added
 
 - **Plain DNS, DNS over HTTPS and DNS over TLS, each on or off, each on any
