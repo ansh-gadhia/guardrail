@@ -12,6 +12,8 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-09-29
+
 ### Fixed
 
 - **The image pull board works with Docker Compose 5.** Compose 5 renamed its
