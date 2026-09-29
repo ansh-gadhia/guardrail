@@ -290,7 +290,7 @@ stream() {
 # (a tag not yet published) cancels every other pull in flight. The failure is
 # still reported, by image, and pull_images returns non-zero.
 #
-# Not a terminal (a log, a pipe): one line per image as it finishes, no cursor
+# Not a terminal (a log, a pipe): the finished board once, no cursor
 # movement. A compose too old for JSON progress: pull_images_plain.
 pull_images() { # pull_images [--profile P ...]
     local -a cargs=(-p "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@")
@@ -301,14 +301,15 @@ pull_images() { # pull_images [--profile P ...]
         return
     fi
     local -a svcs=()
-    local -A IMG=() ST=() NOTE=() BT=() BC=() NL=() ND=() LT=() LC=() LD=() LSEEN=()
+    local -A IMG=() ST=() NOTE=() BT=() BC=() NL=() ND=() LT=() LC=() LD=() LSEEN=() FETCHED=() SIZE=()
     local s img namew=4 tty=0 utf=0 full='#' empty='-' ell='...'
     # Each service's OWN image, read from compose's resolved configuration.
     # Not `config --images SERVICE`: that lists the service AND everything it
     # depends on, so "api" came back as the migrate image. The resolved YAML is
     # normalised — services two spaces in, their image four — which is what
     # lets awk read it without jq. Sorted, because compose's own order is not
-    # stable, and a board whose rows move between runs is harder to read.
+    # stable, and a board whose rows move between runs is harder to read —
+    # byte order, because a locale's collation put "web2" before "web".
     while IFS=$'\t' read -r s img; do
         [ -n "$s" ] && [ -n "$img" ] || continue
         svcs+=("$s"); IMG[$s]=$img
@@ -316,7 +317,7 @@ pull_images() { # pull_images [--profile P ...]
         /^services:$/ { in_s = 1; next }
         in_s && /^[^ ]/ { in_s = 0 }
         in_s && /^  [A-Za-z0-9_.-]+:$/ { svc = substr($1, 1, length($1) - 1); next }
-        in_s && /^    image: / { sub(/^    image: /, ""); print svc "\t" $0 }' | sort)
+        in_s && /^    image: / { sub(/^    image: /, ""); print svc "\t" $0 }' | LC_ALL=C sort)
     if [ "${#svcs[@]}" -eq 0 ]; then
         docker compose "${cargs[@]}" pull
         return
@@ -325,9 +326,11 @@ pull_images() { # pull_images [--profile P ...]
     case "${LC_ALL:-}${LC_CTYPE:-}${LANG:-}" in
         *UTF-8* | *utf-8* | *UTF8* | *utf8*) utf=1 full=$'█' empty=$'░' ell=$'…' ;;
     esac
+    local imgw=0
     for s in "${svcs[@]}"; do
         ST[$s]="wait"; BT[$s]=0; BC[$s]=0; NL[$s]=0; ND[$s]=0
         [ "${#s}" -gt "$namew" ] && namew=${#s}
+        [ "${#IMG[$s]}" -gt "$imgw" ] && imgw=${#IMG[$s]}
     done
 
     local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏' fi=0 drawn=0 last=0 t0=$SECONDS
@@ -344,11 +347,16 @@ pull_images() { # pull_images [--profile P ...]
     # left (the tag is the part worth keeping), and a note is cut to its column.
     _pi_line() {
         local sv=$1 cols icon right note="" pct barw=20 fill i bar="" img st=${ST[$1]} room rightw
-        cols=$(term_cols)
         rightw=$((barw + 26))
-        room=$((cols - 1 - namew - 8 - rightw))
-        if [ "$room" -lt 16 ]; then barw=10; rightw=$((barw + 26)); room=$((cols - 1 - namew - 8 - rightw)); fi
-        [ "$room" -lt 12 ] && room=12
+        if [ "$tty" -eq 1 ]; then
+            cols=$(term_cols)
+            room=$((cols - 1 - namew - 8 - rightw))
+            if [ "$room" -lt 16 ]; then barw=10; rightw=$((barw + 26)); room=$((cols - 1 - namew - 8 - rightw)); fi
+            [ "$room" -lt 12 ] && room=12
+        else
+            # A log never wraps, so nothing is cut: the whole reference, aligned.
+            room=$imgw
+        fi
         case "$st" in
             wait)   icon="${D}·${R}"; note="waiting" ;;
             pull)
@@ -363,11 +371,17 @@ pull_images() { # pull_images [--profile P ...]
                 if [ "${BT[$sv]}" -gt 0 ]; then right+="  ${D}$(hbytes "${BC[$sv]}") / $(hbytes "${BT[$sv]}")${R}"
                 elif [ "${NL[$sv]}" -gt 0 ]; then right+="  ${D}${ND[$sv]}/${NL[$sv]} layers${R}"; fi ;;
             done)
-                if [ "${BC[$sv]}" -gt 0 ]; then
+                icon="${GRN}✔${R}"
+                # "Up to date" only when no layer was fetched. Sizes are shown
+                # when compose reported them — not every version does for every
+                # layer — and the layer count when it did not.
+                if [ -n "${FETCHED[$sv]:-}" ] || [ "${BC[$sv]}" -gt 0 ]; then
                     for ((i = 0; i < barw; i++)); do bar+="$full"; done
-                    icon="${GRN}✔${R}"; right="${GRN}${bar}${R} 100%  ${D}$(hbytes "${BT[$sv]}")${R}"
+                    right="${GRN}${bar}${R} 100%"
+                    local size=${SIZE[$sv]:-${BT[$sv]}}
+                    if [ "${size:-0}" -gt 0 ]; then right+="  ${D}$(hbytes "$size")${R}"; fi
                 else
-                    icon="${GRN}✔${R}"; note="up to date"
+                    note="up to date"
                 fi ;;
             shared) icon="${D}✔${R}"; note=${NOTE[$sv]} ;;
             fail)   icon="${RED}✘${R}"; note=${NOTE[$sv]} ;;
@@ -381,6 +395,28 @@ pull_images() { # pull_images [--profile P ...]
         printf '  %s %-*s  %-*s  %s' "$icon" "$namew" "$sv" "$room" "$img" "$right"
     }
 
+    # _pi_footer — while pulling, the bytes so far and the speed; once done, a
+    # count of what happened. Not bytes at the end: compose does not report
+    # every layer's size (a layer that downloads fast can skip straight to
+    # "complete"), so a byte total from its events can only ever be a floor.
+    local finished=0
+    _pi_footer() {
+        if [ "$finished" -eq 0 ]; then
+            printf '%s of %s%s' "$(hbytes "$1")" "$(hbytes "$2")" "$3"; return
+        fi
+        local sv np=0 nu=0 nf=0 out=""
+        for sv in "${svcs[@]}"; do
+            case "${ST[$sv]}" in
+                done) if [ -n "${FETCHED[$sv]:-}" ] || [ "${BC[$sv]}" -gt 0 ]; then np=$((np + 1)); else nu=$((nu + 1)); fi ;;
+                fail) nf=$((nf + 1)) ;;
+            esac
+        done
+        [ "$np" -gt 0 ] && out+="${np} pulled"
+        [ "$nu" -gt 0 ] && out+="${out:+ · }${nu} up to date"
+        [ "$nf" -gt 0 ] && out+="${out:+ · }${nf} failed"
+        printf '%s' "${out:-nothing to pull}"
+    }
+
     # _pi_draw — the whole board, over the previous one.
     _pi_draw() {
         local sv tb=0 tc=0 el=$((SECONDS - t0)) speed=""
@@ -388,60 +424,120 @@ pull_images() { # pull_images [--profile P ...]
         [ "$el" -gt 0 ] && [ "$tc" -gt 0 ] && speed="   $(hbytes $((tc / el)))/s"
         [ "$drawn" -eq 1 ] && printf '\033[%dA' $((${#svcs[@]} + 1))
         for sv in "${svcs[@]}"; do printf '\r\033[K'; _pi_line "$sv"; printf '\n'; done
-        printf '\r\033[K  %s\n' "${D}$(hbytes "$tc") of $(hbytes "$tb")${speed}   $(fmt_secs "$el")${R}"
+        printf '\r\033[K  %s\n' "${D}$(_pi_footer "$tc" "$tb" "$speed")   $(fmt_secs "$el")${R}"
         drawn=1
     }
 
-    local line id parent text cur tot msg key now
-    local re_id='"id":"([^"]*)"' re_parent='"parent_id":"([^"]*)"' re_text='"text":"([^"]*)"'
-    local re_cur='"current":([0-9]+)' re_tot='"total":([0-9]+)' re_status='"status":"(([^"\\]|\\.)*)"'
+    # Which service an event is about, into $sv. Compose 2 names the service
+    # ("api"). Compose 5 names the image ("Image ghcr.io/…/guardrail-api:1.7.0"),
+    # once however many services run it: the event is booked to the first of
+    # them, and the rest are shown as sharing it — what compose 2 said itself
+    # with "Skipped - Image is already being pulled by …".
+    local -A OWNER=() SHOWN=()
+    for s in "${svcs[@]}"; do [ -n "${OWNER[${IMG[$s]}]:-}" ] || OWNER[${IMG[$s]}]=$s; done
+    local sv
+    _pi_resolve() {
+        sv=""
+        if [ -n "${ST[$1]:-}" ]; then sv=$1; return; fi
+        case "$1" in
+            "Image "*)
+                sv=${OWNER[${1#Image }]:-}
+                if [ -n "$sv" ] && [ -z "${SHOWN[$sv]:-}" ]; then
+                    SHOWN[$sv]=1
+                    local o
+                    for o in "${svcs[@]}"; do
+                        if [ "$o" != "$sv" ] && [ "${IMG[$o]}" = "${IMG[$sv]}" ]; then
+                            ST[$o]="shared"; NOTE[$o]="same image as $sv"
+                        fi
+                    done
+                fi ;;
+        esac
+    }
+
+    local line id parent text cur tot status details msg kind key now
+    local re_id='"id":"([^"]*)"' re_parent='"parent_id":"([^"]*)"'
+    local re_text='"text":"(([^"\\]|\\.)*)"' re_status='"status":"(([^"\\]|\\.)*)"'
+    local re_details='"details":"(([^"\\]|\\.)*)"'
+    local re_cur='"current":([0-9]+)' re_tot='"total":([0-9]+)'
     [ "$tty" -eq 1 ] && _pi_draw
     while IFS= read -r line; do
         case "$line" in '{'*) ;; *) [ -n "$line" ] && extra+=("$line"); continue ;; esac
-        id=""; parent=""; text=""; cur=""; tot=""; msg=""
+        id=""; parent=""; text=""; cur=""; tot=""; status=""; details=""
         [[ $line =~ $re_id ]] && id=${BASH_REMATCH[1]}
         [[ $line =~ $re_parent ]] && parent=${BASH_REMATCH[1]}
-        [[ $line =~ $re_text ]] && text=${BASH_REMATCH[1]}
+        [[ $line =~ $re_text ]] && text=${BASH_REMATCH[1]//\\\"/\"}
+        [[ $line =~ $re_status ]] && status=${BASH_REMATCH[1]//\\\"/\"}
+        [[ $line =~ $re_details ]] && details=${BASH_REMATCH[1]//\\\"/\"}
         [[ $line =~ $re_cur ]] && cur=${BASH_REMATCH[1]}
         [[ $line =~ $re_tot ]] && tot=${BASH_REMATCH[1]}
-        [[ $line =~ $re_status ]] && msg=${BASH_REMATCH[1]//\\\"/\"}
-        if [ -n "$parent" ] && [ -n "${ST[$parent]:-}" ]; then
-            # A layer of service $parent.
-            key="$parent|$id"
-            if [ -z "${LSEEN[$key]:-}" ]; then LSEEN[$key]=1; NL[$parent]=$((NL[$parent] + 1)); fi
-            [ "${ST[$parent]}" = wait ] && ST[$parent]="pull"
-            case "$text" in
-                Downloading)
-                    if [ -n "$tot" ] && [ -z "${LT[$key]:-}" ]; then LT[$key]=$tot; BT[$parent]=$((BT[$parent] + tot)); fi
-                    if [ -n "$cur" ] && [ -n "${LT[$key]:-}" ]; then
-                        BC[$parent]=$((BC[$parent] + cur - ${LC[$key]:-0})); LC[$key]=$cur
-                    fi ;;
-                "Download complete" | "Verifying Checksum" | Extracting | "Pull complete" | "Already exists")
-                    if [ -z "${LD[$key]:-}" ]; then
-                        LD[$key]=1; ND[$parent]=$((ND[$parent] + 1))
-                        if [ -n "${LT[$key]:-}" ]; then
-                            BC[$parent]=$((BC[$parent] + LT[$key] - ${LC[$key]:-0})); LC[$key]=${LT[$key]}
-                        fi
-                    fi ;;
+        if [ -n "$parent" ]; then
+            _pi_resolve "$parent"
+            if [ -n "$sv" ]; then
+                # A layer of service $sv. Read by what it carries more than by
+                # what it says, because the words have changed between compose
+                # versions: 2.x and 5.5 say "Downloading" with byte counts, 5.0
+                # sends the same counts under a drawn bar ("[===>  ] 2.1MB/3.6MB")
+                # and no words at all for a layer's state, only Working / Done.
+                #
+                #   byte counts, not extracting   bytes of the layer downloaded
+                #   a completion word, or Done    the layer is down
+                #   "Already exists"              down, and never fetched
+                key="$sv|$id"
+                if [ -z "${LSEEN[$key]:-}" ]; then LSEEN[$key]=1; NL[$sv]=$((NL[$sv] + 1)); fi
+                [ "${ST[$sv]}" = wait ] && ST[$sv]="pull"
+                if [ -n "$tot" ] && [ "$tot" -gt 0 ] && [ -n "$cur" ] && [ "$text" != Extracting ] && [ -z "${LD[$key]:-}" ]; then
+                    if [ -z "${LT[$key]:-}" ]; then LT[$key]=$tot; BT[$sv]=$((BT[$sv] + tot)); fi
+                    BC[$sv]=$((BC[$sv] + cur - ${LC[$key]:-0})); LC[$key]=$cur
+                    FETCHED[$sv]=1
+                fi
+                case "$text" in
+                    "Already exists")
+                        if [ "${LD[$key]:-}" != counted ]; then LD[$key]=counted; ND[$sv]=$((ND[$sv] + 1)); fi ;;
+                    "Download complete" | "Verifying Checksum" | Extracting | "Pull complete") status=Done ;;
+                esac
+                if [ "$status" = Done ] && [ "${LD[$key]:-}" != counted ]; then
+                    LD[$key]=counted; ND[$sv]=$((ND[$sv] + 1)); FETCHED[$sv]=1
+                    if [ -n "${LT[$key]:-}" ]; then
+                        BC[$sv]=$((BC[$sv] + LT[$key] - ${LC[$key]:-0})); LC[$key]=${LT[$key]}
+                    fi
+                fi
+            fi
+        elif [ -n "$id" ]; then
+            _pi_resolve "$id"
+        else
+            sv=""
+        fi
+        if [ -z "$parent" ] && [ -n "$sv" ]; then
+            # The image itself. Compose 2 puts what happened in "text" and any
+            # message in "status"; compose 5 makes "status" a state (Working,
+            # Done, Error, Warning) and moves the message to "details" — or, for
+            # a warning, to "text".
+            kind=""; msg=${details:-$status}
+            case "$status" in
+                Error) kind=error ;;
+                Warning) kind=warning; msg=$text ;;
             esac
-        elif [ -n "$id" ] && [ -n "${ST[$id]:-}" ]; then
-            # The service itself.
-            case "$text" in
-                Pulling) [ "${ST[$id]}" = wait ] && ST[$id]="pull" ;;
-                Pulled) ST[$id]="done" ;;
-                # Compose's message repeats the whole reference twice before the
-                # reason; the reason is its last part ("not found",
-                # "unauthorized", "denied").
-                Error) ST[$id]="fail"; NOTE[$id]="failed: ${msg##*: }"; [ -n "$msg" ] || NOTE[$id]="failed" ;;
-                # What compose calls a Warning is the same failure for a service
+            if [ -z "$kind" ]; then
+                case "$text" in
+                    Pulling) kind=pulling ;;
+                    Pulled) kind=pulled ;;
+                    Error) kind=error ;;
+                    Warning) kind=warning ;;
+                    Skipped*) kind=skipped ;;
+                esac
+            fi
+            case "$kind" in
+                pulling) [ "${ST[$sv]}" = wait ] && ST[$sv]="pull" ;;
+                pulled) ST[$sv]="done" ;;
+                # The message repeats the whole reference before the reason; the
+                # reason is its last part ("not found", "unauthorized", "denied").
+                error) ST[$sv]="fail"; NOTE[$sv]="failed: ${msg##*: }"; [ -n "$msg" ] || NOTE[$sv]="failed" ;;
+                # What compose calls a warning is the same failure for a service
                 # it could build from source instead. For an operator it is not
                 # a warning: the image this version runs is not in the registry.
-                Warning) ST[$id]="fail"; NOTE[$id]="not pulled: ${msg##*: }"; [ -n "$msg" ] || NOTE[$id]="not pulled" ;;
-                Skipped*) ST[$id]="shared"; NOTE[$id]="same image as ${text##* by }" ;;
+                warning) ST[$sv]="fail"; NOTE[$sv]="not pulled: ${msg##*: }"; [ -n "$msg" ] || NOTE[$sv]="not pulled" ;;
+                skipped) ST[$sv]="shared"; NOTE[$sv]="same image as ${text##* by }" ;;
             esac
-            if [ "$tty" -eq 0 ]; then
-                case "${ST[$id]}" in done | shared | fail) _pi_line "$id"; printf '\n' ;; esac
-            fi
         fi
         if [ "$tty" -eq 1 ]; then
             # At most about ten frames a second: progress arrives far faster.
@@ -450,16 +546,48 @@ pull_images() { # pull_images [--profile P ...]
                 fi=$(((fi + 1) % ${#frames})); _pi_draw; last=${now:-0}
             fi
         fi
-    done < <(docker compose "${cargs[@]}" --progress json pull --ignore-pull-failures 2>&1 >/dev/null)
+        # Both streams: every compose so far writes its progress to stderr, but
+        # nothing promises it, and a board that reads the wrong one shows every
+        # image waiting for the whole pull and then "not pulled" — the failure
+        # this used to have, from compose 5 renaming its events.
+    done < <(docker compose "${cargs[@]}" --progress json pull --ignore-pull-failures 2>&1)
 
+    # The last word goes to the image store, not to the events: an image this
+    # host now has is ready, whatever compose did or did not report about it,
+    # and one it does not have is not. Compose's progress format has changed
+    # before, and a board that misreads it must not tell the operator that
+    # images which are sitting right there were never pulled.
     local failed=0
     for s in "${svcs[@]}"; do
-        # Anything compose never mentioned was not pulled — not an image it pulls.
-        [ "${ST[$s]}" = wait ] && { ST[$s]="shared"; NOTE[$s]="not pulled (built here, or no image)"; }
-        [ "${ST[$s]}" = pull ] && ST[$s]="done"
+        case "${ST[$s]}" in
+            wait | pull)
+                if docker image inspect "${IMG[$s]}" >/dev/null 2>&1; then
+                    ST[$s]="done"
+                else
+                    ST[$s]="fail"; NOTE[$s]="not on this host"
+                fi ;;
+            shared)
+                # Shared with an image that failed is not "shared", it is missing.
+                if ! docker image inspect "${IMG[$s]}" >/dev/null 2>&1; then
+                    ST[$s]="fail"; NOTE[$s]="not on this host"
+                fi ;;
+        esac
         [ "${ST[$s]}" = fail ] && failed=1
+        # Each image's size as its store records it — the one size that is
+        # always known, where the byte counts in compose's events are not.
+        if [ "${ST[$s]}" = "done" ]; then
+            SIZE[$s]=$(docker image inspect -f '{{.Size}}' "${IMG[$s]}" 2>/dev/null || true)
+        fi
     done
-    if [ "$tty" -eq 1 ]; then _pi_draw; fi
+    finished=1
+    if [ "$tty" -eq 1 ]; then
+        _pi_draw
+    else
+        # A log gets the finished board once, in order and with sizes, rather
+        # than rows in whatever order compose finished them.
+        for s in "${svcs[@]}"; do _pi_line "$s"; printf '\n'; done
+        printf '  %s\n' "$(_pi_footer)"
+    fi
     if [ "${#extra[@]}" -gt 0 ]; then printf '  %s\n' "${extra[@]}"; fi
     return "$failed"
 }

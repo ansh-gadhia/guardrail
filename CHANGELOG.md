@@ -12,6 +12,24 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+### Fixed
+
+- **The image pull board works with Docker Compose 5.** Compose 5 renamed its
+  progress events: they name the image ("Image ghcr.io/…/guardrail-api:1.7.0")
+  where compose 2 named the service, move the message to a new field, and in
+  5.0 describe a layer's state only as Working or Done. The board recognised
+  none of it, so on a host with compose 5 — any host Docker installed recently,
+  dc1 among them — every image sat at "waiting" with "0 B of 0 B" for the whole
+  pull and then ended "not pulled", while the images were in fact pulled and
+  the stack came up. Both generations are now read: events by service or by
+  image (a service sharing another's image shows as such), layers by the byte
+  counts and states they carry rather than by their wording. The final word on
+  each image now comes from the image store, not from the events: an image the
+  host has is never reported as not pulled, one it lacks is reported as
+  missing, each pulled image shows its stored size, and the summary counts
+  what was pulled, up to date and failed. Checked against compose 2.40, 5.0
+  and 5.5, at a terminal and in a log, including a full 1.7.0 pull.
+
 ## [1.7.0] - 2026-09-28
 
 ### Added
