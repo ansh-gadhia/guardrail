@@ -160,6 +160,10 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
    display:flex;align-items:center;gap:10px;box-shadow:0 1px 12px rgba(0,0,0,.4)}
  #status[hidden]{display:none}
  #msg{white-space:nowrap}
+ /* The one long message — the stream blocked outright — wraps rather than
+    running off both sides of the screen. */
+ #status.long{max-width:min(560px,calc(100vw - 32px));box-sizing:border-box}
+ #status.long #msg{white-space:normal;text-align:center;line-height:1.45}
  #again{font:600 12px system-ui;color:#0b1220;background:#7dd3fc;border:0;border-radius:5px;
    padding:4px 10px;cursor:pointer}
  #again:hover{background:#a5e4fd}
@@ -185,6 +189,7 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
   function status(t, retry){
     if (t) { msgEl.textContent = t; statusEl.hidden = false; }
     else { statusEl.hidden = true; }
+    statusEl.classList.toggle('long', !!t && t.length > 80);
     againEl.hidden = !retry;
   }
 
@@ -267,6 +272,7 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
   var ended = false;       // the access session itself is over: stop trying
   var timer = null;
   var MAX_AUTO = 6;        // ~30s of backoff before we stop and ask
+  var explained = false;   // the "stream blocked" message is up; keep it there
 
   function send(o){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
   // fit() ALWAYS runs; only the send is withheld.
@@ -283,13 +289,15 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
   function connect(){
     clearTimeout(timer);
     if (ended) return;
-    status(everOpened ? 'reconnecting…' : 'connecting…', false);
+    // An explanation already on screen stays there while it retries.
+    if (!explained) status(everOpened ? 'reconnecting…' : 'connecting…', false);
     try { ws = new WebSocket(url); }
     catch (e) { retry(); return; }
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = function(){
       attempts = 0;
+      explained = false;
       if (everOpened) notice('reconnected to ' + DEVICE);
       everOpened = true;
       status(null, false);
@@ -331,12 +339,34 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
     // A dropped socket is not a dropped session: GuardRail still holds the
     // device connection, so re-attaching is lossless and safe to do unasked.
     attempts++;
+    if (everOpened) { backoff(false); return; }
+    // Never connected at all. This page's own address says why: it answers
+    // while the session is live and refuses once it is over. Live, with a page
+    // that loads and a socket that never opens, is a reverse proxy in front of
+    // GuardRail that does not pass WebSockets — which used to look like a
+    // terminal that simply never connected.
+    fetch(location.pathname, { cache: 'no-store', credentials: 'same-origin' }).then(function(r){
+      if (r.status >= 400 && r.status < 500) {
+        ended = true;
+        status('session ended — ' + DEVICE, false);
+        return;
+      }
+      if (r.ok) {
+        explained = true;
+        status('The live view cannot connect. If GuardRail is reached through a reverse proxy, the proxy ' +
+          'has to pass WebSocket connections: in Nginx Proxy Manager, turn on “Websockets Support” for this host.', true);
+      }
+      backoff(r.ok);
+    }, function(){ backoff(false); });
+  }
+
+  function backoff(hinted){
     if (attempts > MAX_AUTO) {
-      status('connection lost — ' + DEVICE, true);
+      if (!hinted) status('connection lost — ' + DEVICE, true);
       return;
     }
     var delay = Math.min(15000, 500 * Math.pow(2, attempts - 1));
-    status('connection lost — retrying in ' + Math.ceil(delay / 1000) + 's…', true);
+    if (!hinted) status('connection lost — retrying in ' + Math.ceil(delay / 1000) + 's…', true);
     timer = setTimeout(connect, delay);
   }
 

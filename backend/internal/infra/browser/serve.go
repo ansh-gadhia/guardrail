@@ -11,6 +11,8 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
+
+	"github.com/guardrail/guardrail/internal/infra/term"
 )
 
 // Console serves the browser-facing entry for a session. For the browser gateway
@@ -49,6 +51,27 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 	// Tie the socket lifetime to the tab and a generous read budget.
 	ctx, cancel := context.WithCancel(bs.tabCtx)
 	defer cancel()
+	// Pinged, so a reverse proxy does not cut the socket for being quiet. See
+	// term.KeepAlive.
+	go term.KeepAlive(ctx, c, term.KeepAliveInterval)
+
+	// The screen as it stands, first. Frames only flow on a repaint, so a viewer
+	// that reconnects to a page nobody is touching — after a dropped connection,
+	// or the console's Reconnect — would otherwise look at a blank canvas until
+	// something on the device changed. Anything still queued is older than this,
+	// so it is dropped rather than painted over it a moment later.
+	if cur := bs.lastFrame(); len(cur) > 0 {
+		for drained := false; !drained; {
+			select {
+			case <-bs.frames:
+			default:
+				drained = true
+			}
+		}
+		if !write(ctx, c, websocket.MessageBinary, cur) {
+			return true
+		}
+	}
 
 	// Writer: frames go out as binary, notifications as text. The viewer tells
 	// them apart by message type, so a dialog can never be mistaken for a frame.

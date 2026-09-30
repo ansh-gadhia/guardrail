@@ -55,6 +55,9 @@ func (g *Gateway) Observe(w http.ResponseWriter, r *http.Request, sid, orgID uui
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	// Pinged, so a reverse proxy does not cut the socket for being quiet. See
+	// term.KeepAlive.
+	go term.KeepAlive(ctx, c, term.KeepAliveInterval)
 
 	ob, scrollback := s.obs.Attach()
 	defer s.obs.Detach(ob)

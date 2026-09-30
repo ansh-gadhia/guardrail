@@ -71,6 +71,9 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	// Pinged, so a reverse proxy does not cut the socket for being quiet. See
+	// term.KeepAlive.
+	go term.KeepAlive(ctx, c, term.KeepAliveInterval)
 
 	// Reconnect: the session outlived its device connection. Dial again before
 	// the operator sees a terminal, so a failed redial is an error on the socket

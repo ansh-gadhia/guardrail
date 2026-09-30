@@ -41,6 +41,23 @@ func (f *frameObservers) Attach() (chan []byte, []byte) {
 	return ch, f.last
 }
 
+// Last is the current frame, for a viewer that is not a watcher: the operator's
+// own stream, reconnecting to a page that may not repaint for minutes.
+func (f *frameObservers) Last() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.last
+}
+
+// lastFrame is the session's current frame, or nothing for a session built
+// without observers (as tests build them).
+func (bs *bSession) lastFrame() []byte {
+	if bs.obs == nil {
+		return nil
+	}
+	return bs.obs.Last()
+}
+
 func (f *frameObservers) Detach(ch chan []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

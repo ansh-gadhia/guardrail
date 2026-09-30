@@ -68,6 +68,9 @@ func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, 
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	// Pinged, so a reverse proxy does not cut the socket for being quiet. See
+	// term.KeepAlive.
+	go term.KeepAlive(ctx, c, term.KeepAliveInterval)
 
 	if err := g.pump(ctx, c, s); err != nil && !isNormalClose(err) {
 		// The device connection is gone while the session itself is still good.

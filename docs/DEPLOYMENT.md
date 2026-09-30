@@ -273,6 +273,52 @@ gotchas, are in `deploy/dns/README.md`.
 7. **Datastore exposure.** Keep `POSTGRES_BIND_ADDR` / `REDIS_BIND_ADDR` on
    `127.0.0.1`. Postgres holds the credential vault and the audit trail.
 
+### 5.4 Behind a reverse proxy (Nginx Proxy Manager, nginx, Caddy, …)
+
+GuardRail can sit behind a proxy that gives it a public hostname and
+certificate. Point the proxy at `https://<server>:<GUARDRAIL_HTTPS_PORT>`; the
+self-signed certificate on that hop is fine, since most proxies do not verify
+their upstream.
+
+**The proxy must pass WebSocket connections.** The console's pages are plain
+HTTPS, but every live session — an isolated web device, an SSH or telnet
+terminal, an RDP or VNC desktop — streams over a WebSocket. A proxy that drops
+the upgrade serves the console perfectly and every session as a blank screen
+("The live view cannot connect…"), while the session itself is live on the
+server.
+
+- **Nginx Proxy Manager.** On the GuardRail proxy host:
+  - Details: turn on **Websockets Support**. Turn **Cache Assets** off — it
+    would cache session content on the proxy — and **Block Common Exploits**
+    off, which rejects some device pages' query strings with a 403.
+  - Advanced: `proxy_read_timeout 1h;` and `proxy_send_timeout 1h;`.
+- **nginx.** In the `location` that proxies GuardRail:
+
+  ```nginx
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  proxy_set_header Host $host;
+  proxy_read_timeout 1h;
+  proxy_send_timeout 1h;
+  ```
+
+- **Caddy, Traefik, HAProxy.** WebSockets pass without configuration.
+
+The long timeouts are belt and braces. Nginx closes a connection after 60
+seconds with nothing read from it, and a terminal at a prompt or a page that is
+not changing sends nothing; GuardRail pings every session socket every 25
+seconds (since 1.7.2), which is enough on its own for a 60-second timeout.
+
+**Web devices: prefer "Isolated browser".** "Reverse proxy" delivery with the
+session tunnel opens `https://<session-id>.<GUARDRAIL_TUNNEL_DOMAIN>/` in a new
+tab, which only works for clients that resolve the tunnel domain — normally
+through GuardRail's own DNS on the LAN — and a proxy that forwards that wildcard
+with a certificate for it.
+
+**Client addresses.** Behind a proxy, GuardRail currently records the proxy's
+address as every client's — in the audit log, and for sign-in throttling.
+
 ---
 
 ## 6. Scaling & HA
@@ -315,6 +361,12 @@ Chromium binary. The bundled API image ships one; if you build a custom image,
 set `GUARDRAIL_CHROME_PATH`. Without it the session silently falls back to the
 reverse proxy, which never sees pixels. `GET /api/v1/capabilities` reports
 whether the server can record at all.
+
+**A session opens to a blank screen, "The live view cannot connect".** The
+console is reached through a reverse proxy that does not pass WebSockets. The
+session is live on the server — the Sessions page lists it as active — and only
+its stream is being refused. See §5.4. (Before 1.7.2 the isolated browser
+reported this as "Session ended".)
 
 **Browser warns about the certificate.** Expected until you replace the bundled
 self-signed cert — see §5.1.

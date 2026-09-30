@@ -104,8 +104,22 @@ export function DesktopPlayer({
       setMessage(e?.message || "The desktop connection failed.");
       setStatus("error");
     };
+    // Whether the stream ever opened: onuuid fires with the first thing the
+    // gateway sends. A socket refused on the way in fails before that, and the
+    // usual cause is a reverse proxy in front of GuardRail that does not pass
+    // WebSockets — the console loads through it, the stream cannot. "The
+    // connection was lost" named neither.
+    let opened = false;
+    tunnel.onuuid = () => {
+      opened = true;
+    };
     tunnel.onerror = (e: { message?: string }) => {
-      setMessage(e?.message || "The connection to the session was lost.");
+      setMessage(
+        opened
+          ? e?.message || "The connection to the session was lost."
+          : "The live view could not connect. If GuardRail is reached through a reverse proxy, the proxy has to " +
+              "pass WebSocket connections: in Nginx Proxy Manager, turn on “Websockets Support” for this host.",
+      );
       setStatus("error");
     };
 

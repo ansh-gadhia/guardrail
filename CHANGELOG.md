@@ -12,6 +12,32 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+### Fixed
+
+- **Behind a reverse proxy, sessions no longer claim to have ended.** Every
+  live session streams over a WebSocket, and a proxy that does not pass them —
+  Nginx Proxy Manager with "Websockets Support" off, nginx without the Upgrade
+  headers — serves the console perfectly and blocks the stream. The isolated
+  browser's viewer said "Session ended" for any closed socket, so it showed a
+  blank screen announcing that a live session was over; on dc1 that was the
+  whole symptom. The viewer now asks its own page whether the session is live
+  before saying anything. Ended: "Session ended". Live, and the stream never
+  opened: it says a proxy in front of GuardRail is not passing WebSockets and
+  names the Nginx Proxy Manager setting, while retrying. Live after a drop: it
+  reconnects by itself and repaints at once. The SSH/telnet terminal and the
+  RDP/VNC desktop explain a blocked stream the same way, instead of "connection
+  lost" or "the desktop could not be opened".
+- **Quiet sessions survive proxy timeouts.** nginx closes a connection after
+  60 seconds with nothing read, and a terminal at a prompt or a page that is not
+  changing sends nothing, so a session behind a proxy dropped a minute into any
+  pause. Every session socket is now pinged every 25 seconds; the ping is not
+  activity, so it keeps no idle session from expiring, and a viewer that stops
+  answering is disconnected rather than left half-open. Checked in Chromium
+  through nginx with its default 60-second timeout: connected at 98 seconds.
+- **The deployment guide covers reverse proxies** (§5.4): Nginx Proxy Manager,
+  nginx, Caddy and Traefik settings, and a troubleshooting entry for the blank
+  screen.
+
 ## [1.7.1] - 2026-09-29
 
 ### Fixed

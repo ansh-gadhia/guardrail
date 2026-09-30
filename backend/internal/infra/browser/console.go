@@ -59,7 +59,8 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
  body.ro #wrap{top:27px}
  #screen{background:#000;max-width:100%;max-height:100%;box-shadow:0 0 40px rgba(0,0,0,.6);cursor:default;outline:none}
  #status{position:fixed;top:8px;left:50%;transform:translateX(-50%);color:#9fb0c8;
-   font:13px system-ui;background:rgba(15,23,42,.9);padding:6px 12px;border-radius:6px;z-index:5}
+   font:13px/1.45 system-ui;background:rgba(15,23,42,.9);padding:6px 12px;border-radius:6px;z-index:5;
+   max-width:min(560px,calc(100vw - 32px));box-sizing:border-box;text-align:center}
  #paste{position:fixed;right:10px;bottom:10px;z-index:6;font:12px system-ui;color:#cbd5e1;
    background:rgba(15,23,42,.92);border:1px solid #334155;border-radius:6px;padding:6px 10px;cursor:pointer}
  #paste:hover{background:#1e293b;color:#fff}
@@ -96,11 +97,42 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
  var st=document.getElementById('status');
  var proto=location.protocol==='https:'?'wss:':'ws:';
  var base=location.pathname.replace(/\/+$/,'');
- var ws=new WebSocket(proto+'//'+location.host+base+'/__ws__');
- ws.binaryType='arraybuffer';
- ws.onopen=function(){ st.textContent='Connected'; setTimeout(function(){st.style.display='none';},1200); cv.focus(); };
- ws.onclose=function(){ st.style.display='block'; st.textContent='Session ended'; };
- ws.onerror=function(){ st.style.display='block'; st.textContent='Connection error'; };
+ var wsURL=proto+'//'+location.host+base+'/__ws__';
+ var ws=null, everOpened=false, over=false, tries=0, retryT=null, hideT=null;
+ function show(msg){ clearTimeout(hideT); st.style.display='block'; st.textContent=msg; }
+ function hideSoon(){ clearTimeout(hideT); hideT=setTimeout(function(){ st.style.display='none'; },1200); }
+ function connect(){
+   clearTimeout(retryT);
+   if(over) return;
+   var mine;
+   try{ mine=ws=new WebSocket(wsURL); }catch(e){ lost(); return; }
+   ws.binaryType='arraybuffer';
+   ws.onopen=function(){ tries=0; show(everOpened?'Reconnected':'Connected'); everOpened=true; hideSoon(); cv.focus(); };
+   ws.onmessage=onMessage;
+   ws.onclose=function(){ if(ws===mine) lost(); };
+   ws.onerror=function(){}; // always followed by onclose
+ }
+ /* A closed socket is not an ended session. The socket only carries the
+    picture; the session lives on the server, and this page's own address says
+    which it is — it answers while the session is live and refuses once it is
+    over. This used to print "Session ended" for ANY close, so a reverse proxy
+    that does not pass WebSockets produced a blank screen announcing that a
+    perfectly live session had ended, and a dropped connection could not recover. */
+ function lost(){
+   if(over) return;
+   fetch(location.pathname,{cache:'no-store',credentials:'same-origin'}).then(function(r){
+     if(r.status>=400&&r.status<500){ over=true; show('Session ended'); return; }
+     if(!r.ok){ retry('The session is not answering. Retrying…'); return; }
+     retry(everOpened ? 'Connection lost. Reconnecting…'
+       : 'The live view cannot connect. If GuardRail is reached through a reverse proxy, the proxy has to pass '+
+         'WebSocket connections: in Nginx Proxy Manager, turn on “Websockets Support” for this host. Retrying…');
+   },function(){ retry('Connection lost. Reconnecting…'); });
+ }
+ function retry(msg){
+   show(msg);
+   tries++;
+   retryT=setTimeout(connect,Math.min(30000,1000*Math.pow(2,Math.min(tries-1,5))));
+ }
  /* Painting is coalesced to the display refresh, newest-wins. Frames can arrive
     faster than the screen repaints (or faster than a JPEG decodes); decoding one
     per message would put the main thread to work painting stale frames it then
@@ -123,12 +155,12 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
      if(pending!==null) schedule(); // a newer frame landed mid-decode — show it next
    });
  }
- ws.onmessage=function(ev){
+ function onMessage(ev){
    // Text = a notification about the session; binary = a frame of the device.
    if(typeof ev.data==='string'){ onNote(ev.data); return; }
    pending=ev.data; // discard any earlier undrawn frame; only the newest matters
    schedule();
- };
+ }
  var READONLY=__READONLY__;
  if(READONLY){ document.body.classList.add('ro'); document.getElementById('robar').hidden=false;
                document.title='Watching — GuardRail isolated session'; }
@@ -136,7 +168,7 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
     of them goes through send(). A watcher transmits nothing: the gateway discards
     their input anyway, and not sending it is what stops the page acting locally
     as though it had landed. */
- function send(o){ if(READONLY) return; if(ws.readyState===1) ws.send(JSON.stringify(o)); }
+ function send(o){ if(READONLY) return; if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
 
  /* Device dialogs. The device's alert/confirm/prompt runs in the browser on the
     server, so the operator would never see it — and until it is answered the
@@ -213,5 +245,7 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
  cv.addEventListener('keydown',function(e){ e.preventDefault(); var pr=e.key.length===1;
    send({t:'k',e:'down',key:e.key,code:e.code,kc:e.keyCode,text:pr?e.key:'',mod:mods(e)}); });
  cv.addEventListener('keyup',function(e){ e.preventDefault(); send({t:'k',e:'up',key:e.key,code:e.code,kc:e.keyCode,mod:mods(e)}); });
+
+ connect();
 })();
 </script></body></html>`
