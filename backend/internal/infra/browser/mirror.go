@@ -23,16 +23,19 @@ import (
 // terminal's own cols/rows govern where lines wrap, and this only decides how
 // much canvas surrounds them.
 const (
-	mirrorCellW  = 8
-	mirrorCellH  = 17
-	mirrorPadPx  = 16
-	mirrorMinW   = 480
-	mirrorMinH   = 240
-	mirrorMaxW   = 2560
-	mirrorMaxH   = 1440
-	mirrorCols   = 80
-	mirrorRows   = 24
-	mirrorFlushI = 50 * time.Millisecond
+	mirrorCellW = 8
+	mirrorCellH = 17
+	mirrorPadPx = 16
+	mirrorMinW  = 480
+	mirrorMinH  = 240
+	mirrorMaxW  = 2560
+	mirrorMaxH  = 1440
+	mirrorCols  = 80
+	mirrorRows  = 24
+	// At most ten renders a second. Plenty to follow a terminal in playback, and
+	// half the frames of the old twenty while output floods — which matters now
+	// that each frame carries four times the pixels (see mirrorScales).
+	mirrorFlushI = 100 * time.Millisecond
 	// mirrorMaxPending caps output buffered between flushes. A device dumping a
 	// core file faster than the browser can render is not worth an OOM; the frames
 	// already show a screen scrolling too fast to read, which is the truth of what
@@ -94,7 +97,7 @@ func (g *Gateway) OpenMirror(_ context.Context, rec *access.Recording, orgID uui
 	if rows <= 0 {
 		rows = mirrorRows
 	}
-	w, h := mirrorViewport(cols, rows)
+	w, h, scale := mirrorGeometry(cols, rows)
 
 	tabCtx, cancel := chromedp.NewContext(g.allocCtx)
 	m := &mirror{
@@ -122,7 +125,7 @@ func (g *Gateway) OpenMirror(_ context.Context, rec *access.Recording, orgID uui
 		m.rec.add(time.Now(), data)
 	})
 
-	html := term.MirrorPage(term.Options{Watermark: o.Watermark})
+	html := term.MirrorPage(term.Options{Watermark: o.Watermark}, scale)
 	if err := chromedp.Run(tabCtx,
 		emulation.SetDeviceMetricsOverride(w, h, 1, false),
 		chromedp.Navigate("about:blank"),
@@ -144,13 +147,17 @@ func (g *Gateway) OpenMirror(_ context.Context, rec *access.Recording, orgID uui
 			return chromedp.Poll("window.__grReady === true", nil, chromedp.WithPollingTimeout(10*time.Second)).Do(ctx)
 		}),
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			return chromedp.Evaluate(fmt.Sprintf("window.__grResize(%d,%d)", cols, rows), nil).Do(ctx)
+			return chromedp.Evaluate(resizeJS(cols, rows, scale), nil).Do(ctx)
 		}),
+		// Terminal quality, not the isolated browser's: a web page survives JPEG
+		// 60, but text is nothing but edges, and at 60 it came out ringed and
+		// blocky. The limits are the recorder's, not this first viewport's — a
+		// terminal widened later was otherwise captured shrunk to its opening size.
 		page.StartScreencast().
 			WithFormat("jpeg").
-			WithQuality(g.cfg.Quality).
-			WithMaxWidth(w).
-			WithMaxHeight(h),
+			WithQuality(g.cfg.TerminalQuality).
+			WithMaxWidth(mirrorMaxW).
+			WithMaxHeight(mirrorMaxH),
 	); err != nil {
 		cancel()
 		return nil, fmt.Errorf("browser: start terminal mirror: %w", err)
@@ -160,12 +167,35 @@ func (g *Gateway) OpenMirror(_ context.Context, rec *access.Recording, orgID uui
 	return m, nil
 }
 
-// mirrorViewport sizes the tab to the terminal grid, clamped so that neither a
+// mirrorScales are the sizes a mirror is drawn at, largest first, relative to
+// the operator's 13px terminal.
+//
+// Twice the size is what makes a recording readable: the frame is captured at
+// the page's CSS size and the player stretches it to fill its panel, so a mirror
+// drawn at 1x reached the reviewer upscaled two or three times — soft text that
+// JPEG then made blocky. The smaller steps are for wide terminals, where 2x would
+// pass the recorder's frame limit; a 230-column terminal on a big screen is
+// ordinary, and clipping its right-hand side would be worse than a smaller scale.
+var mirrorScales = []float64{2, 1.5, 1}
+
+// mirrorGeometry sizes the tab for a terminal grid: the largest scale whose
+// viewport fits the frame limit, and that viewport, clamped so that neither a
 // tiny nor an absurd geometry produces an unusable recording.
-func mirrorViewport(cols, rows int) (int64, int64) {
-	w := int64(cols*mirrorCellW + mirrorPadPx)
-	h := int64(rows*mirrorCellH + mirrorPadPx)
-	return clamp64(w, mirrorMinW, mirrorMaxW), clamp64(h, mirrorMinH, mirrorMaxH)
+func mirrorGeometry(cols, rows int) (w, h int64, scale float64) {
+	for _, s := range mirrorScales {
+		w = int64(float64(cols*mirrorCellW+mirrorPadPx) * s)
+		h = int64(float64(rows*mirrorCellH+mirrorPadPx) * s)
+		scale = s
+		if w <= mirrorMaxW && h <= mirrorMaxH {
+			break
+		}
+	}
+	return clamp64(w, mirrorMinW, mirrorMaxW), clamp64(h, mirrorMinH, mirrorMaxH), scale
+}
+
+// resizeJS applies a geometry to the mirror page.
+func resizeJS(cols, rows int, scale float64) string {
+	return fmt.Sprintf("window.__grResize(%d,%d,%g)", cols, rows, scale)
 }
 
 func clamp64(v, lo, hi int64) int64 {
@@ -208,7 +238,7 @@ func (m *mirror) Resize(cols, rows int) {
 	if cols <= 0 || rows <= 0 {
 		return
 	}
-	w, h := mirrorViewport(cols, rows)
+	w, h, scale := mirrorGeometry(cols, rows)
 	m.mu.Lock()
 	m.w, m.h = w, h
 	closed := m.closed
@@ -222,7 +252,7 @@ func (m *mirror) Resize(cols, rows int) {
 		_ = chromedp.Run(m.tabCtx,
 			emulation.SetDeviceMetricsOverride(w, h, 1, false),
 			chromedp.ActionFunc(func(ctx context.Context) error {
-				return chromedp.Evaluate(fmt.Sprintf("window.__grResize(%d,%d)", cols, rows), nil).Do(ctx)
+				return chromedp.Evaluate(resizeJS(cols, rows, scale), nil).Do(ctx)
 			}),
 		)
 	}()
@@ -231,8 +261,8 @@ func (m *mirror) Resize(cols, rows int) {
 // pump coalesces buffered output into one browser call per interval.
 //
 // Batching is the whole point. A busy terminal produces many small writes, and
-// one CDP round trip each would cost more than rendering them; at 50ms the
-// browser is asked at most twenty times a second regardless of how chatty the
+// one CDP round trip each would cost more than rendering them; at 100ms the
+// browser is asked at most ten times a second regardless of how chatty the
 // device is, and the frames still land close enough to real time that the replay
 // keeps the session's rhythm.
 func (m *mirror) pump() {

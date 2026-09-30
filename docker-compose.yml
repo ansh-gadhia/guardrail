@@ -335,6 +335,8 @@ services:
       GUARDRAIL_ISOLATION_HEIGHT: ${GUARDRAIL_ISOLATION_HEIGHT:-}
       GUARDRAIL_ISOLATION_QUALITY: ${GUARDRAIL_ISOLATION_QUALITY:-}
       GUARDRAIL_ISOLATION_MAX_FPS: ${GUARDRAIL_ISOLATION_MAX_FPS:-}
+      # JPEG quality of recorded SSH/telnet video; empty is the default, 80.
+      GUARDRAIL_TERMINAL_VIDEO_QUALITY: ${GUARDRAIL_TERMINAL_VIDEO_QUALITY:-}
       # RDP/VNC via the guacd sidecar. Both must agree: this switch wires the
       # gateways, the compose profile starts the daemon.
       GUARDRAIL_DESKTOP_ENABLED: ${GUARDRAIL_DESKTOP_ENABLED:-false}

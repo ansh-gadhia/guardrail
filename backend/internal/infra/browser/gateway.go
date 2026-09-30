@@ -42,6 +42,10 @@ type Config struct {
 	Width      int64
 	Height     int64
 	Quality    int64 // JPEG quality 1..100 for the screencast
+	// TerminalQuality is the JPEG quality of recorded terminal video. Higher
+	// than Quality because terminal frames are nothing but text, which JPEG
+	// blurs first; see OpenMirror.
+	TerminalQuality int64
 	// MaxFPS caps how often a frame is handed to the LIVE viewer. The recorder
 	// still receives every frame. 0 means uncapped. It cannot raise Chrome's own
 	// capture rate; it only limits it, to steady pacing or save CPU/bandwidth.
@@ -82,6 +86,9 @@ func (c *Config) defaults() {
 	}
 	if c.Quality == 0 {
 		c.Quality = 60
+	}
+	if c.TerminalQuality == 0 {
+		c.TerminalQuality = 80
 	}
 	if c.IdleTTL == 0 {
 		c.IdleTTL = 2 * time.Hour

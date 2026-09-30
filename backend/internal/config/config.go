@@ -134,6 +134,9 @@ type BrowserConfig struct {
 	Quality int
 	Width   int
 	Height  int
+	// TerminalQuality is the JPEG quality of recorded terminal video, separate
+	// from Quality because text needs more of it than a web page does.
+	TerminalQuality int
 	// MaxFPS optionally caps how often a frame is pushed to the LIVE viewer
 	// (the recorder still gets every frame). 0 means uncapped — send whatever
 	// Chrome produces. It is a pacing/stability limit, not a way to exceed
@@ -538,9 +541,11 @@ func Load() (*Config, error) {
 			// Lower WIDTH/HEIGHT/QUALITY only if a host is encode- or bandwidth-bound;
 			// measurement shows resolution does not change the frame rate here.
 			Quality: getInt("GUARDRAIL_ISOLATION_QUALITY", 0),
-			Width:   getInt("GUARDRAIL_ISOLATION_WIDTH", 0),
-			Height:  getInt("GUARDRAIL_ISOLATION_HEIGHT", 0),
-			MaxFPS:  getInt("GUARDRAIL_ISOLATION_MAX_FPS", 0),
+			// Recorded terminal video. 0 = the gateway default (80).
+			TerminalQuality: getInt("GUARDRAIL_TERMINAL_VIDEO_QUALITY", 0),
+			Width:           getInt("GUARDRAIL_ISOLATION_WIDTH", 0),
+			Height:          getInt("GUARDRAIL_ISOLATION_HEIGHT", 0),
+			MaxFPS:          getInt("GUARDRAIL_ISOLATION_MAX_FPS", 0),
 		},
 		Desktop: DesktopConfig{
 			Enabled:      getBool("GUARDRAIL_DESKTOP_ENABLED", false),

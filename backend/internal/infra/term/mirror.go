@@ -1,6 +1,9 @@
 package term
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // MirrorPage is the terminal as rendered for RECORDING rather than for a person.
 //
@@ -22,11 +25,22 @@ import "strings"
 //
 // The operator's own session never touches this page. They stay on the native
 // socket, so nothing here can slow down their typing.
-func MirrorPage(o Options) string {
+//
+// scale is how much larger than the operator's own terminal it is drawn: the
+// recording is captured at the page's CSS size, pixel for pixel, and played back
+// stretched to fill the player — so a mirror drawn at the console's 13px came out
+// soft, and JPEG made the soft edges blocky. Drawing the text itself larger is what
+// puts more pixels into the frame; a device scale factor does not reach the
+// screencast. The watermark scales with it so its density does not change.
+func MirrorPage(o Options, scale float64) string {
+	if scale <= 0 {
+		scale = 1
+	}
 	return strings.NewReplacer(
 		"__XTERM_CSS__", xtermCSS,
 		"__XTERM_JS__", xtermJS,
 		"__WATERMARK__", jsString(o.Watermark),
+		"__SCALE__", strconv.FormatFloat(scale, 'f', -1, 64),
 	).Replace(mirrorTmpl)
 }
 
@@ -47,10 +61,13 @@ const mirrorTmpl = `<!doctype html>
      drawn by a client that could remove it. That is the whole difference
      between the overlay on the operator's console (a deterrent) and this one
      (a control). */
-  #wm{position:absolute;inset:0;pointer-events:none;z-index:10;opacity:.10;
-      font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:#fff;
+  /* Font size and gap are set from the scale, below. Larger than the page on
+     every side: the layer is rotated, and a page-sized one left the corners
+     bare — the top left, where a terminal's output starts, among them. */
+  #wm{position:absolute;inset:-50%;pointer-events:none;z-index:10;opacity:.10;
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.6;color:#fff;
       white-space:pre;transform:rotate(-24deg);transform-origin:center;
-      display:flex;flex-wrap:wrap;align-content:center;justify-content:center;gap:38px 64px}
+      display:flex;flex-wrap:wrap;align-content:center;justify-content:center}
 </style>
 </head>
 <body>
@@ -62,7 +79,8 @@ const mirrorTmpl = `<!doctype html>
   var wm = __WATERMARK__;
   if (wm) {
     var host = document.getElementById('wm'), frag = document.createDocumentFragment();
-    for (var i = 0; i < 60; i++) {
+    // Enough to fill the overscanned layer at the largest frame.
+    for (var i = 0; i < 400; i++) {
       var s = document.createElement('span');
       // textContent, never innerHTML: the watermark carries an operator email,
       // and this page also renders device output. Neither gets to be markup.
@@ -78,10 +96,20 @@ const mirrorTmpl = `<!doctype html>
     disableStdin: true,          // nobody types into a mirror
     scrollback: 0,               // the recording IS the scrollback
     fontFamily: 'ui-monospace,SFMono-Regular,Menlo,monospace',
-    fontSize: 13,
+    fontSize: 13 * __SCALE__,
     theme: { background: '#0b0e14' }
   });
   term.open(document.getElementById('t'));
+
+  // The console's own sizes (13px text, a 12px watermark) times the scale.
+  function setScale(s){
+    if (!(s > 0)) return;
+    if (term.options.fontSize !== 13 * s) term.options.fontSize = 13 * s;
+    var w = document.getElementById('wm').style;
+    w.fontSize = (12 * s) + 'px';
+    w.gap = (38 * s) + 'px ' + (64 * s) + 'px';
+  }
+  setScale(__SCALE__);
 
   // Driven from Go over CDP. Base64 in, because the payload is raw terminal
   // bytes — escape sequences, partial UTF-8 runes at chunk boundaries, 0x00 —
@@ -92,7 +120,10 @@ const mirrorTmpl = `<!doctype html>
     term.write(buf);
   };
 
-  window.__grResize = function(cols, rows){
+  // The scale travels with the geometry: a terminal made much wider is drawn at
+  // a smaller scale, so the frame stays within the recorder's size.
+  window.__grResize = function(cols, rows, scale){
+    if (scale) setScale(scale);
     if (cols > 0 && rows > 0) term.resize(cols, rows);
   };
 

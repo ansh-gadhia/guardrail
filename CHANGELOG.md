@@ -14,6 +14,22 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ### Fixed
 
+- **Terminal recordings are sharp.** An SSH or telnet session recorded as video
+  was drawn at the console's 13px, captured pixel for pixel — about 656×424 for
+  an 80×24 terminal — saved as JPEG 60, and then stretched by the player to fill
+  its panel: soft text with blocky JPEG edges. The recording terminal is now
+  drawn at twice the size (1.5× or 1× for wide terminals, so a 200-column
+  session still fits the frame limit instead of being clipped) and saved at JPEG
+  80, which terminal text needs; `GUARDRAIL_TERMINAL_VIDEO_QUALITY` sets it. A
+  terminal widened mid-session is no longer captured shrunk to its opening
+  size. Terminal video is drawn at most ten times a second, down from twenty,
+  which keeps a session flooding output from filling the recording cap four
+  times as fast with the larger frames. Isolated web sessions are unchanged.
+  Recordings made before this keep their old quality.
+- **The watermark covers the whole recorded terminal.** The watermark layer
+  is rotated, and at the page's own size it left the corners of the frame bare
+  — the top left, where a terminal's output starts, among them. It is now drawn
+  past every edge.
 - **Behind a reverse proxy, sessions no longer claim to have ended.** Every
   live session streams over a WebSocket, and a proxy that does not pass them —
   Nginx Proxy Manager with "Websockets Support" off, nginx without the Upgrade
