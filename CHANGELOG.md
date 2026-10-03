@@ -12,6 +12,8 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-10-03
+
 ### Security
 
 - **axios 1.20.0.** The console's HTTP client was at 1.18.1, which carries
