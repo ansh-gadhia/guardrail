@@ -12,6 +12,8 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-03
+
 ### Added
 
 - **Every command on the session timeline.** A terminal session's timeline
