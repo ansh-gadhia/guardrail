@@ -12,6 +12,19 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+### Security
+
+- **axios 1.20.0.** The console's HTTP client was at 1.18.1, which carries
+  seven high-severity advisories fixed in 1.20.0. The release pipeline's
+  dependency scan fails on any high or critical finding, and failed on this one.
+- **react-router-dom 6.30.6.** Fixes the open redirect in 6.30.2–6.30.5
+  (GHSA-jjmj-jmhj-qwj2). Two moderate advisories against the 6.x line remain
+  until a move to React Router 7, and neither is reachable here. The console
+  does not render on the server. The one place it navigates to a path it was
+  given — back to where you were after signing in — can only be one of its own
+  pages: an address that is not one of them goes to "not found" without
+  signing in, so `//elsewhere` and backslash variants never reach that redirect.
+
 ## [1.7.2] - 2026-10-03
 
 ### Added
