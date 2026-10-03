@@ -30,7 +30,7 @@ func (r *SessionEventRepo) RecordEvent(ctx context.Context, sessionID uuid.UUID,
 
 // ListEvents returns a session's timeline, tenant-scoped via the parent session.
 func (r *SessionEventRepo) ListEvents(ctx context.Context, sc access.Scope, sessionID uuid.UUID, limit int) ([]access.Event, error) {
-	limit = normalizeLimit(limit)
+	limit = normalizeLimitUpTo(limit, maxTimelineLimit)
 	var out []access.Event
 	err := r.db.WithScopeIDs(ctx, sc.OrganizationID, sc.IsSuperAdmin, func(tx pgx.Tx) error {
 		// Join to access_sessions so RLS on that table enforces tenant scoping.

@@ -33,6 +33,10 @@ var (
 	// (user EXEC) or "#" (privileged); a Linux-ish box ends at "$".
 	shellPrompt = regexp.MustCompile(`(?m)[>#$]\s*$`)
 
+	// controlSeq is a terminal control sequence: CSI (colour, cursor queries),
+	// OSC (window titles), and the two-byte escapes.
+	controlSeq = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[ -/]*[0-~]`)
+
 	// What rejection looks like. IOS says "% Login invalid" or re-prompts;
 	// others vary. This only has to be good enough to turn a hang into an error.
 	authRejected = regexp.MustCompile(`(?i)(login invalid|authentication failed|access denied|bad password|incorrect|% *bad|% *login|too many)`)
@@ -105,7 +109,12 @@ func (g *Gateway) login(c *conn, cred access.Credential, deadline time.Time) ([]
 			return nil, fmt.Errorf("%w: the device closed the connection during login", access.ErrCredentialUnusable)
 		}
 
-		text := string(window)
+		// Matched without terminal control sequences. A prompt is often followed
+		// by one — BusyBox's shell, on OpenWrt and on most embedded gear, prints
+		// its prompt and then asks the terminal where the cursor is (ESC[6n) —
+		// and an anchored prompt pattern then never matched: every such login
+		// sat out the whole timeout before being let through on trust.
+		text := controlSeq.ReplaceAllString(string(window), "")
 
 		if !sentP && passPrompt.MatchString(text) {
 			if err := typeLine(c, cred.Secret); err != nil {

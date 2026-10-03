@@ -30,7 +30,7 @@ import {
 
    A session recording is stored as one blob of concatenated JPEG frames plus a
    manifest saying where each frame starts and when it was captured. The player
-   fetches both once, slices the blob per frame, and draws to a canvas. That
+   fetches both once, slices the bytes per frame, and draws to a canvas. That
    keeps the server free of any video encoder, and makes seeking exact: any
    frame is one drawImage away, so scrubbing lands on the real pixels rather
    than the nearest keyframe.
@@ -81,7 +81,11 @@ export const SessionPlayer = forwardRef<PlayerHandle, {
   const drawGen = useRef(0);
   const drawn = useRef(-1);
   const [manifest, setManifest] = useState<Manifest | null>(null);
-  const [blob, setBlob] = useState<Blob | null>(null);
+  // The frames as bytes, not as one Blob. A Blob this size lives in the
+  // browser's blob storage, which refuses large ones under memory or disk
+  // pressure — the whole recording then failed to load. Bytes in memory, cut
+  // into a small Blob per frame as it is drawn, have no such ceiling.
+  const [blob, setBlob] = useState<Uint8Array<ArrayBuffer> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -114,11 +118,11 @@ export const SessionPlayer = forwardRef<PlayerHandle, {
       try {
         const [m, f] = await Promise.all([
           api.get<Manifest>(`/sessions/${sessionId}/recording/manifest`),
-          api.get(`/sessions/${sessionId}/recording/frames`, { responseType: "blob" }),
+          api.get(`/sessions/${sessionId}/recording/frames`, { responseType: "arraybuffer" }),
         ]);
         if (cancelled) return;
         setManifest(m.data);
-        setBlob(f.data as Blob);
+        setBlob(new Uint8Array(f.data as ArrayBuffer));
       } catch {
         if (!cancelled) setError("This recording could not be loaded.");
       } finally {
@@ -180,7 +184,7 @@ export const SessionPlayer = forwardRef<PlayerHandle, {
     drawn.current = index;
     const gen = ++drawGen.current;
     void (async () => {
-      const bmp = await createImageBitmap(blob.slice(f.o, f.o + f.l, "image/jpeg"));
+      const bmp = await createImageBitmap(new Blob([blob.subarray(f.o, f.o + f.l)], { type: "image/jpeg" }));
       if (gen !== drawGen.current) {
         bmp.close?.();
         return; // a newer frame was requested while this one decoded

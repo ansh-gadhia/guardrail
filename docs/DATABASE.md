@@ -110,8 +110,12 @@ enumerate the whole inventory.
 - **recording_artifacts**(`id`, `recording_id` FK, `kind`
   (video/screenshot/metadata), `object_key`, `size_bytes`, `content_type`,
   `checksum`, `created_at`)
-- **session_events**(`id`, `access_session_id` FK, `ts`, `kind`
-  (url_change/click/key/nav/resize), `data jsonb`) — timeline for playback
+- **session_events**(`id`, `access_session_id` FK, `ts`, `kind`, `data jsonb`)
+  — the session's activity timeline, an index into its recording. Kinds: web
+  (`url_change`, `request`, `download`, `upload`, `dialog`), terminal
+  (`ssh_open`, `telnet_open`, `telnet_reconnect`, `shell_end`, `command` with
+  `{command, prompt}`, `hidden_input` with `{prompt}` only), desktop
+  (`desktop_open`). Capped per session (2,000 web, 5,000 commands).
 
 ### Audit
 - **audit_events**(`id`, `organization_id` FK-null-for-system, `ts`, `actor_id`,

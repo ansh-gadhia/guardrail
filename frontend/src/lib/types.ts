@@ -428,7 +428,9 @@ export interface SessionStats {
 
 // SessionEvent is one entry in a session's recorded activity timeline
 // (GET /sessions/:id/events) — e.g. a URL the operator navigated to through the
-// proxy. `data` shape varies by `kind` (url_change carries { path, method }).
+// proxy, or a command run in a terminal. `data` shape varies by `kind`
+// (url_change carries { path, method }; command carries { command, prompt };
+// hidden_input carries { prompt } and nothing of what was typed).
 export interface SessionEvent {
   ts: string;
   kind: string;

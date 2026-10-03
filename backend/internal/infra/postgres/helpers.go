@@ -16,6 +16,12 @@ const (
 	// whole filtered set, and bounded anyway because "whole" is not a promise a
 	// tenant with years of history should be able to extract in one response.
 	maxExportLimit = 5000
+	// maxTimelineLimit bounds one session's timeline in one read. A session's
+	// timeline is read whole — it is an index into the recording, and a partial
+	// one hides the end of the session — so the ceiling is set by what a
+	// session can write: up to term.MaxCommands commands, plus the session's
+	// own events. The general list ceiling cut long sessions off at 200 rows.
+	maxTimelineLimit = 6000
 )
 
 func normalizeLimit(l int) int { return normalizeLimitUpTo(l, maxLimit) }

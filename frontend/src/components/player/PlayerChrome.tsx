@@ -25,8 +25,9 @@ import { IconMaximize, IconMinimize } from "@/components/icons";
 
 /** What a player exposes to the page around it, so a timeline entry can drive it. */
 export interface PlayerHandle {
-  /** Jumps to an offset in milliseconds from the start of the recording. */
-  seekTo(ms: number): void;
+  /** Jumps to an offset in milliseconds from the start of the recording. hint
+   *  is text expected there — a command — for a player that can find it. */
+  seekTo(ms: number, hint?: string): void;
 }
 
 /** One flag on the scrubber — a moment the timeline knows about. */

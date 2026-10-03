@@ -5,11 +5,12 @@ import { absLocal, plausibleDate, relTime, sessionSpan, startedOf } from "@/lib/
 import type { Session, SessionEvent, RecordingMeta, AccessRequest } from "@/lib/types";
 import { useAuth } from "@/store/auth";
 import { Badge, StatusBadge, Modal, EmptyState, ErrorNote, Skeleton, Button, cn } from "@/components/ui";
-import { IconFilm, IconTrash, IconAlert, IconDownload, IconClipboard, IconCheck } from "@/components/icons";
+import { IconFilm, IconTrash, IconAlert, IconDownload, IconClipboard, IconCheck, IconSearch } from "@/components/icons";
 import { SessionPlayer } from "@/components/SessionPlayer";
 import { TranscriptPlayer } from "@/components/TranscriptPlayer";
 import { DesktopReplay } from "@/components/DesktopReplay";
 import { fmtClock, type PlayerHandle, type PlayerMarker } from "@/components/player/PlayerChrome";
+import { renderTranscript, type TranscriptManifestLike } from "@/lib/terminalText";
 
 /** The replays a recording can offer. One recording may hold more than one. */
 type ReplayView = "transcript" | "video" | "desktop";
@@ -38,7 +39,9 @@ export function SessionDetail({
 }) {
   const events = useQuery<SessionEvent[]>({
     queryKey: ["session-events", session.id],
-    queryFn: async () => (await api.get<{ data: SessionEvent[] }>(`/sessions/${session.id}/events`, { params: { limit: 500 } })).data.data,
+    // The whole timeline: it is an index into the recording, and a partial one
+    // hides the end of the session. A terminal session logs every command.
+    queryFn: async () => (await api.get<{ data: SessionEvent[] }>(`/sessions/${session.id}/events`, { params: { limit: 6000 } })).data.data,
     refetchInterval: session.status === "active" ? 5_000 : false,
   });
   const recording = useQuery<RecordingMeta>({
@@ -97,8 +100,17 @@ export function SessionDetail({
     [events.data, session, baseMs],
   );
   const [showAssets, setShowAssets] = useState(false);
+  const [filter, setFilter] = useState("");
   const assetCount = useMemo(() => entries.filter((e) => e.asset).length, [entries]);
-  const shown = useMemo(() => (showAssets ? entries : entries.filter((e) => !e.asset)), [entries, showAssets]);
+  const commandCount = useMemo(() => entries.filter((e) => e.kind === "command").length, [entries]);
+  const shown = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return entries.filter(
+      (e) =>
+        (showAssets || !e.asset) &&
+        (!q || e.label.toLowerCase().includes(q) || (e.detail ?? "").toLowerCase().includes(q)),
+    );
+  }, [entries, showAssets, filter]);
   const markers = useMemo<PlayerMarker[]>(
     () =>
       shown
@@ -106,7 +118,8 @@ export function SessionDetail({
         .map((e) => ({ ms: e.ms, label: e.label, tone: e.tone })),
     [shown],
   );
-  const seekable = available.length > 0 && view !== "transcript";
+  // Every replay can be jumped around in now; the transcript finds the line.
+  const seekable = available.length > 0;
 
   const has = useAuth((s) => s.has);
   const qc = useQueryClient();
@@ -163,6 +176,7 @@ export function SessionDetail({
               deviceLabel={deviceLabel}
               userLabel={userLabel}
               available={available}
+              events={events.data ?? []}
             />
             <button className="btn-ghost" onClick={onClose}>
               Close
@@ -178,7 +192,10 @@ export function SessionDetail({
         </div>
       )}
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1.9fr)_minmax(0,1fr)]">
-        <div className="min-w-0">
+        {/* The replay stays in view while the details beside it scroll: the
+            timeline is at the bottom of that column, and a command clicked
+            there moves a replay that has to be on screen to be any use. */}
+        <div className="min-w-0 lg:sticky lg:top-0 lg:self-start">
           {recording.isLoading ? (
             <Skeleton className="h-72" />
           ) : notRecorded ? (
@@ -222,7 +239,9 @@ export function SessionDetail({
                   markers={markers}
                 />
               )}
-              {view === "transcript" && <TranscriptPlayer sessionId={session.id} />}
+              {view === "transcript" && (
+                <TranscriptPlayer ref={playerRef} sessionId={session.id} onTimeChange={setPosMs} />
+              )}
               {view === "desktop" && (
                 <DesktopReplay
                   ref={playerRef}
@@ -283,6 +302,11 @@ export function SessionDetail({
             <div className="mb-2 flex items-center justify-between gap-2">
               <span className="text-2xs font-semibold uppercase tracking-wider text-faint">Activity timeline</span>
               <div className="flex items-center gap-2">
+                {commandCount > 0 && (
+                  <span className="text-2xs text-faint">
+                    {commandCount} {commandCount === 1 ? "command" : "commands"} ·
+                  </span>
+                )}
                 {assetCount > 0 && (
                   <button
                     type="button"
@@ -299,16 +323,29 @@ export function SessionDetail({
                 )}
               </div>
             </div>
+            {entries.length > 12 && (
+              <div className="relative mb-2">
+                <IconSearch size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-faint" />
+                <input
+                  className="input h-7 w-full pl-6 text-2xs"
+                  placeholder={commandCount ? "Filter — a command, a path, a prompt…" : "Filter the timeline…"}
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                />
+              </div>
+            )}
             {events.isLoading ? (
               <Skeleton className="h-32" />
             ) : shown.length === 0 ? (
-              <EmptyState message="Nothing was recorded on this session's timeline." />
+              <EmptyState
+                message={filter.trim() ? "Nothing on the timeline matches." : "Nothing was recorded on this session's timeline."}
+              />
             ) : (
-              <div className="max-h-72 overflow-auto pr-1">
+              <div className="max-h-96 overflow-auto pr-1">
                 <ActivityTimeline
                   entries={shown}
                   currentMs={posMs}
-                  onSeek={seekable ? (ms) => playerRef.current?.seekTo(ms) : undefined}
+                  onSeek={seekable ? (ms, hint) => playerRef.current?.seekTo(ms, hint) : undefined}
                 />
               </div>
             )}
@@ -341,7 +378,17 @@ export function SessionDetail({
 /** One row: a recorded event, or one of the two synthetic session bookends. */
 interface TimelineEntry {
   key: string;
-  kind: "session" | "url_change" | "request" | "download" | "upload" | "dialog" | "other";
+  kind:
+    | "session"
+    | "url_change"
+    | "request"
+    | "download"
+    | "upload"
+    | "dialog"
+    | "command"
+    | "hidden"
+    | "connection"
+    | "other";
   /** Offset into the recording, or null when it cannot be placed against one. */
   ms: number | null;
   ts?: string;
@@ -350,6 +397,8 @@ interface TimelineEntry {
   detail?: string;
   asset?: boolean;
   tone?: PlayerMarker["tone"];
+  /** Text the replay should find at this moment — a command, for the transcript. */
+  hint?: string;
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -470,10 +519,64 @@ function buildTimeline(events: SessionEvent[], session: Session, baseMs: number 
           tone: "warn",
         });
         break;
+      case "command": {
+        // Read off the operator's screen, so it is the command as it ran — after
+        // tab completion, history recall and corrections. A pasted block is one
+        // entry; the row shows its first line.
+        const cmd = str(e.data?.command);
+        const [first, ...more] = cmd.split("\n");
+        rows.push({
+          ...common,
+          kind: "command",
+          label: more.length ? `${first}  (+${more.length} more ${more.length === 1 ? "line" : "lines"})` : first,
+          detail: str(e.data?.prompt) || undefined,
+          hint: cmd,
+        });
+        break;
+      }
+      case "hidden_input":
+        // A password, passphrase or similar, typed at a prompt that did not show
+        // it. That it happened is evidence; what it was is not recorded anywhere.
+        rows.push({
+          ...common,
+          kind: "hidden",
+          label: "Answered a prompt that hides what is typed",
+          detail: `${str(e.data?.prompt) || "(prompt)"} — the answer is not recorded`,
+          hint: str(e.data?.prompt) || undefined,
+          tone: "warn",
+        });
+        break;
+      case "ssh_open":
+        rows.push({ ...common, kind: "connection", label: "Shell opened", detail: str(e.data?.host) || undefined });
+        break;
+      case "telnet_open":
+        rows.push({ ...common, kind: "connection", label: "Connected over Telnet", detail: str(e.data?.host) || undefined });
+        break;
+      case "telnet_reconnect":
+        rows.push({ ...common, kind: "connection", label: "Reconnected to the device", detail: str(e.data?.host) || undefined });
+        break;
+      case "shell_end": {
+        const how = str(e.data?.how);
+        const status = typeof e.data?.status === "number" ? e.data.status : undefined;
+        rows.push({
+          ...common,
+          kind: "connection",
+          label:
+            how === "lost"
+              ? "The device dropped the connection"
+              : how === "closed"
+                ? "The device closed the connection"
+                : status !== undefined
+                  ? `Shell exited (status ${status})`
+                  : "Shell exited",
+          tone: how === "lost" ? "warn" : undefined,
+        });
+        break;
+      }
       default:
-        // Gateway-specific openings (ssh_open, telnet_open, desktop_open) and
-        // anything a later version adds. Rendering the kind verbatim beats
-        // dropping a row nobody thought to teach this switch about.
+        // Gateway-specific openings (desktop_open) and anything a later version
+        // adds. Rendering the kind verbatim beats dropping a row nobody thought
+        // to teach this switch about.
         rows.push({ ...common, kind: "other", label: path || e.kind.replace(/_/g, " "), tone: "accent" });
     }
   });
@@ -498,6 +601,9 @@ const DOT_TONE: Record<TimelineEntry["kind"], string> = {
   download: "bg-danger",
   upload: "bg-danger",
   dialog: "bg-warn",
+  command: "bg-accent/40",
+  hidden: "bg-warn",
+  connection: "bg-faint",
   other: "bg-accent/70",
 };
 
@@ -508,7 +614,7 @@ function ActivityTimeline({
 }: {
   entries: TimelineEntry[];
   currentMs: number;
-  onSeek?: (ms: number) => void;
+  onSeek?: (ms: number, hint?: string) => void;
 }) {
   // Which row the playhead is standing on: the last one at or before it. Derived
   // rather than tracked, so it stays correct through scrubbing and speed changes.
@@ -532,8 +638,8 @@ function ActivityTimeline({
             <button
               type="button"
               disabled={!seekable}
-              onClick={() => seekable && onSeek(e.ms as number)}
-              title={e.detail ? `${e.label} — ${e.detail}` : e.label}
+              onClick={() => seekable && onSeek(e.ms as number, e.hint)}
+              title={e.kind === "command" ? `${e.detail ? e.detail + " " : ""}${e.hint}` : e.detail ? `${e.label} — ${e.detail}` : e.label}
               className={cn(
                 "flex w-full items-start gap-2 rounded-lg py-1.5 pl-5 pr-1 text-left transition",
                 seekable ? "cursor-pointer hover:bg-surface-2/60" : "cursor-default",
@@ -562,16 +668,25 @@ function ActivityTimeline({
                   {e.kind === "download" && (
                     <span className="shrink-0 font-mono text-2xs font-semibold text-danger">GOT</span>
                   )}
+                  {e.kind === "command" && (
+                    <span className="shrink-0 select-none font-mono text-2xs font-semibold text-accent">$</span>
+                  )}
                   <span
                     className={cn(
                       "truncate text-xs",
-                      e.kind === "session" || e.kind === "dialog" ? "text-muted" : "font-mono text-fg",
+                      e.kind === "session" || e.kind === "dialog" || e.kind === "connection" || e.kind === "hidden"
+                        ? "text-muted"
+                        : "font-mono text-fg",
                     )}
                   >
                     {e.label}
                   </span>
                 </span>
-                {e.detail && <span className="block truncate text-2xs text-faint">{e.detail}</span>}
+                {e.detail && (
+                  <span className={cn("block truncate text-2xs text-faint", e.kind === "command" && "font-mono")}>
+                    {e.detail}
+                  </span>
+                )}
               </span>
               <span className="shrink-0 text-right">
                 <span className="block font-mono text-2xs tabular-nums text-muted">
@@ -595,30 +710,36 @@ function ActivityTimeline({
    read of artifacts the reviewer can already replay — the export adds no new
    access, it just writes them to a file. */
 
-/** Strips ANSI/VT control sequences so an exported transcript is readable text.
- *
- *  The stored transcript is exactly what the device emitted, escape codes and
- *  all, because that is what makes it faithful and replayable. A .txt full of
- *  `ESC[1;32m` is faithful and unreadable, and the point of exporting is that
- *  somebody outside GuardRail can read it — so the export strips them and the
- *  original stays untouched in the blob store. */
-function stripAnsi(s: string): string {
-  return (
-    s
-      // OSC (window title and friends): ESC ] ... terminated by BEL or ST.
-      // Removed first, because its payload can contain bytes the CSI pattern
-      // below would otherwise chew into.
-      .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
-      // CSI: ESC [ params intermediates final. Covers colour, cursor moves and
-      // erase-line — the bulk of what a terminal session emits.
-      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
-      // Remaining two-character escapes (ESC =, ESC >, charset selects).
-      .replace(/\x1b[@-Z\\-_]/g, "")
-      // A bare CR redraws the current line — progress bars, spinners. Kept as a
-      // newline so the export shows the successive states rather than one line
-      // overwritten into nonsense.
-      .replace(/\r(?!\n)/g, "\n")
-  );
+/** The exported transcript: the lines as the terminal showed them (see
+ *  renderTranscript), which is what makes it readable outside GuardRail. The
+ *  stored transcript keeps every byte the device emitted, escape codes and all;
+ *  that is what makes it faithful and replayable, and it stays untouched. */
+function transcriptText(bytes: Uint8Array, manifest: TranscriptManifestLike): string {
+  return renderTranscript(bytes, manifest)
+    .lines.map((l) =>
+      l.marker === "fullscreen-start"
+        ? "---- full-screen program: what it showed ----"
+        : l.marker === "fullscreen-end"
+          ? "---- end of full-screen program ----"
+          : l.text,
+    )
+    .join("\n");
+}
+
+/** The commands from the timeline, for the head of an exported transcript. */
+function commandList(events: SessionEvent[]): string {
+  const rows = events.flatMap((e) => {
+    const at = plausibleDate(e.ts)?.toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z") ?? "";
+    if (e.kind === "command") {
+      const prompt = str(e.data?.prompt);
+      const cmd = str(e.data?.command).replace(/\n/g, "\n" + " ".repeat(at.length + 3));
+      return [`${at}   ${prompt ? prompt + " " : ""}${cmd}`];
+    }
+    if (e.kind === "hidden_input") return [`${at}   ${str(e.data?.prompt)} (hidden input, not recorded)`];
+    return [];
+  });
+  if (!rows.length) return "";
+  return ["Commands (UTC)", "", ...rows, "", "-".repeat(72), ""].join("\n");
 }
 
 /** A filename that identifies the session without needing the console open. */
@@ -680,11 +801,13 @@ function ExportRecording({
   deviceLabel,
   userLabel,
   available,
+  events,
 }: {
   session: Session;
   deviceLabel?: string;
   userLabel?: string;
   available: ReplayView[];
+  events: SessionEvent[];
 }) {
   const [busy, setBusy] = useState<ReplayView | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -716,11 +839,15 @@ function ExportRecording({
     try {
       const base = exportBase(session, deviceLabel);
       if (v === "transcript") {
-        const { data } = await api.get(`/sessions/${session.id}/recording/transcript`, {
-          responseType: "arraybuffer",
-        });
-        const text = new TextDecoder().decode(new Uint8Array(data as ArrayBuffer));
-        download(new Blob([header + stripAnsi(text)], { type: "text/plain;charset=utf-8" }), `${base}-transcript.txt`);
+        const [{ data }, m] = await Promise.all([
+          api.get(`/sessions/${session.id}/recording/transcript`, { responseType: "arraybuffer" }),
+          api.get<TranscriptManifestLike>(`/sessions/${session.id}/recording/transcript/manifest`),
+        ]);
+        const text = transcriptText(new Uint8Array(data as ArrayBuffer), m.data);
+        download(
+          new Blob([header + commandList(events) + text], { type: "text/plain;charset=utf-8" }),
+          `${base}-transcript.txt`,
+        );
       } else if (v === "desktop") {
         // A Guacamole protocol dump. Exported as-is: it is replayable by
         // guacamole tooling, and re-encoding it here would be inventing a format.

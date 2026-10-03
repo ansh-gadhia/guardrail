@@ -197,6 +197,8 @@ func (g *Gateway) dispatch(s *telnetSession, data []byte) {
 		// window manager can emit one with nobody at the keyboard, so counting it
 		// as activity would keep an abandoned session alive past its idle timeout.
 		g.touch(s)
+		// Before the device sees it; see sshgw.
+		s.cmds.Input([]byte(m.D))
 		if dev != nil {
 			// A connection that has just ended refuses the write; its end reaches
 			// the window through the done channel, not through this.
@@ -215,6 +217,7 @@ func (g *Gateway) dispatch(s *telnetSession, data []byte) {
 		if s.mirror != nil {
 			s.mirror.Resize(m.Cols, m.Rows)
 		}
+		s.cmds.Resize(m.Cols, m.Rows)
 		if dev != nil {
 			_ = dev.Resize(m.Cols, m.Rows)
 		}

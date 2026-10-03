@@ -166,6 +166,13 @@ type sshSession struct {
 	// captured as video. nil unless the device's policy asks for video and a
 	// browser was available to open one.
 	mirror access.TerminalMirror
+	// cmds puts each command the operator runs on the session's timeline, read
+	// from the screen (see term.CommandLog), and activity writes those entries.
+	// Both nil unless the session is recorded: a command log is a recording of
+	// what was done, and a device with recording switched off must not get one
+	// by another name.
+	cmds     *term.CommandLog
+	activity *term.Activity
 
 	// obs is the set of read-only supervisors watching this session, and the
 	// recent output a newly-arrived one is shown first.
@@ -300,10 +307,19 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 				sess.rec = term.NewRecorder(g.cfg.MaxRecordingBytes)
 			}
 			sess.mirror = g.openMirror(ctx, rec, s.OrganizationID, ep, sess.watermark)
+			if sess.activity = term.NewActivity(g.deps.Events, s.ID, g.deps.Log); sess.activity != nil {
+				sess.cmds = term.NewCommandLog(0, 0, sess.activity.Record)
+			}
 		}
 	}
 
 	if err := g.connect(ctx, sess); err != nil {
+		// Nothing is registered yet, so End will never find this session to clean
+		// it up: what was opened for it is closed here. The mirror above all — it
+		// is a browser tab, and leaking one on every failed connection to a
+		// filmed device spent the host's memory until the process restarted.
+		sess.activity.Close()
+		sess.closeMirror()
 		return access.LiveSession{}, err
 	}
 
@@ -432,6 +448,10 @@ func (g *Gateway) teardown(s *sshSession) error {
 	if s.client != nil {
 		_ = s.client.Close()
 	}
+	// After the device is gone, so nothing more can arrive; before the slow
+	// flushes below, so the last commands are written while the session's
+	// timeline is still being read.
+	s.activity.Close()
 	// The mirror is closed even when there is no transcript: the two captures are
 	// independent, and an early return here would leave a Chromium tab running for
 	// the life of the process on a video-only device.
@@ -546,4 +566,14 @@ func (g *Gateway) openMirror(ctx context.Context, rec *access.Recording, orgID u
 		return nil
 	}
 	return m
+}
+
+// closeMirror stops video capture for a session that never got going.
+func (s *sshSession) closeMirror() {
+	if s.mirror == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = s.mirror.Close(ctx)
 }

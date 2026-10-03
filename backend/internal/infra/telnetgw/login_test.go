@@ -266,3 +266,33 @@ func TestRedactLeavesOtherOutputAlone(t *testing.T) {
 		t.Errorf("empty secret changed the output: %q", got)
 	}
 }
+
+// BusyBox's shell prints its prompt and then asks the terminal where the
+// cursor is. The prompt is still the prompt: login must finish there, not sit
+// out its whole timeout and go ahead on trust.
+func TestLoginSeesAPromptFollowedByAControlSequence(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"busybox cursor query": "a909ddb648ed:~$ \x1b[6n",
+		"coloured prompt":      "\x1b[01;32mop@host\x1b[00m:\x1b[01;34m~\x1b[00m$ \x1b[0m",
+		"title then prompt":    "\x1b]0;op@host: ~\x07router# \x1b[?2004h",
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, far := pipeConn(t)
+			g := testGateway()
+			go func() {
+				_, _ = far.Write([]byte("\r\nlogin: "))
+				_, _ = readLine(far)
+				_, _ = far.Write([]byte("\r\nPassword: "))
+				_, _ = readLine(far)
+				_, _ = far.Write([]byte("\r\nWelcome!\r\n\r\n" + prompt))
+			}()
+			start := time.Now()
+			if _, err := g.login(c, pwCred("op", "pw"), time.Now().Add(10*time.Second)); err != nil {
+				t.Fatalf("login: %v", err)
+			}
+			if took := time.Since(start); took > 2*time.Second {
+				t.Errorf("login took %s: the prompt was not recognised, the timeout was", took)
+			}
+		})
+	}
+}

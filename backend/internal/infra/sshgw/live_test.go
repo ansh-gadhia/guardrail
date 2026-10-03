@@ -1,6 +1,7 @@
 package sshgw
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -28,6 +29,10 @@ type testSSHServer struct {
 	password string
 	// echo is what the fake shell prints once a session opens.
 	banner string
+	// prompt, when set, makes the fake shell behave like a line-oriented one:
+	// it shows the prompt after the banner and after every Enter, and answers
+	// an Enter with a new line as a real terminal does.
+	prompt string
 
 	mu       sync.Mutex
 	received []byte
@@ -119,7 +124,7 @@ func (s *testSSHServer) handle(c net.Conn) {
 					s.mu.Lock()
 					s.shells++
 					s.mu.Unlock()
-					_, _ = ch.Write([]byte(s.banner))
+					_, _ = ch.Write([]byte(s.banner + s.prompt))
 				}
 			}
 		}()
@@ -133,7 +138,11 @@ func (s *testSSHServer) handle(c net.Conn) {
 					s.received = append(s.received, buf[:n]...)
 					s.mu.Unlock()
 					// Echo back so the transcript has device output to capture.
-					_, _ = ch.Write(buf[:n])
+					out := buf[:n]
+					if s.prompt != "" {
+						out = bytes.ReplaceAll(out, []byte("\r"), []byte("\r\n"+s.prompt))
+					}
+					_, _ = ch.Write(out)
 				}
 				if err != nil {
 					return

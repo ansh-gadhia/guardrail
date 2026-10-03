@@ -325,3 +325,35 @@ func TestIntegration_SessionRecordsWhoEndedIt(t *testing.T) {
 		t.Errorf("a later update erased who ended it: by=%v reason=%q", again.EndedBy, again.EndReason)
 	}
 }
+
+// A session's timeline is read whole. The general list ceiling of 200 rows used
+// to apply here too, so a session with more than 200 entries — any working
+// terminal session, now that it logs every command — showed its first 200 and
+// silently dropped the rest, the end of the session included.
+func TestIntegration_LongTimelineIsReadWhole(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+
+	fx := newFixtures(t)
+	devices := postgres.NewDeviceRepo(pg)
+	sessions := postgres.NewAccessSessionRepo(pg)
+	users := postgres.NewUserRepo(pg)
+	now := time.Now()
+	id := fx.newSession(sessions, fx.newIdleUser(users), fx.newIdleDevice(devices, 30), &now)
+
+	events := postgres.NewSessionEventRepo(pg)
+	const n = 450
+	for i := 0; i < n; i++ {
+		if err := events.RecordEvent(ctx, id, "command", map[string]any{"command": "show run", "prompt": "R1#"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := events.ListEvents(ctx, domaccess.Scope{OrganizationID: defaultOrgID}, id, 6000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != n {
+		t.Errorf("read back %d of %d timeline entries", len(got), n)
+	}
+}

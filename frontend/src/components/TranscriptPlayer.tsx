@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { Spinner, cn } from "@/components/ui";
 import { IconSearch, IconAlert, IconChevronUp, IconChevronDown, IconCommand } from "@/components/icons";
+import { renderTranscript } from "@/lib/terminalText";
+import type { PlayerHandle } from "@/components/player/PlayerChrome";
 
 /* The SSH transcript viewer.
 
@@ -25,94 +27,14 @@ interface TranscriptManifest {
   cols: number;
   rows: number;
   chunks: Chunk[];
+  // Size changes during the session, so the bytes are laid out at the width the
+  // device wrote them for. Absent from transcripts recorded before 1.8.
+  resizes?: { offset_ms: number; at: number; cols: number; rows: number }[];
+  initial_cols?: number;
+  initial_rows?: number;
   // The transcript hit its byte cap. A reviewer must be told, or they will read a
   // partial session as a complete one.
   truncated?: boolean;
-}
-
-/* renderTerminal turns raw terminal output into the lines a person saw.
-
-   The bytes are not plain text: they carry the escape sequences that colour the
-   prompt, redraw progress bars and move the cursor. Dumping them raw shows
-   "ESC[0;32m" noise around every word and makes the transcript unsearchable,
-   which defeats the point of keeping text. So the control layer is interpreted
-   just enough to recover the visible characters:
-
-   - CSI (ESC[...) and OSC (ESC]...) sequences are dropped — colour and title
-     changes leave no character behind.
-   - \r returns to the start of the line, so what follows overwrites it. This is
-     what a progress bar or a spinner does; without it a one-line download meter
-     unrolls into hundreds of lines.
-   - \b erases the character before it, which is how a terminal shows a
-     correction.
-
-   This is not a terminal emulator: full cursor addressing (a curses UI like
-   `top`) will not reconstruct perfectly. It reconstructs what a scrolling shell
-   session prints, which is what an SSH audit trail is nearly always made of. */
-export function renderTerminal(raw: string): string[] {
-  const lines: string[] = [];
-  let line = "";
-  let col = 0;
-
-  const put = (ch: string) => {
-    // Overwrite at the cursor rather than always appending: after a \r the
-    // cursor is back at column 0 and the old text is still there.
-    if (col < line.length) line = line.slice(0, col) + ch + line.slice(col + 1);
-    else line += ch;
-    col++;
-  };
-
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i];
-
-    if (ch === "\x1b") {
-      const next = raw[i + 1];
-      if (next === "[") {
-        // CSI: parameters, then a final byte in @-~.
-        let j = i + 2;
-        while (j < raw.length && !/[@-~]/.test(raw[j])) j++;
-        i = j;
-        continue;
-      }
-      if (next === "]") {
-        // OSC: runs until BEL or ESC\.
-        let j = i + 2;
-        while (j < raw.length && raw[j] !== "\x07" && !(raw[j] === "\x1b" && raw[j + 1] === "\\")) j++;
-        i = raw[j] === "\x1b" ? j + 1 : j;
-        continue;
-      }
-      // Any other two-byte escape (charset selection and friends).
-      i++;
-      continue;
-    }
-
-    if (ch === "\n") {
-      lines.push(line);
-      line = "";
-      col = 0;
-      continue;
-    }
-    if (ch === "\r") {
-      col = 0;
-      continue;
-    }
-    if (ch === "\b") {
-      if (col > 0) col--;
-      continue;
-    }
-    if (ch === "\t") {
-      // Tabs land on 8-column stops; spaces keep the column arithmetic honest.
-      const stop = 8 - (col % 8);
-      for (let k = 0; k < stop; k++) put(" ");
-      continue;
-    }
-    // Drop the remaining C0 controls (BEL and friends): they are events, not
-    // characters, and rendering them as glyphs is noise.
-    if (ch < " " && ch !== " ") continue;
-    put(ch);
-  }
-  if (line.length) lines.push(line);
-  return lines;
 }
 
 function hhmmss(ms: number): string {
@@ -124,13 +46,24 @@ function hhmmss(ms: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
 
-export function TranscriptPlayer({ sessionId }: { sessionId: string }) {
+/* The lines are shown as the terminal showed them: not wrapped. A terminal
+   lays output out in columns padded with spaces — `ls`, `ip addr`, a routing
+   table — and re-wrapping those lines to the width of this panel scattered the
+   columns down the page with gaps between them. Long lines scroll sideways
+   instead; wrapping is a click away for someone reading a long one. */
+export const TranscriptPlayer = forwardRef<
+  PlayerHandle,
+  { sessionId: string; onTimeChange?: (ms: number) => void }
+>(function TranscriptPlayer({ sessionId, onTimeChange }, ref) {
   const [manifest, setManifest] = useState<TranscriptManifest | null>(null);
-  const [text, setText] = useState<string>("");
+  const [bytes, setBytes] = useState<Uint8Array | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
+  const [wrap, setWrap] = useState(false);
+  // The line the timeline last jumped to, highlighted until the next jump.
+  const [focus, setFocus] = useState<number | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -151,9 +84,7 @@ export function TranscriptPlayer({ sessionId }: { sessionId: string }) {
         ]);
         if (cancelled) return;
         setManifest(m.data);
-        // A device may emit bytes that are not valid UTF-8. Decoding leniently
-        // replaces them rather than throwing away the whole transcript.
-        setText(new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(t.data as ArrayBuffer)));
+        setBytes(new Uint8Array(t.data as ArrayBuffer));
       } catch {
         if (!cancelled) setError("The transcript could not be loaded.");
       } finally {
@@ -165,7 +96,11 @@ export function TranscriptPlayer({ sessionId }: { sessionId: string }) {
     };
   }, [sessionId]);
 
-  const lines = useMemo(() => renderTerminal(text), [text]);
+  const rendered = useMemo(
+    () => (bytes && manifest ? renderTranscript(bytes, manifest) : { lines: [], chunkLine: [] }),
+    [bytes, manifest],
+  );
+  const lines = rendered.lines;
 
   // Which lines match, in order. Case-insensitive: nobody searching a transcript
   // for an incident knows the case the device chose to print it in.
@@ -173,20 +108,58 @@ export function TranscriptPlayer({ sessionId }: { sessionId: string }) {
     const q = query.trim().toLowerCase();
     if (!q) return [];
     const out: number[] = [];
-    lines.forEach((l, i) => l.toLowerCase().includes(q) && out.push(i));
+    lines.forEach((l, i) => l.text.toLowerCase().includes(q) && out.push(i));
     return out;
   }, [lines, query]);
 
   useEffect(() => setActive(0), [query]);
 
-  // Keep the current match on screen as the reviewer steps through.
-  useEffect(() => {
-    if (!matches.length) return;
-    bodyRef.current?.querySelector<HTMLElement>(`[data-line="${matches[active]}"]`)?.scrollIntoView({
+  const reveal = (i: number) =>
+    bodyRef.current?.querySelector<HTMLElement>(`[data-line="${i}"]`)?.scrollIntoView({
       block: "center",
       behavior: "smooth",
     });
+
+  // Keep the current match on screen as the reviewer steps through.
+  useEffect(() => {
+    if (matches.length) reveal(matches[active]);
   }, [active, matches]);
+
+  // The timeline jumps here. A moment is turned into a line through the index —
+  // the chunk the device was printing at that moment, and the line the cursor
+  // was on once it had — and then, because the timeline's clock and the
+  // recorder's start a moment apart, onto the nearest line that carries the
+  // command itself.
+  useImperativeHandle(
+    ref,
+    () => ({
+      seekTo(ms: number, hint?: string) {
+        if (!manifest || !lines.length) return;
+        const chunks = manifest.chunks ?? [];
+        let c = -1;
+        for (let i = 0; i < chunks.length && chunks[i].offset_ms <= ms + 250; i++) c = i;
+        let target = c < 0 ? 0 : (rendered.chunkLine[c] ?? 0);
+        const needle = hint?.split("\n")[0].trim();
+        if (needle) {
+          const near = (i: number) => i >= 0 && i < lines.length && lines[i].text.includes(needle);
+          for (let d = 0; d <= 60; d++) {
+            if (near(target - d)) {
+              target -= d;
+              break;
+            }
+            if (d <= 5 && near(target + d)) {
+              target += d;
+              break;
+            }
+          }
+        }
+        setFocus(target);
+        reveal(target);
+        onTimeChange?.(ms);
+      },
+    }),
+    [manifest, lines, rendered, onTimeChange],
+  );
 
   const duration = manifest?.chunks?.length ? manifest.chunks[manifest.chunks.length - 1].offset_ms : 0;
   const step = (d: number) => matches.length && setActive((a) => (a + d + matches.length) % matches.length);
@@ -248,6 +221,15 @@ export function TranscriptPlayer({ sessionId }: { sessionId: string }) {
             </button>
           </div>
         )}
+        <button
+          type="button"
+          className={cn("btn-ghost h-7 shrink-0 px-2 text-2xs", wrap && "text-accent")}
+          aria-pressed={wrap}
+          title={wrap ? "Show lines as the terminal did, scrolling sideways" : "Wrap long lines to the panel"}
+          onClick={() => setWrap((w) => !w)}
+        >
+          Wrap
+        </button>
         <span className="shrink-0 text-2xs text-faint">
           {lines.length.toLocaleString()} lines · {hhmmss(duration)}
         </span>
@@ -263,21 +245,41 @@ export function TranscriptPlayer({ sessionId }: { sessionId: string }) {
         </p>
       )}
 
-      <div ref={bodyRef} className="h-72 overflow-auto bg-[#0b0e14] p-3 font-mono text-xs leading-[1.45]">
-        {lines.map((l, i) => (
-          <div
-            key={i}
-            data-line={i}
-            className={cn(
-              "whitespace-pre-wrap break-all",
-              matches.length && matches[active] === i ? "bg-accent/25" : query.trim() && matches.includes(i) && "bg-accent/10",
-            )}
-          >
-            <span className="select-none pr-3 text-[#3d4657]">{String(i + 1).padStart(4, " ")}</span>
-            <span className="text-[#c3cddb]">{l || " "}</span>
-          </div>
-        ))}
+      <div ref={bodyRef} className="h-72 overflow-auto bg-[#0b0e14] p-3 font-mono text-xs leading-[1.4]">
+        <div className={wrap ? undefined : "w-max min-w-full"}>
+          {lines.map((l, i) =>
+            l.marker ? (
+              <div
+                key={i}
+                data-line={i}
+                className="my-1 flex select-none items-center gap-2 pl-10 text-2xs italic text-[#5c6a80]"
+              >
+                <span className="h-px w-4 bg-[#2a3344]" />
+                {l.marker === "fullscreen-start"
+                  ? "full-screen program — what it showed"
+                  : "end of full-screen program"}
+                <span className="h-px w-4 bg-[#2a3344]" />
+              </div>
+            ) : (
+              <div
+                key={i}
+                data-line={i}
+                className={cn(
+                  wrap ? "whitespace-pre-wrap break-all" : "whitespace-pre",
+                  focus === i
+                    ? "bg-accent/25"
+                    : matches.length && matches[active] === i
+                      ? "bg-accent/25"
+                      : query.trim() && matches.includes(i) && "bg-accent/10",
+                )}
+              >
+                <span className="select-none pr-3 text-[#3d4657]">{String(i + 1).padStart(4, " ")}</span>
+                <span className="text-[#c3cddb]">{l.text || " "}</span>
+              </div>
+            ),
+          )}
+        </div>
       </div>
     </div>
   );
-}
+});

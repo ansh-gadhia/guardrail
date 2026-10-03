@@ -264,8 +264,30 @@ func (g *Gateway) readShell(s *sshSession, sess *ssh.Session, stdout io.Reader, 
 	s.mu.Lock()
 	s.shellErr = err
 	s.stdin = nil
+	closed := s.closed
 	s.mu.Unlock()
+	if !closed {
+		// The shell went while the session lives on: the operator exited it, or
+		// the device dropped the connection. The timeline says which, because a
+		// gap before a reconnect reads very differently in each case.
+		s.activity.Record("shell_end", shellEnd(err))
+	}
 	close(done)
+}
+
+// shellEnd describes how a shell ended, for the timeline.
+func shellEnd(err error) map[string]any {
+	var exit *ssh.ExitError
+	switch {
+	case err == nil:
+		return map[string]any{"how": "exit", "status": 0}
+	case errors.As(err, &exit):
+		return map[string]any{"how": "exit", "status": exit.ExitStatus()}
+	case isNormalClose(err):
+		return map[string]any{"how": "exit"}
+	default:
+		return map[string]any{"how": "lost"}
+	}
 }
 
 // endedCleanly reports whether the last shell ended by exiting, as opposed to
@@ -288,6 +310,9 @@ func (g *Gateway) dispatch(s *sshSession, data []byte) {
 		// window manager can emit one with nobody at the keyboard, so counting it
 		// as activity would keep an abandoned session alive past its idle timeout.
 		g.touch(s)
+		// Before the device sees it, so the command log knows an Enter is coming
+		// before the device's answer to it can arrive.
+		s.cmds.Input([]byte(m.D))
 		s.mu.Lock()
 		stdin := s.stdin
 		s.mu.Unlock()
@@ -310,6 +335,7 @@ func (g *Gateway) dispatch(s *sshSession, data []byte) {
 		if s.mirror != nil {
 			s.mirror.Resize(m.Cols, m.Rows)
 		}
+		s.cmds.Resize(m.Cols, m.Rows)
 		if shell != nil {
 			_ = shell.WindowChange(m.Rows, m.Cols)
 		}
@@ -326,6 +352,7 @@ func (g *Gateway) output(s *sshSession, b []byte) {
 	if s.mirror != nil {
 		s.mirror.Write(b)
 	}
+	s.cmds.Output(b)
 	if s.obs != nil {
 		s.obs.Broadcast(b)
 	}

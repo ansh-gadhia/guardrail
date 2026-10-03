@@ -12,6 +12,61 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+### Added
+
+- **Every command on the session timeline.** A terminal session's timeline
+  said "session started", "ssh open" and "session ended", and what happened in
+  between was only in the transcript, to be read end to end. Now each command
+  the operator runs over SSH or Telnet is an entry, with the prompt it was typed
+  at — so it shows the user, host, directory or configuration mode it ran in —
+  and clicking it moves the replay there. Commands are read from the operator's
+  screen, never from their keystrokes: they appear as they ran, after tab
+  completion, history recall and corrections; a pasted block is one entry; and
+  keys pressed inside a full-screen program (vi, less, top) are not commands. An
+  answer typed at a prompt that hides it — a `sudo` password, an `enable`
+  secret — is entered as "answered a prompt that hides what is typed", with the
+  prompt and nothing of what was typed. The shell exiting, or the device
+  dropping the connection, is an entry too. Only recorded devices keep a command
+  list: one with recording switched off does not get one by another name. The
+  timeline has a filter, a command count, and a command list at the top of an
+  exported transcript.
+
+### Fixed
+
+- **The transcript shows what the terminal showed.** It was the device's output
+  read as a stream of characters, which is not what a shell sends: a command
+  corrected with backspaces came out right, but one with text inserted
+  mid-line came out as "echo hello" when "echo hello world" ran, and a command
+  longer than the terminal overwrote its own prompt. The transcript is now laid
+  out by a model of the terminal, at the size it had at each point of the
+  session (transcripts now record their resizes). `clear` no longer erases what
+  was on screen from the transcript, and what a full-screen program showed is
+  kept as a marked block after the command that opened it.
+- **Transcript lines are no longer wrapped to the panel.** Output laid out in
+  columns — `ls`, routing tables, `ip addr` — was re-wrapped to the panel's
+  width, scattering the columns down the page with wide gaps between them.
+  Lines are now shown as the terminal showed them, scrolling sideways; **Wrap**
+  wraps them for anyone who prefers it.
+- **Clicking the timeline moves the transcript too.** It only ever moved the
+  video. It now scrolls the transcript to the line and highlights it, and the
+  replay stays in view while the details beside it scroll.
+- **Long timelines were cut off at 200 entries.** The console asked for 500 and
+  the server returned at most 200, so the end of any long session — the session
+  ending included — was missing from its timeline. A session's timeline is now
+  read whole.
+- **Telnet to BusyBox devices took 20 seconds to connect.** BusyBox's shell (on
+  OpenWrt and most embedded gear) follows its prompt with a terminal query, and
+  the login did not recognise a prompt with anything after it, so every login
+  waited out its whole timeout before going ahead. It now finishes at the
+  prompt.
+- **A failed connection to a filmed device left a browser tab open.** A wrong
+  password or an unreachable device, on a device recorded as video, opened the
+  recording's headless browser tab and never closed it, holding its memory until
+  the API restarted.
+- **Video recordings could fail to load.** The player downloaded the whole
+  recording as one Blob, which a browser's blob storage can refuse when it is
+  large; it now keeps the bytes and makes a Blob per frame.
+
 ## [1.7.3] - 2026-10-03
 
 ### Security

@@ -41,6 +41,20 @@ type Chunk struct {
 	Len int `json:"len"`
 }
 
+// Resize is a change of terminal size at a point in the transcript.
+//
+// A player has to lay the bytes out at the width the device was writing for.
+// Line editing depends on it: a shell redrawing a line longer than the terminal
+// moves the cursor by rows, so the same bytes laid out at another width
+// overwrite the wrong text.
+type Resize struct {
+	Offset int64 `json:"offset_ms"`
+	// At is the byte offset in the transcript from which the new size applies.
+	At   int `json:"at"`
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
 // Manifest indexes the transcript blob. Exported alongside Chunk: it is the
 // artifact a player reads, so it is part of the recording format.
 type Manifest struct {
@@ -48,10 +62,21 @@ type Manifest struct {
 	Cols    int     `json:"cols"`
 	Rows    int     `json:"rows"`
 	Chunks  []Chunk `json:"chunks"`
+	// Resizes are the size changes during the session, in order. The session
+	// starts at InitialCols x InitialRows. Absent in transcripts written before
+	// sizes were kept; a player then lays everything out at Cols x Rows, the
+	// last size, which was right for most of most sessions.
+	Resizes     []Resize `json:"resizes,omitempty"`
+	InitialCols int      `json:"initial_cols,omitempty"`
+	InitialRows int      `json:"initial_rows,omitempty"`
 	// Truncated marks a transcript that hit the byte cap. A player must say so
 	// rather than let a reviewer believe they watched the whole session.
 	Truncated bool `json:"truncated"`
 }
+
+// maxResizes bounds the size history. A window dragged about produces dozens;
+// past this many the last size is still kept, only the history stops.
+const maxResizes = 1000
 
 // Recorder accumulates a session transcript in memory and writes it once.
 //
@@ -73,20 +98,30 @@ type Recorder struct {
 	overflow bool
 	cols     int
 	rows     int
+	resizes  []Resize
 }
+
+// Sessions start at the size a PTY is opened with when no window has said
+// otherwise.
+const initialCols, initialRows = 80, 24
 
 // NewRecorder starts a transcript capped at maxBytes.
 func NewRecorder(maxBytes int64) *Recorder {
-	return &Recorder{started: time.Now(), max: maxBytes, cols: 80, rows: 24}
+	return &Recorder{started: time.Now(), max: maxBytes, cols: initialCols, rows: initialRows}
 }
 
-// Resize records the terminal geometry. The last size wins: a player needs one
-// canvas size, and mid-session resizes are cosmetic next to the content.
+// Resize records a change of terminal geometry from this point in the output.
 func (r *Recorder) Resize(cols, rows int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if cols > 0 && rows > 0 {
-		r.cols, r.rows = cols, rows
+	if cols <= 0 || rows <= 0 || (cols == r.cols && rows == r.rows) {
+		return
+	}
+	r.cols, r.rows = cols, rows
+	if len(r.resizes) < maxResizes {
+		r.resizes = append(r.resizes, Resize{
+			Offset: time.Since(r.started).Milliseconds(), At: len(r.buf), Cols: cols, Rows: rows,
+		})
 	}
 }
 
@@ -121,7 +156,10 @@ func (r *Recorder) Flush(
 ) error {
 	r.mu.Lock()
 	buf := r.buf
-	m := Manifest{Version: 1, Cols: r.cols, Rows: r.rows, Chunks: r.chunks, Truncated: r.overflow}
+	m := Manifest{
+		Version: 1, Cols: r.cols, Rows: r.rows, Chunks: r.chunks, Truncated: r.overflow,
+		Resizes: r.resizes, InitialCols: initialCols, InitialRows: initialRows,
+	}
 	r.mu.Unlock()
 
 	// A session where nothing was printed still gets finalized — the absence of

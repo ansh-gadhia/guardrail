@@ -149,6 +149,32 @@ within the granted window.
 `session:terminate` can force-terminate; the kill is signalled across API replicas
 via Redis so the proxy closes immediately.
 
+### Reviewing what happened
+
+Open a session from **Recordings**. The replay is on the left; the **activity
+timeline** is on the right, and clicking any entry moves the replay to that
+moment — the video's playhead, or the transcript's line.
+
+For a terminal session (SSH, Telnet) on a recorded device, the timeline lists
+every command the operator ran, with the prompt it was typed at — which shows
+the user, host, directory or configuration mode. Commands are read from the
+operator's screen, not their keystrokes, so they appear as they ran: after tab
+completion, history recall and corrections. What is typed inside a full-screen
+program (vi, less, top) is not a command and is not listed.
+
+An answer typed at a prompt that hides it — a `sudo` password, an `enable`
+secret, a key passphrase — is listed as *"Answered a prompt that hides what is
+typed"*, with the prompt. What was typed is not recorded anywhere: not on the
+timeline, and not in the transcript, which keeps only what the device printed.
+
+Devices with recording switched off keep no command list either.
+
+The transcript shows the session the way the terminal did: corrections applied,
+long lines as wide as the terminal was (scroll sideways, or switch on **Wrap**),
+nothing lost to `clear`, and what a full-screen program showed kept as a marked
+block. **Export transcript** writes the same text, with the command list at the
+top.
+
 ## 8. Enable your second factor (MFA)
 
 **Security** → *Set up authenticator*: scan the QR / enter the secret in any TOTP

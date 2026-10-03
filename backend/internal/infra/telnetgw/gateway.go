@@ -154,6 +154,11 @@ type telnetSession struct {
 	// mirror renders the same output in a headless browser so the session is also
 	// captured as video. nil unless the device's policy asks for video.
 	mirror access.TerminalMirror
+	// cmds puts each command the operator runs on the timeline, and activity
+	// writes it; nil unless the session is recorded (see sshgw, which works the
+	// same way).
+	cmds     *term.CommandLog
+	activity *term.Activity
 
 	dialMu sync.Mutex // serialises (re)dialling the device; see ensureConn
 	mu     sync.Mutex
@@ -274,6 +279,9 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 			if ep.Captures(access.ArtifactTranscript) {
 				sess.rec = term.NewRecorder(g.cfg.MaxRecordingBytes)
 			}
+			if sess.activity = term.NewActivity(g.deps.Events, s.ID, g.deps.Log); sess.activity != nil {
+				sess.cmds = term.NewCommandLog(0, 0, sess.activity.Record)
+			}
 		}
 	}
 
@@ -300,8 +308,15 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 	}
 
 	if err := g.dial(ctx, sess); err != nil {
+		// Nothing is registered yet, so End will never find this session to clean
+		// it up: what was opened for it is closed here. The mirror above all — it
+		// is a browser tab, and leaking one on every failed connection to a
+		// filmed device spent the host's memory until the process restarted.
+		sess.activity.Close()
+		sess.closeMirror()
 		return access.LiveSession{}, err
 	}
+	sess.activity.Record("telnet_open", map[string]any{"host": sess.deviceLabel})
 
 	g.mu.Lock()
 	g.sessions[s.ID] = sess
@@ -388,6 +403,8 @@ func (g *Gateway) dial(ctx context.Context, s *telnetSession) error {
 	if s.mirror != nil {
 		s.mirror.Write(banner)
 	}
+	// The command log reads prompts off the screen, and the screen starts here.
+	s.cmds.Output(banner)
 	// And at the top of the screen a window attaching later is shown, so the
 	// operator sees how they got in rather than an empty black rectangle.
 	tail := trimBanner(banner, g.cfg.MaxBannerBytes)
@@ -435,7 +452,18 @@ func (g *Gateway) readDevice(s *telnetSession, c *conn, done chan struct{}) {
 		s.conn = nil
 	}
 	s.connErr = err
+	closed := s.closed
 	s.mu.Unlock()
+	if !closed {
+		// The device hung up while the session lives on. Telnet cannot tell an
+		// `exit` from a dropped line any better than isSessionOver can, so the
+		// timeline says what is known.
+		how := "lost"
+		if isSessionOver(err) {
+			how = "closed"
+		}
+		s.activity.Record("shell_end", map[string]any{"how": how})
+	}
 	close(done)
 }
 
@@ -448,6 +476,7 @@ func (g *Gateway) output(s *telnetSession, b []byte) {
 	if s.mirror != nil {
 		s.mirror.Write(b)
 	}
+	s.cmds.Output(b)
 	if s.obs != nil {
 		s.obs.Broadcast(b)
 	}
@@ -490,6 +519,8 @@ func (g *Gateway) teardown(s *telnetSession) error {
 	if c != nil {
 		_ = c.Close()
 	}
+	// After the device is gone, before the slow flushes: see sshgw.
+	s.activity.Close()
 	// The mirror is closed even when there is no transcript: the two captures are
 	// independent, and an early return here would leave a Chromium tab running for
 	// the life of the process on a video-only device.
@@ -535,4 +566,14 @@ func randomToken() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// closeMirror stops video capture for a session that never got going.
+func (s *telnetSession) closeMirror() {
+	if s.mirror == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = s.mirror.Close(ctx)
 }

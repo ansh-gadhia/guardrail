@@ -16,7 +16,7 @@ built in.
 GuardRail brokers, per device:
 
 - **Web UIs** (`https`, `http`) — reverse proxy or server-side browser isolation
-- **Terminals** (`ssh`, `telnet`) — server-side gateway; SSH keeps a text transcript
+- **Terminals** (`ssh`, `telnet`) — server-side gateway; keeps a text transcript and a timeline of every command run
 - **Desktops** (`rdp`, `vnc`) — rendered to the browser through the Apache **guacd** sidecar
 
 Terminal and desktop protocols run behind the `desktop` Compose profile and are
