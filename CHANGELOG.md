@@ -12,6 +12,8 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-10-03
+
 ### Added
 
 - **Uploading files into an isolated session.** A device opened in the
