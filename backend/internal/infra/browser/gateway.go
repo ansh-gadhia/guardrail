@@ -69,6 +69,8 @@ type Config struct {
 	// a page blocked forever; it is long enough that someone reading the message
 	// is not rushed.
 	DialogTimeout time.Duration
+	// MaxUploadBytes bounds one upload from the operator to the device.
+	MaxUploadBytes int64
 }
 
 func (c *Config) defaults() {
@@ -108,6 +110,9 @@ func (c *Config) defaults() {
 	}
 	if c.DialogTimeout == 0 {
 		c.DialogTimeout = 90 * time.Second
+	}
+	if c.MaxUploadBytes == 0 {
+		c.MaxUploadBytes = 100 << 20
 	}
 }
 
@@ -154,6 +159,12 @@ type bSession struct {
 	// an iframe rewriting its own URL. Touched only from the serial event
 	// callback, like lastLive, so it needs no lock.
 	mainFrame cdp.FrameID
+
+	// upMu guards the upload state: the file picker the device has open, and
+	// the directory this session's uploaded files are staged in (see upload.go).
+	upMu      sync.Mutex
+	chooser   *fileChooser
+	uploadDir string
 }
 
 // pushFrame enqueues a frame for the live viewer without ever blocking the
@@ -464,6 +475,9 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 		case *page.EventJavascriptDialogOpening:
 			g.onDialog(bs, sessionID, e)
 
+		case *page.EventFileChooserOpened:
+			g.onFileChooser(bs, e)
+
 		case *page.EventFrameNavigated:
 			// Main frame only: sub-frame loads are page furniture, not somewhere
 			// the operator chose to go.
@@ -518,6 +532,14 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 	// page.Enable is what makes FrameNavigated events arrive, which is how the
 	// playback timeline gets populated in browser mode.
 	actions := []chromedp.Action{network.Enable(), page.Enable()}
+	// File pickers are intercepted, because one opened here would open on the
+	// server, out of everybody's sight; see upload.go. Best-effort for the same
+	// reason as downloads below: a build that refuses costs the operator
+	// uploads, not the session.
+	actions = append(actions, chromedp.ActionFunc(func(ctx context.Context) error {
+		_ = page.SetInterceptFileChooserDialog(true).Do(ctx)
+		return nil
+	}))
 	// Stamp the attribution watermark into the page itself, before any device
 	// document runs. AddScriptToEvaluateOnNewDocument re-applies it on every
 	// navigation, so it cannot be shed by clicking through the device's UI.
@@ -619,6 +641,8 @@ func (g *Gateway) End(_ context.Context, sessionID uuid.UUID) error {
 	// to the teardown that follows them.
 	bs.tl.close()
 	bs.cancel()
+	// After the tab, which may still be reading a file it was handed.
+	g.removeUploads(bs)
 	return nil
 }
 

@@ -66,6 +66,23 @@ func (o *Observers) Attach() (*Observer, []byte) {
 	return ob, back
 }
 
+// AttachQueue is Attach with a deeper queue, for the operator's own view.
+//
+// A supervisor who falls behind is dropped and re-joins from the scrollback,
+// which costs nothing. The operator falling behind a burst of output — a large
+// file printed to the screen — is the same recovery, but it interrupts the person
+// working, so their queue is deep enough that only a stalled browser reaches the
+// end of it.
+func (o *Observers) AttachQueue(n int) (*Observer, []byte) {
+	ob := &Observer{C: make(chan []byte, n)}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.subs[ob] = struct{}{}
+	back := make([]byte, len(o.scroll))
+	copy(back, o.scroll)
+	return ob, back
+}
+
 // Detach removes a viewer and closes its channel. Safe to call twice.
 func (o *Observers) Detach(ob *Observer) {
 	o.mu.Lock()

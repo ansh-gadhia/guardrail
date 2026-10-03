@@ -264,7 +264,9 @@ export function SessionDetail({
             </DField>
             <DField label="Client IP"><span className="font-mono text-xs">{session.client_ip || "—"}</span></DField>
             <DField label="Gateway"><span className="font-mono text-xs">{session.gateway_node || "—"}</span></DField>
-            {session.end_reason && <DField label="End reason" wide>{session.end_reason}</DField>}
+            {session.status !== "active" && (session.end_reason || session.ended_by) && (
+              <DField label="How it ended" wide>{describeEnd(session)}</DField>
+            )}
             {session.user_agent && (
               <DField label="Client" wide>
                 <span className="break-all font-mono text-2xs text-muted">{session.user_agent}</span>
@@ -339,7 +341,7 @@ export function SessionDetail({
 /** One row: a recorded event, or one of the two synthetic session bookends. */
 interface TimelineEntry {
   key: string;
-  kind: "session" | "url_change" | "request" | "download" | "dialog" | "other";
+  kind: "session" | "url_change" | "request" | "download" | "upload" | "dialog" | "other";
   /** Offset into the recording, or null when it cannot be placed against one. */
   ms: number | null;
   ts?: string;
@@ -351,6 +353,52 @@ interface TimelineEntry {
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// describeEnd says how a session ended, and who ended it when a person did.
+//
+// The reason alone used to be shown raw, and every session ended from the console
+// read "admin_terminate" — the person closing their own work and a supervisor
+// cutting them off looked the same, and neither said who.
+export function describeEnd(session: Session): string {
+  const who = session.ended_by_email || "a user";
+  const own = !!session.ended_by && session.ended_by === session.user_id;
+  switch (session.end_reason) {
+    case "ended_by_owner":
+      return `Ended by ${who} (their own session)`;
+    case "tab_closed":
+      return `Ended when ${who} closed the session tab`;
+    case "terminated":
+      return `Terminated by ${who}`;
+    case "grant_revoked":
+    case "standing grant revoked":
+      return session.ended_by ? `Ended when ${who} revoked the standing access` : "Ended when the standing access was revoked";
+    case "idle_timeout":
+      return "Ended automatically: no activity for longer than the device allows";
+    case "window_expired":
+      return "Ended automatically: the access window closed";
+    case "establish_failed":
+      return "The device could not be reached or refused the connection";
+    case "host_key_mismatch":
+      return "Refused: the device's SSH host key had changed";
+    case "no_gateway":
+      return "No gateway available for this protocol";
+    case "admin_terminate":
+    case "":
+    case undefined:
+      // Sessions from before the person was recorded with the end, filled in
+      // from the audit trail where it could be.
+      if (!session.ended_by) return "Ended from the console";
+      return own ? `Ended by ${who} (their own session)` : `Terminated by ${who}`;
+    default:
+      return session.end_reason.replace(/_/g, " ");
+  }
+}
 
 /** Turns recorded events into rows, bookended by the session's own start and end. */
 function buildTimeline(events: SessionEvent[], session: Session, baseMs: number | null): TimelineEntry[] {
@@ -399,6 +447,20 @@ function buildTimeline(events: SessionEvent[], session: Session, baseMs: number 
           tone: "danger",
         });
         break;
+      case "upload": {
+        // A file the operator handed to the device. Its fingerprint is what
+        // proves later which file it was.
+        const size = typeof e.data?.size === "number" ? e.data.size : undefined;
+        const sum = str(e.data?.sha256);
+        rows.push({
+          ...common,
+          kind: "upload",
+          label: `Uploaded ${str(e.data?.filename) || "a file"}${size !== undefined ? ` (${fmtBytes(size)})` : ""}`,
+          detail: sum ? `SHA-256 ${sum}` : undefined,
+          tone: "danger",
+        });
+        break;
+      }
       case "dialog":
         rows.push({
           ...common,
@@ -423,7 +485,7 @@ function buildTimeline(events: SessionEvent[], session: Session, baseMs: number 
       kind: "session",
       ms: endedMs,
       ts: session.ended_at,
-      label: session.end_reason ? `Session ended — ${session.end_reason}` : "Session ended",
+      label: session.end_reason || session.ended_by ? `Session ended — ${describeEnd(session)}` : "Session ended",
     });
   }
   return rows;
@@ -434,6 +496,7 @@ const DOT_TONE: Record<TimelineEntry["kind"], string> = {
   url_change: "bg-accent/70",
   request: "bg-warn",
   download: "bg-danger",
+  upload: "bg-danger",
   dialog: "bg-warn",
   other: "bg-accent/70",
 };

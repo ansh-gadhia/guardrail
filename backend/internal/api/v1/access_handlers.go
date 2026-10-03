@@ -45,6 +45,15 @@ type SessionObserver interface {
 	WatcherCount(sid uuid.UUID) (int, bool)
 }
 
+// SessionUploader accepts files the operator chose for a device that asked for
+// one. Only the isolated browser does: everywhere else the device's own page
+// runs in the operator's browser, which uploads for itself.
+type SessionUploader interface {
+	// Upload takes the files. false => not this gateway's session, without
+	// touching the ResponseWriter.
+	Upload(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token string) bool
+}
+
 // SessionMux dispatches a request to whichever gateway is holding the session.
 //
 // Both delivery modes can be live at once — recorded devices are isolated while
@@ -73,6 +82,16 @@ func (m SessionMux) Console(w http.ResponseWriter, r *http.Request, sid uuid.UUI
 func (m SessionMux) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token string) bool {
 	for _, s := range m {
 		if s.Stream(w, r, sid, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// Upload hands the operator's files to the owning gateway, if it takes them.
+func (m SessionMux) Upload(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token string) bool {
+	for _, s := range m {
+		if u, ok := s.(SessionUploader); ok && u.Upload(w, r, sid, token) {
 			return true
 		}
 	}
@@ -125,6 +144,9 @@ func (m SessionMux) ObserveConsole(w http.ResponseWriter, r *http.Request, sid, 
 // wsSentinel is the sub-path under /proxy/<sid>/ that maps to the streaming
 // WebSocket (kept under the session prefix so the session cookie is sent).
 const wsSentinel = "__ws__"
+
+// uploadSentinel is the sub-path the isolated browser's viewer posts files to.
+const uploadSentinel = "__upload__"
 
 // TunnelServer serves a session at the root of its own hostname. Only the HTTP
 // reverse-proxy gateway implements it: a desktop or terminal session has no
@@ -396,6 +418,14 @@ func (h *AccessHandler) proxy(c *gin.Context) {
 		return
 	}
 	rawPath := strings.TrimPrefix(c.Param("path"), "/")
+	// Files for a device that asked for one, under the prefix for the same reason.
+	if rawPath == uploadSentinel {
+		u, ok := h.gateway.(SessionUploader)
+		if !ok || !u.Upload(c.Writer, c.Request, sid, token) {
+			problem(c, http.StatusGone, "Session Closed", "the access session is no longer active")
+		}
+		return
+	}
 	// The streaming WebSocket lives under the session prefix so the cookie is sent.
 	if rawPath == wsSentinel {
 		if !h.gateway.Stream(c.Writer, c.Request, sid, token) {
@@ -629,9 +659,13 @@ func (h *AccessHandler) terminate(c *gin.Context) {
 	}
 	var req terminateRequest
 	_ = c.ShouldBindJSON(&req)
-	reason := req.Reason
-	if reason == "" {
-		reason = "admin_terminate"
+	// The browser may say only one thing about how a session ended: that its
+	// tab closed. Who ended it, and whether it was their own, the service works
+	// out from the caller — a free-text reason from the client would let anyone
+	// write "idle_timeout" over a session they cut off.
+	reason := ""
+	if req.Reason == appaccess.EndedTabClosed {
+		reason = appaccess.EndedTabClosed
 	}
 	if err := h.svc.Terminate(c.Request.Context(), actor, id, reason,
 		accessMeta(c)); err != nil {
@@ -783,6 +817,12 @@ func sessionDTO(s *domaccess.Session) gin.H {
 	}
 	if s.EndReason != "" {
 		dto["end_reason"] = s.EndReason
+	}
+	if s.EndedBy != nil {
+		dto["ended_by"] = s.EndedBy.String()
+		if s.EndedByEmail != "" {
+			dto["ended_by_email"] = s.EndedByEmail
+		}
 	}
 	return dto
 }

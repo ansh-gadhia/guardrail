@@ -4,6 +4,7 @@ package test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -273,7 +274,7 @@ func TestIntegration_TouchActivityKeepsSessionAlive(t *testing.T) {
 	// A touch must not resurrect a session the reaper already closed, or a request
 	// racing termination would flip a dead session back to live.
 	if err := sessions.UpdateStatus(ctx, domaccess.Scope{OrganizationID: defaultOrgID},
-		id, domaccess.StatusEnded, "terminated", now); err != nil {
+		id, domaccess.StatusEnded, "terminated", nil, now); err != nil {
 		t.Fatalf("UpdateStatus: %v", err)
 	}
 	if err := sessions.TouchActivity(ctx, id, now.Add(time.Minute)); err != nil {
@@ -281,5 +282,46 @@ func TestIntegration_TouchActivityKeepsSessionAlive(t *testing.T) {
 	}
 	if status, _ := statusOf(t, sessions, id); status != "ended" {
 		t.Errorf("touch resurrected an ended session: got status=%q, want ended", status)
+	}
+}
+
+// Who ended a session is stored with it and read back with their address — the
+// console shows it beside the recording — and a later end that names nobody
+// (a sweep catching up) does not erase it.
+func TestIntegration_SessionRecordsWhoEndedIt(t *testing.T) {
+	pg, closeDB := newPG(t)
+	defer closeDB()
+	ctx := context.Background()
+
+	fx := newFixtures(t)
+	devices := postgres.NewDeviceRepo(pg)
+	sessions := postgres.NewAccessSessionRepo(pg)
+	users := postgres.NewUserRepo(pg)
+	owner := fx.newIdleUser(users)
+	supervisor := fx.newIdleUser(users)
+	dev := fx.newIdleDevice(devices, 30)
+	now := time.Now()
+	id := fx.newSession(sessions, owner, dev, &now)
+	sc := domaccess.Scope{OrganizationID: defaultOrgID}
+
+	if err := sessions.UpdateStatus(ctx, sc, id, domaccess.StatusEnded, "terminated", &supervisor, now); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+	got, err := sessions.GetByID(ctx, sc, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EndedBy == nil || *got.EndedBy != supervisor {
+		t.Fatalf("ended_by = %v, want %s", got.EndedBy, supervisor)
+	}
+	if !strings.HasPrefix(got.EndedByEmail, "idle-") || !strings.HasSuffix(got.EndedByEmail, "@test.local") {
+		t.Errorf("ended_by_email = %q, want the supervisor's address", got.EndedByEmail)
+	}
+
+	if err := sessions.UpdateStatus(ctx, sc, id, domaccess.StatusEnded, "", nil, now.Add(time.Minute)); err != nil {
+		t.Fatalf("UpdateStatus without a person: %v", err)
+	}
+	if again, _ := sessions.GetByID(ctx, sc, id); again.EndedBy == nil || *again.EndedBy != supervisor || again.EndReason != "terminated" {
+		t.Errorf("a later update erased who ended it: by=%v reason=%q", again.EndedBy, again.EndReason)
 	}
 }

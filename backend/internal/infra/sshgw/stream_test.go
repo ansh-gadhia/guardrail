@@ -411,19 +411,85 @@ func TestUnrecordedSessionWritesNothing(t *testing.T) {
 	}
 }
 
-// One terminal per session: a second socket must be refused, or two people's
-// keystrokes interleave into one transcript attributed to one operator.
-func TestSecondAttachIsRefused(t *testing.T) {
+// readUntil reads frames until the accumulated output contains want.
+func readUntil(t *testing.T, ctx context.Context, c *websocket.Conn, want string) string {
+	t.Helper()
+	var got strings.Builder
+	for !strings.Contains(got.String(), want) {
+		_, data, err := c.Read(ctx)
+		if err != nil {
+			t.Fatalf("waiting for %q, got %q: %v", want, got.String(), err)
+		}
+		got.Write(data)
+	}
+	return got.String()
+}
+
+func typeInto(t *testing.T, ctx context.Context, c *websocket.Conn, s string) {
+	t.Helper()
+	msg, _ := json.Marshal(term.ClientMsg{T: "i", D: s})
+	if err := c.Write(ctx, websocket.MessageText, msg); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+}
+
+// Leaving the session page and coming back must find the same shell, with the
+// screen as it was — not a fresh login on an empty terminal, which killed
+// whatever was running in the old one.
+func TestReattachFindsTheSameShell(t *testing.T) {
+	h := newLiveHarness(t, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	c1 := h.dial(t, ctx)
+	readUntil(t, ctx, c1, "banner-line")
+	typeInto(t, ctx, c1, "make-before-leaving\n")
+	readUntil(t, ctx, c1, "make-before-leaving")
+	_ = c1.Close(websocket.StatusGoingAway, "") // the page is left
+
+	time.Sleep(100 * time.Millisecond)
+	c2 := h.dial(t, ctx)
+	defer func() { _ = c2.CloseNow() }()
+	screen := readUntil(t, ctx, c2, "make-before-leaving")
+	if !strings.Contains(screen, "banner-line") {
+		t.Errorf("the screen came back without its start: %q", screen)
+	}
+	if n := h.srv.shellCount(); n != 1 {
+		t.Fatalf("%d shells opened, want 1: coming back must not log in again", n)
+	}
+
+	// And the shell it found is live.
+	typeInto(t, ctx, c2, "still-here\n")
+	readUntil(t, ctx, c2, "still-here")
+}
+
+// One keyboard per session. A newer window takes it, the older one is told so
+// (and does not auto-retry), and keystrokes never come from both.
+func TestNewerWindowTakesTheKeyboard(t *testing.T) {
 	h := newLiveHarness(t, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	c1 := h.dial(t, ctx)
 	defer func() { _ = c1.CloseNow() }()
-	_, _, _ = c1.Read(ctx) // ensure attached
+	readUntil(t, ctx, c1, "banner-line")
 
-	if _, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(h.ts.URL, "http")+"/__ws__", nil); err == nil {
-		t.Fatal("a second terminal attached to the same session")
+	c2 := h.dial(t, ctx)
+	defer func() { _ = c2.CloseNow() }()
+	readUntil(t, ctx, c2, "banner-line") // the screen, from the scrollback
+
+	for {
+		if _, _, err := c1.Read(ctx); err != nil {
+			if got := websocket.CloseStatus(err); got != term.CloseTakenOver {
+				t.Fatalf("older window closed with %d, want %d (taken over)", got, term.CloseTakenOver)
+			}
+			break
+		}
+	}
+	typeInto(t, ctx, c2, "from-the-new-window\n")
+	readUntil(t, ctx, c2, "from-the-new-window")
+	if n := h.srv.shellCount(); n != 1 {
+		t.Fatalf("%d shells opened, want 1", n)
 	}
 }
 

@@ -416,7 +416,7 @@ func (s *Service) establish(ctx context.Context, actor iam.Claims, sess *access.
 	}
 	gw, ok := s.gatewayFor(sess.Protocol, isolate)
 	if !ok {
-		_ = s.sessions.UpdateStatus(ctx, scopeOf(actor), sess.ID, access.StatusEnded, "no_gateway", s.clock.Now())
+		_ = s.sessions.UpdateStatus(ctx, scopeOf(actor), sess.ID, access.StatusEnded, "no_gateway", nil, s.clock.Now())
 		return nil, access.ErrNoGateway
 	}
 	live, err := gw.Establish(ctx, sess, s.creds)
@@ -431,7 +431,7 @@ func (s *Service) establish(ctx context.Context, actor iam.Claims, sess *access.
 			// Denied, not failed: GuardRail made a security decision here.
 			reason, result = "host_key_mismatch", audit.ResultDenied
 		}
-		_ = s.sessions.UpdateStatus(ctx, scopeOf(actor), sess.ID, access.StatusEnded, reason, s.clock.Now())
+		_ = s.sessions.UpdateStatus(ctx, scopeOf(actor), sess.ID, access.StatusEnded, reason, nil, s.clock.Now())
 		// The error text is the forensics — which host, which fingerprint. Gateway
 		// errors must never carry secret material for this reason; the SSH gateway
 		// is deliberately vague about unusable key material for the same one.
@@ -484,6 +484,40 @@ func (s *Service) endOnAllGateways(ctx context.Context, proto access.Protocol, s
 	}
 }
 
+// The reasons a person ends a session, as stored in end_reason. ExpireIdle and
+// the window reaper write their own ("idle_timeout", "window_expired"), and
+// a failed connect writes why it failed.
+const (
+	// EndedByOwner: the operator ended their own session (End session).
+	EndedByOwner = "ended_by_owner"
+	// EndedTabClosed: the operator's session tab closed, which ends the session.
+	EndedTabClosed = "tab_closed"
+	// EndedTerminated: someone who outranks the operator ended it for them.
+	EndedTerminated = "terminated"
+	// EndedGrantRevoked: the standing access the session ran on was revoked.
+	EndedGrantRevoked = "grant_revoked"
+)
+
+// endReason settles how a session ended. An internal caller's specific reason
+// (an access revocation, say) stands. From the console only one thing is taken
+// from the browser — that the tab closed — and everything else is worked out
+// from who did it: the operator themselves, or somebody else.
+func endReason(requested string, actor, owner uuid.UUID) string {
+	switch requested {
+	case "", "admin_terminate":
+	case EndedTabClosed:
+		if actor == owner {
+			return EndedTabClosed
+		}
+	default:
+		return requested
+	}
+	if actor == owner {
+		return EndedByOwner
+	}
+	return EndedTerminated
+}
+
 // Terminate ends a session (user- or admin-initiated) and tears down resources.
 func (s *Service) Terminate(ctx context.Context, actor iam.Claims, sessionID uuid.UUID, reason string, meta ReqMeta) error {
 	sess, err := s.sessions.GetByID(ctx, scopeOf(actor), sessionID)
@@ -509,7 +543,17 @@ func (s *Service) Terminate(ctx context.Context, actor iam.Claims, sessionID uui
 			})
 		return access.ErrForbidden
 	}
-	if err := s.sessions.UpdateStatus(ctx, scopeOf(actor), sessionID, access.StatusEnded, reason, s.clock.Now()); err != nil {
+	// Who ended it, and how, decided here rather than taken from the caller.
+	// Every console button used to send no reason, so every session ended from
+	// the console read "admin_terminate" — the operator closing their own tab
+	// and a supervisor cutting them off looked identical, and neither said who.
+	reason = endReason(reason, actor.UserID, sess.UserID)
+	var by *uuid.UUID
+	if actor.UserID != uuid.Nil {
+		uid := actor.UserID
+		by = &uid
+	}
+	if err := s.sessions.UpdateStatus(ctx, scopeOf(actor), sessionID, access.StatusEnded, reason, by, s.clock.Now()); err != nil {
 		return err
 	}
 	s.endOnAllGateways(ctx, sess.Protocol, sessionID)

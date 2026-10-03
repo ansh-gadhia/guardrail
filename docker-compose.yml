@@ -337,6 +337,9 @@ services:
       GUARDRAIL_ISOLATION_MAX_FPS: ${GUARDRAIL_ISOLATION_MAX_FPS:-}
       # JPEG quality of recorded SSH/telnet video; empty is the default, 80.
       GUARDRAIL_TERMINAL_VIDEO_QUALITY: ${GUARDRAIL_TERMINAL_VIDEO_QUALITY:-}
+      # Largest file an operator may upload into an isolated session, in MB;
+      # empty is the default, 100.
+      GUARDRAIL_ISOLATION_MAX_UPLOAD_MB: ${GUARDRAIL_ISOLATION_MAX_UPLOAD_MB:-}
       # RDP/VNC via the guacd sidecar. Both must agree: this switch wires the
       # gateways, the compose profile starts the daemon.
       GUARDRAIL_DESKTOP_ENABLED: ${GUARDRAIL_DESKTOP_ENABLED:-false}
@@ -524,6 +527,10 @@ services:
       # https://server:443 — a port nothing is listening on.
       - --entrypoints.web.address=:${GUARDRAIL_HTTP_PORT:-80}
       - --entrypoints.websecure.address=:${GUARDRAIL_HTTPS_PORT:-443}
+      # Traefik reads a whole request within readTimeout, 60 s by default — too
+      # short for a firmware image uploaded into an isolated session over a slow
+      # link. The API keeps its own short limit for everything but uploads.
+      - --entrypoints.websecure.transport.respondingTimeouts.readTimeout=15m
       # A PAM console has no business answering in plaintext: the HTTP port exists
       # only to bounce operators who typed the address without a scheme.
       - --entrypoints.web.http.redirections.entryPoint.to=websecure

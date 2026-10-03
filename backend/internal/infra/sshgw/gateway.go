@@ -25,6 +25,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"sync"
@@ -169,18 +170,77 @@ type sshSession struct {
 	// obs is the set of read-only supervisors watching this session, and the
 	// recent output a newly-arrived one is shown first.
 	//
-	// Separate from `attached` on purpose. That flag keeps ONE keyboard on the
-	// PTY, which is right — two people typing into one shell interleave into a
-	// transcript that attributes everything to whoever opened it. Watching is not
-	// typing, so it is not governed by that flag and does not contend for it.
+	// Separate from the operator's keyboard on purpose (see viewerGen). ONE
+	// window types into the shell, which is right — two people typing into one
+	// shell interleave into a transcript that attributes everything to whoever
+	// opened it. Watching is not typing, so it does not contend for it.
 	obs *term.Observers
+	// op is the operator's own view: the same output, and the same scrollback,
+	// which is what lets a window that left and came back show the screen as it
+	// stands rather than a blank one.
+	op *term.Observers
 
-	// attached guards the socket: one terminal per session. A second viewer would
-	// share the PTY and interleave keystrokes, and the transcript would attribute
-	// both to one operator.
-	mu       sync.Mutex
-	attached bool
-	closed   bool
+	// The shell belongs to the SESSION, not to the window showing it.
+	//
+	// It used to be opened per WebSocket and closed with it, so leaving the
+	// session page — even for the sessions list — killed the shell and anything
+	// running in it, and coming back logged in again to an empty screen. Now it
+	// is opened once, kept until the session ends or the device drops it, and
+	// its output keeps flowing to the recording and to supervisors while nobody
+	// has the page open.
+	shellMu   sync.Mutex // serialises opening one
+	shell     *ssh.Session
+	stdin     io.WriteCloser
+	shellDone chan struct{} // closed when the shell's output ends
+	shellErr  error         // how it ended: nil or a normal exit is a clean end
+	// cols and rows are the last geometry the operator's window asked for, so a
+	// shell opened later starts at the right size.
+	cols, rows int
+
+	mu sync.Mutex
+	// viewerGen and viewerCancel give the keyboard to one window at a time. A
+	// newer window takes it over, and the older one is closed with
+	// term.CloseTakenOver rather than refused: the newer one is the one the
+	// person is looking at, and refusing it left a window that had just been
+	// reopened retrying against a socket the browser had not yet torn down.
+	viewerGen    uint64
+	viewerCancel context.CancelFunc
+	closed       bool
+}
+
+// takeOver gives the keyboard to the window whose context cancel is, closing
+// the one that had it, and returns the generation that identifies the new one.
+func (s *sshSession) takeOver(cancel context.CancelFunc) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.viewerCancel != nil {
+		s.viewerCancel()
+	}
+	s.viewerGen++
+	s.viewerCancel = cancel
+	return s.viewerGen
+}
+
+// release gives the keyboard up, unless a newer window already has it.
+func (s *sshSession) release(gen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.viewerGen == gen {
+		s.viewerCancel = nil
+	}
+}
+
+// superseded reports whether a newer window has taken the keyboard from gen.
+func (s *sshSession) superseded(gen uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.viewerGen != gen
+}
+
+func (s *sshSession) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 // Establish opens the SSH connection and returns the client-facing handle.
@@ -213,6 +273,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 	sess := &sshSession{
 		id: s.ID, orgID: s.OrganizationID,
 		obs:         term.NewObservers(),
+		op:          term.NewObservers(),
 		token:       randomToken(),
 		expires:     time.Now().Add(g.cfg.SessionTTL),
 		watermark:   s.WatermarkOr(),
@@ -306,8 +367,9 @@ func (g *Gateway) connect(ctx context.Context, s *sshSession) error {
 // A reconnect is the point: the operator's authorisation is still good and the
 // session is still live, so a device that dropped us (rebooted, reset the TCP
 // connection) should be dialled again rather than leaving a Reconnect button
-// that can never work. The new shell is genuinely new — cwd, environment and any
-// running program are gone — because that is what reconnecting to SSH means.
+// that can never work. Only then is the shell new — cwd, environment and any
+// running program gone — because that is what reconnecting to SSH means. A
+// window that merely left and came back finds the same shell (see ensureShell).
 func (g *Gateway) deviceSession(ctx context.Context, s *sshSession) (*ssh.Session, error) {
 	s.mu.Lock()
 	client := s.client
@@ -361,6 +423,9 @@ func (g *Gateway) teardown(s *sshSession) error {
 	// screen and no indication that it is over.
 	if s.obs != nil {
 		s.obs.CloseAll()
+	}
+	if s.op != nil {
+		s.op.CloseAll()
 	}
 	s.mu.Unlock()
 

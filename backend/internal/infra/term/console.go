@@ -44,6 +44,16 @@ var xtermCSS string
 // 4002 is in the 4000-4999 range the WebSocket RFC reserves for applications.
 const CloseDeviceGone = 4002
 
+// CloseTakenOver is the close code for "this session was opened in another
+// window, which now has the keyboard".
+//
+// One window types into a session at a time — two would interleave keystrokes
+// into one transcript attributed to one operator — and the newest wins, because
+// the newest is the one the person is looking at. The one it replaced must not
+// auto-retry: two windows reconnecting in turn would take the session from each
+// other for ever. So it is told why, and offered the button that takes it back.
+const CloseTakenOver = 4003
+
 // Options parameterise the console page.
 type Options struct {
 	// SessionID is the access session being rendered.
@@ -91,6 +101,7 @@ func Page(o Options) string {
 		"__PROTO__", jsString(proto),
 		"__PROTO_TEXT__", htmlEscape(proto),
 		"__CLOSE_DEVICE_GONE__", itoa(CloseDeviceGone),
+		"__CLOSE_TAKEN_OVER__", itoa(CloseTakenOver),
 		"__READONLY__", boolJS(o.ReadOnly),
 		"__WATCHED_USER__", jsString(o.WatchedUser),
 	).Replace(consoleTmpl)
@@ -180,6 +191,7 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
 (function(){
   var SID = __SID__, DEVICE = __DEVICE__, WM = __WATERMARK__, PROTO = __PROTO__;
   var DEVICE_GONE = __CLOSE_DEVICE_GONE__;
+  var TAKEN_OVER = __CLOSE_TAKEN_OVER__;
   var statusEl = document.getElementById('status');
   var msgEl = document.getElementById('msg');
   var againEl = document.getElementById('again');
@@ -317,6 +329,12 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
         // is nothing on the other side to reconnect to, so do not pretend.
         ended = true;
         status('session ended — ' + DEVICE, false);
+        return;
+      }
+      if (ev.code === TAKEN_OVER) {
+        // Another window has this session now. Not retried — the two would take
+        // it from each other in turn — but one click takes it back.
+        status('this session is open in another window', true);
         return;
       }
       if (ev.code === DEVICE_GONE) {

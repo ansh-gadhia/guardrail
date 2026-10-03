@@ -119,10 +119,16 @@ export function SessionViewPage() {
     const onHide = () => {
       const token = getAccessToken();
       try {
+        // Says how it ended: the session's record names the person, and
+        // "closed the session tab" is a different thing from "pressed End".
         void fetch(`/api/v1/sessions/${id}/terminate`, {
           method: "POST",
           keepalive: true,
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ reason: "tab_closed" }),
         });
       } catch {
         /* best effort — nothing more we can do during unload */

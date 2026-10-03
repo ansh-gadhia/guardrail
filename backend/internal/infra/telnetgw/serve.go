@@ -31,217 +31,194 @@ func (g *Gateway) Console(w http.ResponseWriter, _ *http.Request, sid uuid.UUID,
 	return true
 }
 
-// Stream bridges the operator's WebSocket to the device.
-//
-// It is also the reconnect path. If the device connection is gone but the access
-// session is still live and still authorised, attaching dials the device again
-// and re-authenticates from the vault. That is what makes the console's
-// Reconnect button work without the operator ever holding a credential.
+// operatorQueue is how many chunks of output the operator's window may fall
+// behind by before it is caught up from the scrollback instead.
+const operatorQueue = 256
+
 func (g *Gateway) Stream(w http.ResponseWriter, r *http.Request, sid uuid.UUID, token string) bool {
 	s := g.lookup(sid, token)
 	if s == nil {
 		return false
 	}
-
-	// One terminal per session. Without this a second tab would attach to the
-	// same device connection, interleaving two people's keystrokes into one
-	// transcript that attributes everything to whoever opened the session.
-	s.mu.Lock()
-	if s.attached || s.closed {
-		s.mu.Unlock()
-		http.Error(w, "session already attached", http.StatusConflict)
+	if s.isClosed() {
+		http.Error(w, "session is over", http.StatusGone)
 		return true
 	}
-	s.attached = true
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.attached = false
-		s.mu.Unlock()
-	}()
 
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		return true // handshake already responded
 	}
-	// Errors on a teardown close are not actionable — the peer is going away
-	// either way — but they are swallowed explicitly rather than silently.
 	defer func() { _ = c.CloseNow() }()
 	c.SetReadLimit(term.MaxInputBytes)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	// Pinged, so a reverse proxy does not cut the socket for being quiet. See
-	// term.KeepAlive.
+	// One keyboard per session: this window takes it, and whichever had it is
+	// closed with CloseTakenOver.
+	// Two contexts, for the reason sshgw's Stream gives: cancelling one a Read is
+	// waiting on makes the websocket library drop the connection, so the window
+	// being replaced could never be told why. ctx carries reads and writes; view
+	// is what a newer window cancels, and is only ever waited on.
+	view, viewCancel := context.WithCancel(ctx)
+	defer viewCancel()
+	gen := s.takeOver(viewCancel)
+	defer s.release(gen)
 	go term.KeepAlive(ctx, c, term.KeepAliveInterval)
 
-	// Reconnect: the session outlived its device connection. Dial again before
-	// the operator sees a terminal, so a failed redial is an error on the socket
-	// rather than a window that opens onto nothing.
-	s.mu.Lock()
-	need := s.conn == nil && !s.closed
-	s.mu.Unlock()
-	if need {
-		if err := g.dial(ctx, s); err != nil {
-			// Tell the console it may try again — a device that refused one dial
-			// (vty pool full, still rebooting) commonly accepts the next.
-			_ = c.Close(term.CloseDeviceGone, "could not reach the device")
-			return true
-		}
-		if g.deps.Events != nil {
-			// Recorded as an event, not written into the transcript: the transcript
-			// is what the device printed, and our own commentary does not belong
-			// in evidence. A reviewer sees the gap and this event explains it.
-			_ = g.deps.Events.RecordEvent(ctx, s.id, "telnet_reconnect", map[string]any{"host": s.deviceLabel})
-		}
-	}
-
-	if err := g.pump(ctx, c, s); err != nil && !isSessionOver(err) {
-		// The device connection is gone while the session itself is still good.
-		// Drop it so the next attach redials, and tell the console which of the
-		// two silences this is — it cannot tell them apart on its own.
-		g.dropConn(s)
-		_ = c.Close(term.CloseDeviceGone, "device connection lost")
+	done, err := g.ensureConn(ctx, s)
+	if err != nil {
+		_ = c.Close(term.CloseDeviceGone, "could not reach the device")
 		return true
 	}
-	// A clean end: the device hung up, or the session was torn down. Both mean
-	// there is nothing to reconnect to right now.
-	g.dropConn(s)
-	_ = c.Close(websocket.StatusNormalClosure, "")
-	return true
-}
 
-// dropConn closes the device connection but keeps the session, so a reconnect
-// can dial again. It does NOT finalize the recording: the session is still open
-// and its transcript is still accumulating.
-func (g *Gateway) dropConn(s *telnetSession) {
-	s.mu.Lock()
-	c := s.conn
-	s.conn = nil
-	s.mu.Unlock()
-	if c != nil {
-		_ = c.Close()
-	}
-}
-
-// pump wires the device to the socket until either end closes.
-func (g *Gateway) pump(ctx context.Context, ws *websocket.Conn, s *telnetSession) error {
-	s.mu.Lock()
-	dev := s.conn
-	banner := s.banner
-	s.mu.Unlock()
-	if dev == nil {
-		return io.EOF
-	}
-
-	// Replay the login so the operator sees how they got in. Already in the
-	// transcript from the dial, so this is not recorded again — writing it twice
-	// would put the banner in the evidence twice.
-	if len(banner) > 0 {
-		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := ws.Write(wctx, websocket.MessageBinary, banner)
-		cancel()
-		if err != nil {
-			return err
+	ob, screen := s.op.AttachQueue(operatorQueue)
+	defer s.op.Detach(ob)
+	// The screen as it stands — the login, and everything since.
+	if len(screen) > 0 {
+		wctx, wcancel := context.WithTimeout(ctx, 30*time.Second)
+		werr := c.Write(wctx, websocket.MessageBinary, screen)
+		wcancel()
+		if werr != nil {
+			return true
 		}
 	}
 
-	if g.deps.Events != nil {
-		_ = g.deps.Events.RecordEvent(ctx, s.id, "telnet_open", map[string]any{"host": s.deviceLabel})
-	}
-
-	errc := make(chan error, 2)
-
-	// Device -> operator.
+	left := make(chan struct{})
 	go func() {
-		buf := make([]byte, 32<<10)
+		defer close(left)
 		for {
-			n, err := dev.Read(buf)
-			if n > 0 {
-				g.emit(ctx, ws, s, buf[:n])
-			}
-			if err != nil {
-				errc <- err
+			typ, data, rerr := c.Read(ctx)
+			if rerr != nil {
 				return
+			}
+			if typ == websocket.MessageText {
+				g.dispatch(s, data)
 			}
 		}
 	}()
 
-	// Operator -> device.
-	go func() {
-		for {
-			typ, data, err := ws.Read(ctx)
-			if err != nil {
-				errc <- err
-				return
+	for {
+		select {
+		case b, open := <-ob.C:
+			if !open {
+				if s.isClosed() {
+					_ = c.Close(websocket.StatusNormalClosure, "")
+					return true
+				}
+				// Fell too far behind; reattaching catches up from the scrollback.
+				_ = c.Close(websocket.StatusTryAgainLater, "catching up")
+				return true
 			}
-			if typ != websocket.MessageText {
-				continue
+			wctx, wcancel := context.WithTimeout(ctx, 10*time.Second)
+			werr := c.Write(wctx, websocket.MessageBinary, b)
+			wcancel()
+			if werr != nil {
+				return true
 			}
-			if err := g.dispatch(dev, s, data); err != nil {
-				errc <- err
-				return
+		case <-done:
+			for flushed := false; !flushed; {
+				select {
+				case b, open := <-ob.C:
+					if !open {
+						flushed = true
+						break
+					}
+					wctx, wcancel := context.WithTimeout(ctx, 10*time.Second)
+					_ = c.Write(wctx, websocket.MessageBinary, b)
+					wcancel()
+				default:
+					flushed = true
+				}
 			}
+			s.mu.Lock()
+			connErr := s.connErr
+			s.mu.Unlock()
+			if s.isClosed() || isSessionOver(connErr) {
+				// The device hung up cleanly (an `exit`, an exec-timeout) or the
+				// session was torn down: nothing to reconnect to right now.
+				_ = c.Close(websocket.StatusNormalClosure, "")
+			} else {
+				_ = c.Close(term.CloseDeviceGone, "device connection lost")
+			}
+			return true
+		case <-left:
+			// The window went away. The device connection does not: it carries on
+			// for the session, recorded and watchable, for the next window.
+			return true
+		case <-view.Done():
+			if s.superseded(gen) {
+				_ = c.Close(term.CloseTakenOver, "opened in another window")
+			}
+			return true
 		}
-	}()
-
-	select {
-	case err := <-errc:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
-// dispatch applies one client message.
-func (g *Gateway) dispatch(dev *conn, s *telnetSession, data []byte) error {
+// ensureConn returns the done channel of the session's device connection,
+// dialling one if it has none — the device hung up since the last window, and
+// this window is the reconnect.
+func (g *Gateway) ensureConn(ctx context.Context, s *telnetSession) (<-chan struct{}, error) {
+	// One dial at a time: two windows attaching together to a session whose
+	// connection had dropped would otherwise both log in to the device.
+	s.dialMu.Lock()
+	defer s.dialMu.Unlock()
+	s.mu.Lock()
+	if s.conn != nil {
+		done := s.connDone
+		s.mu.Unlock()
+		return done, nil
+	}
+	redial := s.dialed
+	s.mu.Unlock()
+	if err := g.dial(ctx, s); err != nil {
+		return nil, err
+	}
+	if redial && g.deps.Events != nil {
+		_ = g.deps.Events.RecordEvent(ctx, s.id, "telnet_reconnect", map[string]any{"host": s.deviceLabel})
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.connDone, nil
+}
+
+// dispatch applies one message from the operator's window.
+func (g *Gateway) dispatch(s *telnetSession, data []byte) {
 	m, ok := term.ParseClientMsg(data)
 	if !ok {
-		return nil // ignore malformed frames rather than killing the session
+		return // ignore malformed frames rather than killing the session
 	}
+	s.mu.Lock()
+	dev := s.conn
+	s.mu.Unlock()
 	switch m.T {
 	case term.MsgInput:
 		// Typing is what proves an operator is still there. A resize is not: a
 		// window manager can emit one with nobody at the keyboard, so counting it
 		// as activity would keep an abandoned session alive past its idle timeout.
 		g.touch(s)
-		_, err := dev.Write([]byte(m.D))
-		return err
+		if dev != nil {
+			// A connection that has just ended refuses the write; its end reaches
+			// the window through the done channel, not through this.
+			_, _ = dev.Write([]byte(m.D))
+		}
 	case term.MsgResize:
 		if m.Cols <= 0 || m.Rows <= 0 {
-			return nil
+			return
 		}
+		s.mu.Lock()
+		s.cols, s.rows = m.Cols, m.Rows
+		s.mu.Unlock()
 		if s.rec != nil {
 			s.rec.Resize(m.Cols, m.Rows)
 		}
 		if s.mirror != nil {
 			s.mirror.Resize(m.Cols, m.Rows)
 		}
-		return dev.Resize(m.Cols, m.Rows)
+		if dev != nil {
+			_ = dev.Resize(m.Cols, m.Rows)
+		}
 	}
-	return nil
-}
-
-// emit sends device output to the operator and to the transcript.
-func (g *Gateway) emit(ctx context.Context, ws *websocket.Conn, s *telnetSession, b []byte) {
-	if s.rec != nil {
-		s.rec.Write(b)
-	}
-	// The mirror gets the same bytes. Its Write is non-blocking by contract, so
-	// the operator's output is never held up by how the recorder is coping.
-	if s.mirror != nil {
-		s.mirror.Write(b)
-	}
-	// And so do any supervisors watching live, under the same non-blocking
-	// contract: one falling behind is dropped, never waited for.
-	if s.obs != nil {
-		s.obs.Broadcast(b)
-	}
-	// Bound the write so a browser that has stopped reading cannot wedge the
-	// reader goroutine and, with it, the device session.
-	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	_ = ws.Write(wctx, websocket.MessageBinary, b)
 }
 
 // touch marks the session as in use for the idle reaper.

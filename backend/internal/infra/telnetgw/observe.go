@@ -60,23 +60,9 @@ func (g *Gateway) Observe(w http.ResponseWriter, r *http.Request, sid, orgID uui
 	ob, scrollback := s.obs.Attach()
 	defer s.obs.Detach(ob)
 
-	// The login banner first, as the operator's own console gets it: a telnet
-	// session opens with how you got in, and a supervisor arriving later should
-	// see the same thing rather than a black rectangle.
-	s.mu.Lock()
-	banner := append([]byte(nil), s.banner...)
-	s.mu.Unlock()
-	if len(banner) > 0 {
-		wctx, wcancel := context.WithTimeout(ctx, 30*time.Second)
-		err := c.Write(wctx, websocket.MessageBinary, banner)
-		wcancel()
-		if err != nil {
-			return true
-		}
-	}
-
-	// The screen as it stands, before the live stream. Without it a supervisor
-	// joining mid-command sees a cursor on an empty page.
+	// The screen as it stands, before the live stream — starting with the login,
+	// which is in the scrollback, so a supervisor arriving later sees how the
+	// session got in rather than a black rectangle, or a cursor on an empty page.
 	if len(scrollback) > 0 {
 		wctx, wcancel := context.WithTimeout(ctx, 30*time.Second)
 		err := c.Write(wctx, websocket.MessageBinary, scrollback)

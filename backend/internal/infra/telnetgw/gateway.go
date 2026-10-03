@@ -155,19 +155,68 @@ type telnetSession struct {
 	// captured as video. nil unless the device's policy asks for video.
 	mirror access.TerminalMirror
 
-	mu   sync.Mutex
-	conn *conn
-	// banner is the login output, replayed to whoever attaches so the operator
-	// sees how they got in rather than an empty black rectangle.
-	banner []byte
+	dialMu sync.Mutex // serialises (re)dialling the device; see ensureConn
+	mu     sync.Mutex
+	// conn is the device connection. It belongs to the SESSION, not to the
+	// window showing it: it used to be closed whenever that window went away,
+	// so leaving the session page logged out of the device, and coming back
+	// logged in again to an empty screen. Now it is kept until the session ends
+	// or the device drops it. connDone closes when its reader stops, and
+	// connErr says why.
+	conn     *conn
+	connDone chan struct{}
+	connErr  error
+	// dialed marks that the session has had a connection, so a later dial is
+	// recorded as the reconnect it is.
+	dialed bool
+	// cols and rows are the last geometry the operator's window asked for, so a
+	// connection made later starts at the right size.
+	cols, rows int
 
 	// obs is the set of read-only supervisors watching this session. Separate from
-	// `attached`, which keeps one keyboard on the device: watching is not typing,
-	// so it neither contends for that flag nor is limited to one viewer.
+	// the keyboard (see viewerGen): watching is not typing, so it neither
+	// contends for it nor is limited to one viewer.
 	obs *term.Observers
+	// op is the operator's own view, with the same scrollback — which now holds
+	// the login, so a window attaching later shows how the session got in.
+	op *term.Observers
 
-	attached bool
-	closed   bool
+	// viewerGen and viewerCancel give the keyboard to one window at a time; a
+	// newer one takes it over (see sshgw, which works the same way).
+	viewerGen    uint64
+	viewerCancel context.CancelFunc
+	closed       bool
+}
+
+func (s *telnetSession) takeOver(cancel context.CancelFunc) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.viewerCancel != nil {
+		s.viewerCancel()
+	}
+	s.viewerGen++
+	s.viewerCancel = cancel
+	return s.viewerGen
+}
+
+func (s *telnetSession) release(gen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.viewerGen == gen {
+		s.viewerCancel = nil
+	}
+}
+
+func (s *telnetSession) superseded(gen uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.viewerGen != gen
+}
+
+func (s *telnetSession) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 // Establish dials the device and logs in.
@@ -200,6 +249,7 @@ func (g *Gateway) Establish(ctx context.Context, s *access.Session, r access.Cre
 	sess := &telnetSession{
 		id: s.ID, orgID: s.OrganizationID,
 		obs:            term.NewObservers(),
+		op:             term.NewObservers(),
 		token:          randomToken(),
 		expires:        time.Now().Add(g.cfg.SessionTTL),
 		watermark:      s.WatermarkOr(),
@@ -317,10 +367,7 @@ func (g *Gateway) dial(ctx context.Context, s *telnetSession) error {
 		// Their keystrokes are not recorded — only device output is — so a
 		// password typed at the prompt does not land in the transcript, the same
 		// guarantee an injected credential gets.
-		s.mu.Lock()
-		s.conn = c
-		s.banner = nil
-		s.mu.Unlock()
+		g.attachConn(s, c)
 		return nil
 	}
 
@@ -334,11 +381,6 @@ func (g *Gateway) dial(ctx context.Context, s *telnetSession) error {
 
 	banner = redact(banner, cred.Secret)
 
-	s.mu.Lock()
-	s.conn = c
-	s.banner = trimBanner(banner, g.cfg.MaxBannerBytes)
-	s.mu.Unlock()
-
 	// The login output is the start of the session and belongs in both captures.
 	if s.rec != nil {
 		s.rec.Write(banner)
@@ -346,7 +388,72 @@ func (g *Gateway) dial(ctx context.Context, s *telnetSession) error {
 	if s.mirror != nil {
 		s.mirror.Write(banner)
 	}
+	// And at the top of the screen a window attaching later is shown, so the
+	// operator sees how they got in rather than an empty black rectangle.
+	tail := trimBanner(banner, g.cfg.MaxBannerBytes)
+	if s.obs != nil {
+		s.obs.Broadcast(tail)
+	}
+	if s.op != nil {
+		s.op.Broadcast(tail)
+	}
+	g.attachConn(s, c)
 	return nil
+}
+
+// attachConn makes c the session's device connection and starts reading it.
+func (g *Gateway) attachConn(s *telnetSession, c *conn) {
+	done := make(chan struct{})
+	s.mu.Lock()
+	s.conn, s.connDone, s.connErr, s.dialed = c, done, nil, true
+	cols, rows := s.cols, s.rows
+	s.mu.Unlock()
+	if cols > 0 && rows > 0 {
+		_ = c.Resize(cols, rows)
+	}
+	go g.readDevice(s, c, done)
+}
+
+// readDevice copies the device's output to everyone who gets it, until the
+// connection ends.
+func (g *Gateway) readDevice(s *telnetSession, c *conn, done chan struct{}) {
+	buf := make([]byte, 32<<10)
+	var err error
+	for {
+		n, rerr := c.Read(buf)
+		if n > 0 {
+			g.output(s, buf[:n])
+		}
+		if rerr != nil {
+			err = rerr
+			break
+		}
+	}
+	_ = c.Close()
+	s.mu.Lock()
+	if s.conn == c {
+		s.conn = nil
+	}
+	s.connErr = err
+	s.mu.Unlock()
+	close(done)
+}
+
+// output sends device output to the transcript, the video, supervisors and the
+// operator's window. None of them can hold the device up.
+func (g *Gateway) output(s *telnetSession, b []byte) {
+	if s.rec != nil {
+		s.rec.Write(b)
+	}
+	if s.mirror != nil {
+		s.mirror.Write(b)
+	}
+	if s.obs != nil {
+		s.obs.Broadcast(b)
+	}
+	if s.op != nil {
+		s.op.Broadcast(b)
+	}
 }
 
 // End tears the session down and flushes its transcript.
@@ -372,6 +479,9 @@ func (g *Gateway) teardown(s *telnetSession) error {
 	// Drop the supervisors with it, rather than leaving them on a frozen screen.
 	if s.obs != nil {
 		s.obs.CloseAll()
+	}
+	if s.op != nil {
+		s.op.CloseAll()
 	}
 	c := s.conn
 	s.conn = nil

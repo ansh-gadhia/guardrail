@@ -22,7 +22,9 @@ type SessionRepository interface {
 	// Stats returns the live totals across every session in scope.
 	Stats(ctx context.Context, s Scope) (SessionStats, error)
 	// UpdateStatus transitions a session and stamps timing fields.
-	UpdateStatus(ctx context.Context, s Scope, id uuid.UUID, status Status, endReason string, at time.Time) error
+	// UpdateStatus transitions a session. endedBy is the person who ended it, or
+	// nil when none did.
+	UpdateStatus(ctx context.Context, s Scope, id uuid.UUID, status Status, endReason string, endedBy *uuid.UUID, at time.Time) error
 	// CountActive returns the number of active sessions in the tenant.
 	CountActive(ctx context.Context, s Scope) (int, error)
 	// ExpireOverdue marks active sessions past their window as expired and

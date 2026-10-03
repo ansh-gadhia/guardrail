@@ -448,7 +448,7 @@ func (s *Service) RevokeGrant(ctx context.Context, actor iam.Claims, id uuid.UUI
 	}
 	s.recordAuditDetail(ctx, actor, "grant.revoked", &access.Session{DeviceID: g.DeviceID}, meta,
 		audit.ResultSuccess, map[string]any{"grant_id": g.ID.String(), "user": g.UserEmail})
-	s.terminateFor(ctx, actor, g.UserID, g.DeviceID, "standing grant revoked", meta)
+	s.terminateFor(ctx, actor, g.UserID, g.DeviceID, EndedGrantRevoked, meta)
 	return nil
 }
 

@@ -31,6 +31,9 @@ type testSSHServer struct {
 
 	mu       sync.Mutex
 	received []byte
+	// shells counts shells opened, so a test can tell a reattach to the same
+	// shell from a fresh login.
+	shells int
 	// auths counts authentication attempts the server saw. It exists so a test can
 	// prove a credential was never offered — "the handshake failed" alone does not
 	// distinguish refusing before auth from sending the password and then failing.
@@ -113,6 +116,9 @@ func (s *testSSHServer) handle(c net.Conn) {
 					_ = r.Reply(true, nil)
 				}
 				if r.Type == "shell" {
+					s.mu.Lock()
+					s.shells++
+					s.mu.Unlock()
 					_, _ = ch.Write([]byte(s.banner))
 				}
 			}
@@ -135,6 +141,12 @@ func (s *testSSHServer) handle(c net.Conn) {
 			}
 		}()
 	}
+}
+
+func (s *testSSHServer) shellCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shells
 }
 
 func (s *testSSHServer) got() string {

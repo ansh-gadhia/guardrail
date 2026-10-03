@@ -758,7 +758,7 @@ func TestIntegration_OneOffStopsBeingInUseWhenItsSessionEnds(t *testing.T) {
 
 	// Ending the session is the only thing that changes, and it has to be enough.
 	if err := f.sessions.UpdateStatus(ctx, f.scope, sessID, domaccess.StatusEnded,
-		"admin_terminate", time.Now()); err != nil {
+		"admin_terminate", nil, time.Now()); err != nil {
 		t.Fatalf("end session: %v", err)
 	}
 

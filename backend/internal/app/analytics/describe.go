@@ -225,10 +225,17 @@ func present(r *AuditRow) {
 	case "session.end":
 		r.Title = "Ended " + article(proto) + " session"
 		r.Note = map[string]string{
-			"admin_terminate": "Ended by an administrator",
-			"idle_timeout":    "Nothing happened in it for too long",
-			"window_expired":  "Its access window closed",
-			"user":            "Closed by the person using it",
+			"ended_by_owner": "Ended by the person using it",
+			"tab_closed":     "The person using it closed the session tab",
+			"terminated":     "Ended for the person using it, by someone who outranks them",
+			"grant_revoked":  "Its standing access was revoked",
+			"idle_timeout":   "Nothing happened in it for too long",
+			"window_expired": "Its access window closed",
+			"user":           "Closed by the person using it",
+			// Before 1.7.2 every end from the console said this, whoever did it:
+			// the person who ended it is the actor on this row, not necessarily an
+			// administrator.
+			"admin_terminate": "Ended from the console",
 		}[d.str("reason")]
 		if refused {
 			r.Title, r.Note = "Refused to end a session", d.str("reason")

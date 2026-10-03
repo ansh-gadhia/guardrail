@@ -257,6 +257,52 @@ func TestTerminate_TearsDownEverything(t *testing.T) {
 	}
 }
 
+// How a session ended is worked out from who ended it. Nothing from the
+// console used to say, so every one read "admin_terminate".
+func TestEndReason(t *testing.T) {
+	owner, other := uuid.New(), uuid.New()
+	cases := []struct {
+		name      string
+		requested string
+		actor     uuid.UUID
+		want      string
+	}{
+		{"the operator presses End session", "", owner, EndedByOwner},
+		{"the operator's tab closes", EndedTabClosed, owner, EndedTabClosed},
+		{"a supervisor ends someone else's", "", other, EndedTerminated},
+		{"a supervisor cannot pass off a termination as a closed tab", EndedTabClosed, other, EndedTerminated},
+		{"the old console value means nothing", "admin_terminate", owner, EndedByOwner},
+		{"an internal reason stands", EndedGrantRevoked, other, EndedGrantRevoked},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := endReason(c.requested, c.actor, owner); got != c.want {
+				t.Errorf("endReason(%q) = %q, want %q", c.requested, got, c.want)
+			}
+		})
+	}
+}
+
+// The person who ended a session is stored with it.
+func TestTerminate_RecordsWhoEndedIt(t *testing.T) {
+	h := newHarness(opts{entitled: true, hasCredential: true})
+	actor := actorClaims()
+	res, err := h.svc.Connect(context.Background(), actor, uuid.New(), ReqMeta{})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := h.svc.Terminate(context.Background(), actor, res.Session.ID, "", ReqMeta{}); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+	got := h.sessions.byID[res.Session.ID]
+	if got.EndReason != EndedByOwner {
+		t.Errorf("end reason = %q, want %q", got.EndReason, EndedByOwner)
+	}
+	if got.EndedBy == nil || *got.EndedBy != actor.UserID {
+		t.Errorf("ended by = %v, want %v", got.EndedBy, actor.UserID)
+	}
+}
+
 // --- Delivery routing: recorded devices isolate, the rest are proxied ---
 
 func TestConnectRoutesRecordedDeviceToIsolation(t *testing.T) {

@@ -48,10 +48,13 @@ func (g *HTTPGateway) tunnelDirector(target *url.URL, headers map[string]string,
 		auth.apply(req)
 		// Strip forwarded identity that could confuse the device.
 		req.Header.Del("X-Forwarded-For")
-		// Accept-Encoding is deliberately NOT stripped here, unlike the path-mode
-		// director. That header is dropped there so ModifyResponse can rewrite HTML
-		// bodies without a gzip/br decode step. This mode never touches a body, so
-		// the device's compression is passed straight through to the browser.
+		// Uncompressed, as in path mode, so the response can be searched for the
+		// device's references to itself (see selfref.go). This mode used to pass
+		// bodies through untouched, and an appliance that wrote its own
+		// http:// address into its pages came up broken: blocked as mixed content,
+		// or posting its login straight to the device. The hop is GuardRail to a
+		// device on its own network, where compression buys little.
+		req.Header.Del("Accept-Encoding")
 	}
 }
 
@@ -85,30 +88,31 @@ func rebaseTunnelOrigin(req *http.Request, target *url.URL, tunnelHost string) {
 	req.Header.Set("Referer", u.String())
 }
 
-// modifyTunnelResponse is the only response rewriting this mode performs, and it
-// is confined to headers. Compare rewrite.go, which has to parse and rewrite HTML.
+// modifyTunnelResponse is the only response rewriting this mode performs. It
+// never injects markup — compare rewrite.go, which has to — and it changes a
+// body only where the device names its own address.
 //
-// Three things, each a direct consequence of the host swap:
+// Four things, each a direct consequence of the host swap:
 //
 //   - Set-Cookie Domain= is stripped so device cookies bind to the tunnel host.
 //     A device that sets Domain=appliance.corp would otherwise emit a cookie the
 //     browser rejects outright, silently logging the operator out.
-//   - An absolute Location naming the device origin is re-pointed at the tunnel
-//     host, so a redirect does not bounce the browser to the device's own IP
-//     (where it has no credential and no route from the operator's network).
+//   - The device's references to its own address — in a redirect, a refresh,
+//     its Content-Security-Policy, and the text of its pages, styles and
+//     scripts — are re-pointed at the tunnel host (see selfref.go), so nothing
+//     bounces the browser to the device's own IP, where it has no credential and
+//     no route from the operator's network.
 //   - Strict-Transport-Security is dropped so a device's HSTS policy cannot be
 //     applied to the tunnel domain, where it would outlive the session and pin
 //     every future subdomain.
 func modifyTunnelResponse(target *url.URL, tunnelHost string) func(*http.Response) error {
-	deviceOrigin := target.Scheme + "://" + target.Host
-	tunnelOrigin := "https://" + tunnelHost
+	self := newSelfRefRewriter(target, "https://"+tunnelHost)
+	csp := newSelfRefRewriter(target, "'self'")
 	return func(resp *http.Response) error {
 		stripCookieDomain(resp.Header)
-		if loc := resp.Header.Get("Location"); strings.HasPrefix(loc, deviceOrigin) {
-			resp.Header.Set("Location", tunnelOrigin+strings.TrimPrefix(loc, deviceOrigin))
-		}
+		self.rewriteHeaders(resp.Header, csp)
 		resp.Header.Del("Strict-Transport-Security")
-		return nil
+		return self.rewriteBody(resp)
 	}
 }
 

@@ -153,7 +153,9 @@ func (g *HTTPGateway) Establish(ctx context.Context, s *access.Session, r access
 		// /proxy/<sid>/. No watermark is injected on this path — see modifyResponse.
 		//nolint:bodyclose // ModifyResponse inspects the upstream response and hands
 		// it on; closing the body here would truncate the reply to the operator.
-		ModifyResponse: modifyResponse(prefix),
+		ModifyResponse: modifyResponseFor(prefix,
+			newSelfRefRewriter(target, strings.TrimSuffix(prefix, "/")),
+			newSelfRefRewriter(target, "'self'")),
 		// Never leak upstream errors (which could echo device internals) to the
 		// user; log-and-generic is applied by the caller's middleware.
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {

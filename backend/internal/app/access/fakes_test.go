@@ -42,6 +42,7 @@ type statusUpdate struct {
 	id     uuid.UUID
 	status access.Status
 	reason string
+	by     *uuid.UUID
 }
 
 func newFakeSessions() *fakeSessions {
@@ -87,12 +88,14 @@ func (f *fakeSessions) Stats(context.Context, access.Scope) (access.SessionStats
 	return f.stats, nil
 }
 
-func (f *fakeSessions) UpdateStatus(_ context.Context, _ access.Scope, id uuid.UUID, st access.Status, reason string, _ time.Time) error {
+func (f *fakeSessions) UpdateStatus(_ context.Context, _ access.Scope, id uuid.UUID, st access.Status, reason string, by *uuid.UUID, _ time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.statuses = append(f.statuses, statusUpdate{id: id, status: st, reason: reason})
+	f.statuses = append(f.statuses, statusUpdate{id: id, status: st, reason: reason, by: by})
 	if s, ok := f.byID[id]; ok {
 		s.Status = st
+		s.EndReason = reason
+		s.EndedBy = by
 	}
 	return nil
 }

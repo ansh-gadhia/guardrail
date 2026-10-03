@@ -24,7 +24,8 @@ const sessCols = `id, organization_id, user_id, device_id,
 	protocol, status,
 	granted_from, granted_until, COALESCE(host(client_ip),''), COALESCE(user_agent,''),
 	COALESCE(gateway_node,''), started_at, ended_at, COALESCE(end_reason,''), created_at,
-	COALESCE(watermark,''), last_activity_at`
+	COALESCE(watermark,''), last_activity_at,
+	ended_by, COALESCE((SELECT u.email::text FROM users u WHERE u.id = ended_by), '')`
 
 func scanSession(row pgx.Row) (*access.Session, error) {
 	var s access.Session
@@ -35,7 +36,7 @@ func scanSession(row pgx.Row) (*access.Session, error) {
 		&s.GatewayNode, &s.StartedAt, &s.EndedAt, &s.EndReason, &s.CreatedAt,
 		// Empty for a session predating the column; WatermarkOr then falls back to
 		// the session id, which is what those sessions were actually drawn with.
-		&s.Watermark, &s.LastActivityAt); err != nil {
+		&s.Watermark, &s.LastActivityAt, &s.EndedBy, &s.EndedByEmail); err != nil {
 		return nil, err
 	}
 	s.Protocol = access.Protocol(proto)
@@ -84,7 +85,8 @@ const sessColsQ = `s.id, s.organization_id, s.user_id, s.device_id,
 	s.protocol, s.status,
 	s.granted_from, s.granted_until, COALESCE(host(s.client_ip),''), COALESCE(s.user_agent,''),
 	COALESCE(s.gateway_node,''), s.started_at, s.ended_at, COALESCE(s.end_reason,''), s.created_at,
-	COALESCE(s.watermark,''), s.last_activity_at`
+	COALESCE(s.watermark,''), s.last_activity_at,
+	s.ended_by, COALESCE((SELECT u.email::text FROM users u WHERE u.id = s.ended_by), '')`
 
 // sessDeviceNameSQL is the device label for a listing row.
 //
@@ -192,7 +194,7 @@ func (r *AccessSessionRepo) ListView(ctx context.Context, sc access.Scope, f acc
 				&v.DeviceName, &v.DeviceType, &v.DeviceAddress, &proto, &status,
 				&v.GrantedFrom, &v.GrantedUntil, &v.ClientIP, &v.UserAgent,
 				&v.GatewayNode, &v.StartedAt, &v.EndedAt, &v.EndReason, &v.CreatedAt,
-				&v.Watermark, &v.LastActivityAt, &v.UserEmail, &total); err != nil {
+				&v.Watermark, &v.LastActivityAt, &v.EndedBy, &v.EndedByEmail, &v.UserEmail, &total); err != nil {
 				return err
 			}
 			v.Protocol = access.Protocol(proto)
@@ -264,14 +266,15 @@ func (r *AccessSessionRepo) List(ctx context.Context, sc access.Scope, f access.
 }
 
 // UpdateStatus transitions a session and stamps timing fields.
-func (r *AccessSessionRepo) UpdateStatus(ctx context.Context, sc access.Scope, id uuid.UUID, status access.Status, endReason string, at time.Time) error {
+func (r *AccessSessionRepo) UpdateStatus(ctx context.Context, sc access.Scope, id uuid.UUID, status access.Status, endReason string, endedBy *uuid.UUID, at time.Time) error {
 	return r.db.WithScopeIDs(ctx, sc.OrganizationID, sc.IsSuperAdmin, func(tx pgx.Tx) error {
 		ct, err := tx.Exec(ctx, `
 			UPDATE access_sessions
 			SET status=$2,
 			    ended_at = CASE WHEN $2 IN ('ended','expired') THEN $4 ELSE ended_at END,
-			    end_reason = CASE WHEN $3 <> '' THEN $3 ELSE end_reason END
-			WHERE id=$1`, id, string(status), endReason, at)
+			    end_reason = CASE WHEN $3 <> '' THEN $3 ELSE end_reason END,
+			    ended_by = COALESCE($5, ended_by)
+			WHERE id=$1`, id, string(status), endReason, at, endedBy)
 		if err != nil {
 			return err
 		}

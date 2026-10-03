@@ -65,23 +65,35 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
    background:rgba(15,23,42,.92);border:1px solid #334155;border-radius:6px;padding:6px 10px;cursor:pointer}
  #paste:hover{background:#1e293b;color:#fff}
  #paste:focus-visible{outline:2px solid #38bdf8;outline-offset:2px}
- #dlgwrap{position:fixed;inset:0;z-index:10;display:none;align-items:center;justify-content:center;
+ #dlgwrap,#fwrap{position:fixed;inset:0;z-index:10;display:none;align-items:center;justify-content:center;
    background:rgba(2,6,23,.55)}
- #dlg{max-width:420px;width:calc(100% - 32px);background:#0f172a;border:1px solid #334155;
+ #dlg,#fdlg{max-width:420px;width:calc(100% - 32px);background:#0f172a;border:1px solid #334155;
    border-radius:10px;padding:16px;font:14px system-ui;color:#e2e8f0;box-shadow:0 20px 50px rgba(0,0,0,.5)}
- #dlgk{font:11px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em;color:#94a3b8}
- #dlgm{margin:8px 0 12px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+ #dlgk,#fk{font:11px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.08em;color:#94a3b8}
+ #dlgm,#fmsg{margin:8px 0 12px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+ #fin{width:100%;box-sizing:border-box;margin-bottom:8px;font:13px system-ui;color:#cbd5e1}
+ #fstat{min-height:18px;margin-bottom:10px;font:12px system-ui;color:#94a3b8}
  #dlgi{width:100%;box-sizing:border-box;margin-bottom:12px;padding:7px 9px;border-radius:6px;
    border:1px solid #334155;background:#020617;color:#e2e8f0;font:13px system-ui}
- #dlgb{display:flex;gap:8px;justify-content:flex-end}
- #dlgb button{font:13px system-ui;padding:6px 14px;border-radius:6px;cursor:pointer;border:1px solid #334155;
+ #dlgb,#fb{display:flex;gap:8px;justify-content:flex-end}
+ #dlgb button,#fb button{font:13px system-ui;padding:6px 14px;border-radius:6px;cursor:pointer;border:1px solid #334155;
    background:#1e293b;color:#e2e8f0}
- #dlgok{background:#0ea5e9;border-color:#0ea5e9;color:#04202e;font-weight:600}
+ #dlgok,#fok{background:#0ea5e9;border-color:#0ea5e9;color:#04202e;font-weight:600}
+ #fok:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <div id="robar" hidden><span id="rodot"></span><span id="rotext">Watching — read-only. Nothing you type or click is sent.</span></div>
 <div id="wrap"><canvas id="screen" width="__DEV_W__" height="__DEV_H__" tabindex="0"></canvas></div>
 <div id="status">Connecting to session…</div>
 <button id="paste" type="button" title="Paste your clipboard into the device (Ctrl+V goes to your own browser, not the device)">Paste clipboard</button>
+<div id="fwrap" role="dialog" aria-modal="true" aria-labelledby="fmsg">
+ <div id="fdlg">
+  <div id="fk">File requested by the device</div>
+  <div id="fmsg">The device is asking for a file. Choose it on this computer and it is handed to the device.</div>
+  <input id="fin" type="file" />
+  <div id="fstat"></div>
+  <div id="fb"><button id="fno" type="button">Cancel</button><button id="fok" type="button" disabled>Upload</button></div>
+ </div>
+</div>
 <div id="dlgwrap" role="dialog" aria-modal="true" aria-labelledby="dlgm">
  <div id="dlg">
   <div id="dlgk">Message from device</div>
@@ -179,6 +191,7 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
      dok=document.getElementById('dlgok'), dno=document.getElementById('dlgno');
  function onNote(raw){
    var n; try{ n=JSON.parse(raw); }catch(e){ return; }
+   if(n.t==='file'){ onFileRequest(n); return; }
    if(n.t!=='dialog') return;
    dm.textContent=n.message||'';
    dk.textContent=n.kind==='beforeunload'?'Leave this page?':'Message from device';
@@ -203,6 +216,38 @@ const consoleTmpl = `<!doctype html><html><head><meta charset="utf-8">
    if(e.key==='Enter'){ answer(true); } if(e.key==='Escape'){ answer(false); } });
  dw.addEventListener('keydown',function(e){ e.stopPropagation();
    if(e.key==='Escape'&&dno.style.display!=='none'){ answer(false); } });
+
+ /* Files. The device's page runs on the server, so its file picker would open
+    there, out of sight. The server intercepts it and says so here; the file is
+    chosen on this computer, posted to the session, and handed to the input that
+    asked. XMLHttpRequest rather than fetch, for the progress a firmware image
+    needs. */
+ var fw=document.getElementById('fwrap'), fin=document.getElementById('fin'),
+     fok=document.getElementById('fok'), fno=document.getElementById('fno'), fst=document.getElementById('fstat');
+ function onFileRequest(n){
+   if(READONLY) return;
+   fin.value=''; fin.multiple=!!n.multiple; fok.disabled=true; fst.textContent='';
+   fw.style.display='flex'; fin.focus();
+ }
+ function closeFiles(){ fw.style.display='none'; cv.focus(); }
+ fin.addEventListener('change',function(){ fok.disabled=!fin.files.length; fst.textContent=''; });
+ fno.addEventListener('click',closeFiles);
+ fw.addEventListener('keydown',function(e){ e.stopPropagation(); if(e.key==='Escape') closeFiles(); });
+ fok.addEventListener('click',function(){
+   if(!fin.files.length) return;
+   var fd=new FormData();
+   for(var i=0;i<fin.files.length;i++) fd.append('file',fin.files[i],fin.files[i].name);
+   var x=new XMLHttpRequest();
+   x.open('POST',base+'/__upload__');
+   x.upload.onprogress=function(e){ if(e.lengthComputable) fst.textContent='Uploading… '+Math.round(e.loaded*100/e.total)+'%'; };
+   x.onload=function(){
+     if(x.status>=200&&x.status<300){ closeFiles(); flash(fin.files.length>1?'Files handed to the device':'File handed to the device'); return; }
+     fst.textContent=(x.responseText||('Upload failed ('+x.status+')')).trim(); fok.disabled=false;
+   };
+   x.onerror=function(){ fst.textContent='Upload failed: the connection was lost'; fok.disabled=false; };
+   fok.disabled=true; fst.textContent='Uploading…';
+   x.send(fd);
+ });
 
  /* Paste. The operator's own Ctrl+V targets this page, not the device being
     streamed, so it silently does nothing. This reads the clipboard on a real

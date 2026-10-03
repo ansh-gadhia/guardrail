@@ -660,6 +660,7 @@ func run() error {
 				// effect and the recorder cap silently ignored GUARDRAIL_RECORDING_MAX_BYTES.
 				Quality:           int64(cfg.Browser.Quality),
 				TerminalQuality:   int64(cfg.Browser.TerminalQuality),
+				MaxUploadBytes:    int64(cfg.Browser.MaxUploadMB) << 20,
 				Width:             int64(cfg.Browser.Width),
 				Height:            int64(cfg.Browser.Height),
 				MaxFPS:            cfg.Browser.MaxFPS,

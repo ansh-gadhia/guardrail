@@ -401,6 +401,10 @@ export interface Session {
   // closed long after this was not that long of access.
   last_activity_at?: string;
   end_reason?: string;
+  // Who ended it from the console, when a person did: the user themselves, or
+  // someone who outranks them. Absent for the timeouts and failed connects.
+  ended_by?: string;
+  ended_by_email?: string;
 }
 
 // Paged is a listing that reports how many rows exist beyond the page returned.

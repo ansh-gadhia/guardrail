@@ -35,23 +35,36 @@ import (
 // session rests on the audit trail; the burned-into-pixels watermark that is an
 // actual control lives in browser isolation, which is where recorded devices go.
 func modifyResponse(prefix string) func(*http.Response) error {
+	//nolint:bodyclose // a ModifyResponse hook hands the body on; closing it would truncate the reply
+	return modifyResponseFor(prefix, nil, nil)
+}
+
+// modifyResponseFor is modifyResponse that also re-points the device's
+// references to itself (see selfref.go): self rewrites them to the session
+// prefix, csp to 'self' in the device's Content-Security-Policy. Either may be nil.
+func modifyResponseFor(prefix string, self, csp *selfRefRewriter) func(*http.Response) error {
 	return func(resp *http.Response) error {
+		// Before the root-absolute rebasing below: an absolute self-reference
+		// becomes an already-prefixed path, which that rebasing leaves alone.
+		self.rewriteHeaders(resp.Header, csp)
 		rebaseLocation(resp, prefix)
 		rebaseCookies(resp, prefix)
 
 		// Only a response the browser will RENDER gets rewritten. Content-Type is
 		// not enough to decide that: appliances answer XHR with text/html and mean
-		// "data", not "page".
+		// "data", not "page". Data is passed through byte for byte — except for
+		// the device's own address, which would send the page's scripts around
+		// GuardRail.
 		if !rendersAsDocument(resp) {
-			return nil
+			return self.rewriteBody(resp)
 		}
 
 		// A device that declares a non-HTML type is taken at its word: there is
-		// nothing to rewrite in a stylesheet or a PNG, and reading their bodies
-		// here would buffer every asset in memory for no reason.
+		// no markup to inject into a stylesheet or a script — only its
+		// self-references to re-point — and a PNG is left alone entirely.
 		ct := resp.Header.Get("Content-Type")
 		if ct != "" && !isHTML(ct) {
-			return nil
+			return self.rewriteBody(resp)
 		}
 
 		// Either it says HTML, or it says nothing at all — and "nothing" has to be
@@ -73,6 +86,7 @@ func modifyResponse(prefix string) func(*http.Response) error {
 			restoreBody(resp, body)
 			return nil
 		}
+		body, _ = self.rewrite(body)
 		return rewriteHTML(resp, prefix, body)
 	}
 }

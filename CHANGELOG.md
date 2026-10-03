@@ -12,8 +12,53 @@ into the binary at build time (`-ldflags -X main.version`) and surfaced at
 
 ## [Unreleased]
 
+### Added
+
+- **Uploading files into an isolated session.** A device opened in the
+  isolated browser runs its page on the server, so when it asked for a file — a
+  firmware image, a configuration restore, a certificate — its file picker
+  opened on the server, out of sight, and there was no way to give the device a
+  file at all. The picker is now intercepted: the viewer shows its own dialog,
+  the operator chooses the file on their computer (with upload progress), and it
+  is handed to the very input that asked. The endpoint only accepts files while
+  the device is asking for one; files are staged per session and deleted when
+  the session ends; and every upload goes on the session's timeline with its
+  name, size and SHA-256. `GUARDRAIL_ISOLATION_MAX_UPLOAD_MB` sets the size
+  limit (default 100), and Traefik now allows a request 15 minutes to arrive, so
+  a large image over a slow link is not cut off at 60 seconds.
+
 ### Fixed
 
+- **Leaving an SSH or telnet session no longer throws it away.** The shell was
+  opened per browser window and closed with it, so going to another page and
+  coming back logged in again to an empty terminal, and killed whatever was
+  running; telnet hung up on the device outright. The shell and the device
+  connection now belong to the session: coming back reattaches to the same
+  shell with the screen as it was, output while nobody had the page open is
+  still recorded and watchable, and a new connection is made only if the device
+  itself dropped it. Opening the session in a second window hands that window
+  the keyboard, and the first says "this session is open in another window"
+  instead of fighting it.
+- **A session's record says who ended it, and how.** Every session ended from
+  the console was recorded as "admin_terminate", whoever ended it — the operator
+  pressing End session, the operator closing the tab, and a supervisor cutting
+  someone off all read the same, and none said who. Each now says which, with
+  the person: "Ended by …  (their own session)", "Ended when … closed the
+  session tab", "Terminated by …", alongside the timeouts and failed connects,
+  which name nobody. The browser can no longer supply its own end reason, so a
+  termination cannot be passed off as anything else. Sessions ended before this
+  are filled in from the audit trail when the update is applied.
+- **Plain-HTTP devices work in Reverse proxy mode.** Embedded web UIs often
+  write their own full address into what they send — a redirect to
+  `http://192.168.1.1/login.htm`, a stylesheet or script at that address, a form
+  posting to it. GuardRail passed those through, so the browser went straight to
+  the device: from elsewhere the page never loaded, from the device's own
+  network it bypassed GuardRail entirely (no credential, no recording, no
+  audit), and through the session tunnel the scripts were blocked as mixed
+  content. Every reference a device makes to its own address — in redirects,
+  pages, styles, scripts, JSON and its Content-Security-Policy — is now
+  re-pointed at GuardRail, in both path and tunnel mode. Data responses keep
+  every other byte unchanged.
 - **Terminal recordings are sharp.** An SSH or telnet session recorded as video
   was drawn at the console's 13px, captured pixel for pixel — about 656×424 for
   an 80×24 terminal — saved as JPEG 60, and then stretched by the player to fill

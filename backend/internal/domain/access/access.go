@@ -208,7 +208,13 @@ type Session struct {
 	StartedAt     *time.Time
 	EndedAt       *time.Time
 	EndReason     string
-	CreatedAt     time.Time
+	// EndedBy is the person who ended the session from the console — the
+	// operator themselves, or someone who outranks them — and EndedByEmail their
+	// address for display. Both are empty when no person ended it: the idle
+	// timeout, the access window running out, a connection that never came up.
+	EndedBy      *uuid.UUID
+	EndedByEmail string
+	CreatedAt    time.Time
 	// LastActivityAt is the last time anything happened on this session. It is
 	// what the idle reaper measures from, and it is the only evidence that
 	// separates a session somebody worked in from one that was merely left open:
